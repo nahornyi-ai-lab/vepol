@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# kb-demo — wrapper that points any kb-* command at the demo wiki instead
+#          of the user's real ~/knowledge/ hub.
+#
+# Use this to explore Vepol's commands against the synthetic demo data
+# without touching your real knowledge base. Especially useful for the
+# first-run aha sequence after install.
+#
+# Spec reference: README.md and demo/README.md in this repo.
+#
+# Usage:
+#   kb-demo brief                    # equivalent to KB_HUB=<demo> kb-brief
+#   kb-demo retro
+#   kb-demo search "client renewal"
+#   kb-demo backlog --open
+#   kb-demo task "my new task"       # writes into the demo, not your real KB
+#   kb-demo path                     # prints the demo path and exits
+
+set -euo pipefail
+
+# Locate this repo's demo/ dir.
+# When installed via the standard symlink layout (see install.sh), kb-demo
+# lives in ~/knowledge/bin/ as a symlink to <repo>/bin/kb-demo. We resolve
+# the symlink to find the repo root.
+SCRIPT_REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL_PATH")/.." && pwd)"
+DEMO_HUB="$REPO_ROOT/demo/knowledge"
+
+if [[ ! -d "$DEMO_HUB" ]]; then
+  echo "✘ Demo hub not found at: $DEMO_HUB" >&2
+  echo "  Expected the demo/knowledge/ directory to exist in the Vepol repo." >&2
+  echo "  Run 'kb-demo path' to see where it's looking." >&2
+  exit 1
+fi
+
+# Special command: 'path' just prints the demo dir and exits
+if [[ "${1:-}" == "path" ]]; then
+  echo "$DEMO_HUB"
+  exit 0
+fi
+
+if [[ $# -lt 1 ]]; then
+  cat <<HELP
+kb-demo — run kb-* commands against the Vepol demo wiki.
+
+Demo hub: $DEMO_HUB
+
+Usage:
+  kb-demo brief                Run kb-brief on the demo
+  kb-demo retro                Run kb-retro on the demo
+  kb-demo search "<query>"     Run kb-search on the demo
+  kb-demo backlog [--open]     Run kb-backlog on the demo
+  kb-demo task "<text>"        Run kb-task on the demo (writes to demo backlog)
+  kb-demo doctor               Run kb-doctor on the demo
+  kb-demo path                 Print the demo directory and exit
+  kb-demo help                 Show this message
+
+Any other kb-* subcommand also works:
+  kb-demo <subcommand> [args...]
+HELP
+  exit 0
+fi
+
+# Resolve sub-command
+SUBCMD="$1"
+shift
+TARGET_BIN="$REPO_ROOT/bin/kb-$SUBCMD"
+
+if [[ ! -x "$TARGET_BIN" ]]; then
+  # Try locating it in PATH (e.g. when installed via symlink)
+  if command -v "kb-$SUBCMD" >/dev/null 2>&1; then
+    TARGET_BIN="$(command -v "kb-$SUBCMD")"
+  else
+    echo "✘ kb-$SUBCMD not found at $REPO_ROOT/bin/ or in PATH" >&2
+    echo "  Available subcommands: brief retro search backlog task doctor planner ..." >&2
+    exit 1
+  fi
+fi
+
+# Run the kb-* command with the demo hub.
+# Different scripts read different env-var names — set both to be safe:
+#   KB_HUB         — used by kb-brief, kb-retro, kb-task, kb-backlog, kb-doctor
+#   KNOWLEDGE_HUB  — used by kb-search and a few older scripts
+KB_HUB="$DEMO_HUB" KNOWLEDGE_HUB="$DEMO_HUB" exec "$TARGET_BIN" "$@"

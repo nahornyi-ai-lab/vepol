@@ -75,12 +75,20 @@ def _collect(project_filter, hub_only):
         proj = HUB / "projects"
         if proj.exists():
             for link in sorted(proj.iterdir()):
-                if not link.is_symlink():
+                # Live hubs use symlinks resolving to <project>/knowledge/
+                # Demo hub uses plain dirs with backlog.md flat inside
+                if link.is_symlink():
+                    backlog_path = link.resolve() / "backlog.md"
+                elif link.is_dir():
+                    flat = link / "backlog.md"
+                    nested = link / "knowledge" / "backlog.md"
+                    backlog_path = flat if flat.exists() else nested
+                else:
                     continue
                 slug = link.name
                 if project_filter and slug != project_filter:
                     continue
-                items.extend(_parse_backlog(link.resolve() / "backlog.md", owner=slug))
+                items.extend(_parse_backlog(backlog_path, owner=slug))
     return items
 
 
