@@ -18,12 +18,20 @@ The hero image used at the top of the main README. Combines everything
 on one canvas: substance-field architecture (human + AI agents +
 markdown field), the autonomy journey (Day 1 → Month 6), the
 visible-discipline differentiator (audit trail, cross-agent review,
-coordination triad, self-updating strategy), and the FSL license
-model.
+self-updating strategy), and the FSL license model.
 
 ![Vepol cover](vepol-cover.png)
 
-**File:** `vepol-cover.png` · landscape · professional style · ~4.5 MB
+**File:** `vepol-cover.png` · landscape · editorial · ~1.7 MB · generated via ChatGPT (DALL-E / GPT-Image-1)
+
+### Alternative cover
+
+A second cover-style infographic generated via NotebookLM from the
+same source material. Denser, more textbook-style, includes a
+NotebookLM watermark. Kept as an alternative for documentation
+contexts where the textbook density is useful.
+
+→ [`vepol-cover-notebooklm.png`](vepol-cover-notebooklm.png) · ~4.5 MB
 
 ---
 
