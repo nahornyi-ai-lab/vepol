@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# kb-cycle-launch — LaunchAgent entry point for the daily orchestration cycle.
+#
+# Fires at 07:30 (morning plan) and 20:45 (evening retro). Decides which
+# subcommand to run based on the hour-of-day, then calls
+# `kb-orchestrator-cycle`. Designed to be the single Program for
+# `com.knowledge.orchestrator-cycle.plist`.
+#
+# Behavior:
+#   07:00 ≤ hour < 13:00  → kb-orchestrator-cycle plan --approved-plan <today's plan>
+#                           (no-op if approved_at is unset; the cycle's plan
+#                           subcommand returns 5 in that case, which is fine —
+#                           we log it and exit 0 so the LaunchAgent doesn't
+#                           keep retrying.)
+#   13:00 ≤ hour < 24:00 → kb-orchestrator-cycle retro
+#
+# Logs to ~/knowledge/logs/orchestrator-cycle.log. Stdout/stderr also go
+# to the LaunchAgent's StandardOutPath / StandardErrorPath.
+
+set -uo pipefail
+
+KB_HUB="${KB_HUB:-$HOME/knowledge}"
+LOG_FILE="$KB_HUB/logs/orchestrator-cycle.log"
+mkdir -p "$KB_HUB/logs"
+
+today=$(date +%Y-%m-%d)
+hour_24=$(date +%H)
+ts=$(date +%Y-%m-%dT%H:%M:%S)
+
+log() {
+  echo "[$ts] $*" >> "$LOG_FILE"
+  echo "[$ts] $*" >&2
+}
+
+if [[ $hour_24 -lt 13 ]]; then
+  mode="plan"
+  plan_file="$KB_HUB/daily-plan/$today.md"
+  log "kb-cycle-launch mode=plan plan_file=$plan_file"
+  if [[ ! -f "$plan_file" ]]; then
+    log "no daily-plan/$today.md — skipping (kb-planner may run later)"
+    exit 0
+  fi
+  if ! grep -qE '^approved_at:\s*\S' "$plan_file"; then
+    log "approved_at not set in $plan_file — skipping (waiting for user)"
+    exit 0
+  fi
+  "$KB_HUB/bin/kb-orchestrator-cycle" plan --approved-plan "$plan_file"
+  rc=$?
+  log "plan completed rc=$rc"
+  exit "$rc"
+else
+  mode="retro"
+  log "kb-cycle-launch mode=retro"
+  "$KB_HUB/bin/kb-orchestrator-cycle" retro
+  rc=$?
+  log "retro completed rc=$rc"
+  exit "$rc"
+fi

@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""kb-backlog — unified backlog viewer + atomic mutation suite.
+
+Spec: ~/.claude/plans/rustling-marinating-sketch.md (Phase 1b).
+
+Subcommands (mutations):
+  append <slug> <body>       — append a task line, idempotent on
+                               cycle_source_id|plan_item_id collision
+  update <slug> --plan-item-id <uuid> --field=value [--field=value ...]
+                             — refresh fields on existing open line
+  tombstone <slug> --plan-item-id <uuid> --reason <reason>
+                             — mark line [~] tombstoned-by-<reason>
+  claim <slug> --line N      — [ ] → [>] with claim_id token
+  close <slug> --line N --claim-id <token> --outcome closed|escalated|failed
+                             — finalize claimed line
+  revert <slug> --line N --claim-id <token> [--reason <text>]
+                             — [>] → [ ] (executor crash, agent missed OUTCOME)
+  xfer --plan-item-id <uuid> --from <slug> --to <slug>
+                             — cross-backlog atomic move (X1-X4)
+  recover <slug>             — finalize dangling prepared transactions
+  preflight <slug>           — scan slug's audit journal for corruption
+
+Default (no subcommand): list mode (back-compat). See `kb-backlog list --help`.
+
+All mutation subcommands acquire required locks in canonical order:
+    _xfer.lock < <slug-A>.lock < <slug-B>.lock < spawns.lock
+
+Each mutation runs preflight (refuses on duplicate-terminal corruption) +
+recovery (idempotently finalizes any dangling prepared) before applying.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import sys
+
+# Make `from _kb_backlog import ...` work when this script is invoked from any cwd.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from _kb_backlog import journal, locks, ops, parsing, preflight as preflight_mod, view, xfer  # noqa: E402
+
+
+def _emit(result: dict, json_out: bool) -> int:
+    """Print result. Return exit code based on status."""
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        for k, v in result.items():
+            print(f"{k}: {v}")
+    status = result.get("status", "")
+    code_map = {
+        "appended": 0, "updated": 0, "tombstoned": 0, "claimed": 0,
+        "closed": 0, "reverted": 0, "xferred": 0, "noop": 0, "ok": 0,
+        "skipped": 5,
+        "drift": 23,
+        "duplicate": 6,
+        "ambiguous": 6,
+        "not-found": 1,
+        "no-such-line": 1,
+        "not-open": 1,
+        "not-claimed": 1,
+        "bad-outcome": 1,
+        "bad-args": 1,
+        "parse-failed": 1,
+    }
+    return code_map.get(status, 0)
+
+
+def _add_view_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--all", action="store_true", help="Include in_progress and done")
+    p.add_argument("--open", action="store_true", help="Only open (default)")
+    p.add_argument("--in-progress", action="store_true", dest="in_progress")
+    p.add_argument("--done", action="store_true", help="Only done (recent 20)")
+    p.add_argument("--project", help="Filter by project slug")
+    p.add_argument("--hub-only", action="store_true", help="Only hub-level backlog")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="kb-backlog",
+        description="Unified backlog viewer + atomic mutation suite (Phase 1b).",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    # list (default)
+    pp = sub.add_parser("list", help="List backlog items (default)")
+    _add_view_args(pp)
+
+    # append
+    pa = sub.add_parser("append", help="Append a task to a backlog (idempotent)")
+    pa.add_argument("slug")
+    pa.add_argument("body")
+    pa.add_argument("--cycle-source-id", dest="cycle_source_id")
+    pa.add_argument("--plan-item-id", dest="plan_item_id")
+    pa.add_argument("--auto", action="store_true")
+    pa.add_argument("--prompt", help="inline prompt for the executor")
+    pa.add_argument("--by", default="self", choices=["hub", "user", "self", "executor"])
+    pa.add_argument("--due", help="due: <when>")
+    pa.add_argument("--context", help="context: <one-liner>")
+    pa.add_argument("--lock-timeout", type=float, default=30.0)
+    pa.add_argument("--json", action="store_true", dest="json_out")
+
+    # update
+    pu = sub.add_parser("update", help="Update an existing open line by plan_item_id")
+    pu.add_argument("slug")
+    pu.add_argument("--plan-item-id", dest="plan_item_id", required=True)
+    pu.add_argument("--field", action="append", dest="fields", default=[],
+                    help="key=value (repeatable)")
+    pu.add_argument("--by", default="hub")
+    pu.add_argument("--lock-timeout", type=float, default=30.0)
+    pu.add_argument("--json", action="store_true", dest="json_out")
+
+    # tombstone
+    pt = sub.add_parser("tombstone", help="Mark line as tombstoned-by-<reason>")
+    pt.add_argument("slug")
+    pt.add_argument("--plan-item-id", dest="plan_item_id", required=True)
+    pt.add_argument("--reason", required=True, help="e.g. xfer-<id>, parent-move, decomposed")
+    pt.add_argument("--by", default="hub")
+    pt.add_argument("--lock-timeout", type=float, default=30.0)
+    pt.add_argument("--json", action="store_true", dest="json_out")
+
+    # claim
+    pc = sub.add_parser("claim", help="[ ] → [>] with picked + claim_id token")
+    pc.add_argument("slug")
+    pc.add_argument("--line", type=int, required=True)
+    pc.add_argument("--by", default="executor")
+    pc.add_argument("--lock-timeout", type=float, default=30.0)
+    pc.add_argument("--json", action="store_true", dest="json_out")
+
+    # close
+    px = sub.add_parser("close", help="[>] → [x] with outcome (closed|escalated|failed)")
+    px.add_argument("slug")
+    px.add_argument("--line", type=int, required=True)
+    px.add_argument("--claim-id", dest="claim_id", required=True)
+    px.add_argument("--outcome", required=True, choices=sorted(ops.VALID_OUTCOMES))
+    px.add_argument("--reason", help="result: <text>")
+    px.add_argument("--by", default="executor")
+    px.add_argument("--lock-timeout", type=float, default=30.0)
+    px.add_argument("--json", action="store_true", dest="json_out")
+
+    # revert
+    pr = sub.add_parser("revert", help="[>] → [ ] (executor crash, agent missed OUTCOME)")
+    pr.add_argument("slug")
+    pr.add_argument("--line", type=int, required=True)
+    pr.add_argument("--claim-id", dest="claim_id", required=True)
+    pr.add_argument("--reason", default="reverted")
+    pr.add_argument("--by", default="executor")
+    pr.add_argument("--lock-timeout", type=float, default=30.0)
+    pr.add_argument("--json", action="store_true", dest="json_out")
+
+    # xfer
+    pxf = sub.add_parser("xfer", help="Cross-backlog atomic move (X1-X4 phases)")
+    pxf.add_argument("--plan-item-id", dest="plan_item_id", required=True)
+    pxf.add_argument("--from", dest="src", required=True)
+    pxf.add_argument("--to", dest="dst", required=True)
+    pxf.add_argument("--by", default="hub")
+    pxf.add_argument("--cycle-source-id", dest="cycle_source_id",
+                     help="Stamp destination row with this cycle_source_id (atomic with X3)")
+    pxf.add_argument("--lock-timeout", type=float, default=30.0)
+    pxf.add_argument("--json", action="store_true", dest="json_out")
+
+    # recover
+    prv = sub.add_parser("recover", help="Finalize dangling prepared transactions for slug")
+    prv.add_argument("slug")
+    prv.add_argument("--lock-timeout", type=float, default=30.0)
+    prv.add_argument("--json", action="store_true", dest="json_out")
+
+    # preflight
+    ppr = sub.add_parser("preflight", help="Scan slug's audit journal for corruption")
+    ppr.add_argument("slug")
+    ppr.add_argument("--json", action="store_true", dest="json_out")
+
+    # If no subcommand and no args at all → run viewer with defaults.
+    # If first arg is one of the view flags, also run viewer.
+    args, extra = p.parse_known_args()
+    if args.cmd is None:
+        # Re-parse as bare list
+        list_p = argparse.ArgumentParser(prog="kb-backlog (list)")
+        _add_view_args(list_p)
+        list_args = list_p.parse_args(extra)
+        return view.run_view(list_args)
+
+    cmd = args.cmd
+    try:
+        if cmd == "list":
+            return view.run_view(args)
+
+        if cmd == "append":
+            res = ops.op_append(
+                args.slug, args.body,
+                cycle_source_id=args.cycle_source_id,
+                plan_item_id=args.plan_item_id,
+                auto=args.auto, prompt=args.prompt,
+                by=args.by, due=args.due, context=args.context,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "update":
+            updates: dict[str, str] = {}
+            for kv in args.fields:
+                if "=" not in kv:
+                    print(f"✘ --field expects key=value, got {kv!r}", file=sys.stderr)
+                    return 1
+                k, v = kv.split("=", 1)
+                updates[k.strip()] = v.strip()
+            res = ops.op_update(
+                args.slug,
+                plan_item_id=args.plan_item_id,
+                field_updates=updates,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "tombstone":
+            res = ops.op_tombstone(
+                args.slug,
+                plan_item_id=args.plan_item_id,
+                reason=args.reason,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "claim":
+            res = ops.op_claim(
+                args.slug,
+                line=args.line,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "close":
+            res = ops.op_close(
+                args.slug,
+                line=args.line,
+                claim_id=args.claim_id,
+                outcome=args.outcome,
+                reason=args.reason,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "revert":
+            res = ops.op_revert(
+                args.slug,
+                line=args.line,
+                claim_id=args.claim_id,
+                reason=args.reason,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "xfer":
+            res = xfer.op_xfer(
+                plan_item_id=args.plan_item_id,
+                src=args.src,
+                dst=args.dst,
+                by=args.by,
+                cycle_source_id=args.cycle_source_id,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "recover":
+            # CR-Phase5-CR4 fix: recovery must include coordinator-level
+            # dangling xfers, not just per-slug prepared transactions. The
+            # `_resolve_dangling_xfers_for_slug` helper in ops.py handles
+            # this — it acquires the full xfer lock stack, runs preflight
+            # + per-file recovery + coordinator recovery, then releases.
+            # Calling it BEFORE the per-slug recover gives both layers.
+            ops._resolve_dangling_xfers_for_slug(args.slug, args.lock_timeout)
+            # Preflight + per-slug recovery under the same lock window:
+            # check-then-recover happens atomically under <slug>.lock +
+            # spawns.lock so corruption cannot appear between check and act.
+            with locks.acquire([locks.LockId.slug(args.slug), locks.LockId.spawns()],
+                               timeout_s=args.lock_timeout):
+                report = preflight_mod.preflight_for_slug(args.slug)
+                preflight_mod.assert_no_corruption(report)
+                path = ops.resolve_backlog_path(args.slug)
+                text = path.read_text(encoding="utf-8") if path.is_file() else ""
+                resolutions = journal.recover_pending(args.slug, text)
+            res = {"status": "ok", "slug": args.slug, "resolutions": resolutions}
+            return _emit(res, args.json_out)
+
+        if cmd == "preflight":
+            report = preflight_mod.preflight_for_slug(args.slug)
+            res = {
+                "status": "corruption" if report.has_corruption else "ok",
+                "slug": args.slug,
+                "slug_corruption": [
+                    {"scope": c.scope, "id": c.tx_or_xfer_id, "terminals": c.terminals}
+                    for c in report.slug_corruption
+                ],
+                "xfer_corruption": [
+                    {"scope": c.scope, "id": c.tx_or_xfer_id, "terminals": c.terminals}
+                    for c in report.xfer_corruption
+                ],
+            }
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            return 3 if report.has_corruption else 0
+
+        print(f"unknown subcommand: {cmd}", file=sys.stderr)
+        return 1
+
+    except locks.LockTimeout as exc:
+        print(f"busy: {exc}", file=sys.stderr)
+        return 2
+    except ops.DanglingXferRetryExhausted as exc:
+        # CR3-N2: dangling-xfer retry exhaustion maps to busy (exit 2).
+        # Caller should retry; persistent failure indicates a contention storm
+        # or lock-ordering bug that requires manual investigation.
+        print(f"busy: {exc}", file=sys.stderr)
+        return 2
+    except preflight_mod.JournalCorruption as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 3
+    except SystemExit:
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

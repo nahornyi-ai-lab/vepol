@@ -1,0 +1,62 @@
+#!/bin/zsh
+# Refuse if invoked from the seed copy (orchestrator-seed/...) — running both
+# the live and the seed wrapper at once spawns parallel `claude --channels`
+# sessions that fight for `bot.pid` (Telegram allows one getUpdates consumer
+# per token). See ~/knowledge/incidents.md [2026-04-26].
+case "$0" in
+  */orchestrator-seed/*)
+    echo "kb-channel-telegram-run: seed template, not for direct execution. Use ~/knowledge/bin/$(basename "$0")." >&2
+    exit 2
+    ;;
+esac
+
+# kb-channel-telegram-run — LaunchAgent wrapper for the Telegram channel.
+#
+# Why this exists: `claude --channels` runs a long-lived Claude-session that
+# processes inbound Telegram messages. On 2026-04-18 we observed one freezing
+# after ~3h25m — PID alive, bun plugin consuming Telegram updates, but Claude
+# not generating replies. Detecting "alive but stuck" from outside without
+# instrumenting the upstream plugin is unreliable, so instead we proactively
+# rotate the session every MAX_LIFETIME. Combined with LaunchAgent KeepAlive,
+# this gives us: crash → restart in 30s, drift → restart every 4h.
+#
+# Logs: stdout/stderr captured by LaunchAgent to ~/knowledge/logs/channel-telegram.*.log
+set -u
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+MAX_LIFETIME="${KB_CHANNEL_MAX_LIFETIME:-14400}"  # 4h
+
+stamp() { date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z"; }
+say()   { printf '[%s] channel-telegram: %s\n' "$(stamp)" "$*"; }
+
+say "starting (pid=$$, max_lifetime=${MAX_LIFETIME}s)"
+
+# `claude --channels` refuses to start without a TTY (falls back to --print,
+# which demands stdin). Under launchd stdin is /dev/null, so we wrap with
+# script(1) to allocate a pty. BSD script syntax (macOS): `script -q <file> <cmd>`.
+script -q /dev/null "$HUB/bin/kb-channels-start" &
+CHILD=$!
+say "spawned child pid=$CHILD (via script-pty)"
+
+# Lifetime-capper: after MAX_LIFETIME, TERM then KILL. Exits fast if child already gone.
+(
+  sleep "$MAX_LIFETIME"
+  if kill -0 "$CHILD" 2>/dev/null; then
+    printf '[%s] channel-telegram: lifetime reached, rotating child=%s\n' "$(stamp)" "$CHILD"
+    kill -TERM "$CHILD" 2>/dev/null
+    sleep 30
+    kill -KILL "$CHILD" 2>/dev/null
+  fi
+) &
+KILLER=$!
+
+# Wait for the actual channel; when it exits (self, crash, or lifetime-kill), we exit too.
+wait "$CHILD"
+CODE=$?
+
+# Clean up the lifetime-capper if child exited early on its own.
+kill "$KILLER" 2>/dev/null || true
+wait "$KILLER" 2>/dev/null || true
+
+say "child exited code=$CODE — LaunchAgent will restart us"
+exit "$CODE"

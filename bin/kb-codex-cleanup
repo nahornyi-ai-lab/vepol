@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# kb-codex-cleanup — kill stale codex-companion broker processes and remove orphan tmp dirs.
+#
+# When you interrupt a /codex:review or /codex:rescue mid-run, the broker process
+# (app-server-broker.mjs) and its app-server child can remain alive, holding the
+# workspace lock. Subsequent codex calls in the same cwd will hang indefinitely
+# waiting for the stale broker to release.
+#
+# This script:
+#   1. Finds all broker processes whose --cwd falls under ~/knowledge (or another root).
+#   2. Kills the broker + its app-server peers (pid group).
+#   3. Removes /var/folders/**/cxc-*/ directories whose broker.pid is gone or stale.
+#
+# Usage:
+#   kb-codex-cleanup                # scan everything under $HOME, report and kill.
+#   kb-codex-cleanup --dry-run      # scan only, don't kill.
+#   kb-codex-cleanup --cwd <path>   # only kill brokers serving this cwd.
+#
+# Idempotent; safe to run frequently.
+
+set -euo pipefail
+
+DRY=0
+CWD_FILTER=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --cwd) CWD_FILTER="$2"; shift 2 ;;
+    -h|--help) sed -n '1,25p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+say() { printf '\033[1;36m→\033[0m %s\n' "$1"; }
+kill_pid() {
+  local pid="$1"
+  if [[ "$DRY" -eq 1 ]]; then
+    echo "  (dry-run) would kill PID $pid"
+  else
+    kill "$pid" 2>/dev/null && echo "  killed PID $pid" || echo "  already gone: $pid"
+  fi
+}
+
+# Find codex-companion brokers. Use `ps -eo pid=,args=` with explicit width
+# (ps default truncates; -ww disables all column limits).
+BROKERS=$(ps -ww -eo pid=,args= | awk '/app-server-broker\.mjs/ && !/grep/' || true)
+
+if [[ -z "$BROKERS" ]]; then
+  say "no broker processes found"
+else
+  say "found broker processes:"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    PID=$(echo "$line" | awk '{print $1}')
+    BROKER_CWD=$(echo "$line" | sed -nE 's/.*--cwd ([^ ]+).*/\1/p')
+    if [[ -n "$CWD_FILTER" && "$BROKER_CWD" != "$CWD_FILTER"* ]]; then
+      echo "  skip PID $PID (cwd=$BROKER_CWD)"
+      continue
+    fi
+    echo "  PID $PID · cwd=$BROKER_CWD"
+    kill_pid "$PID"
+    # also kill app-server children (they'll typically die with broker, but be explicit)
+    for child in $(pgrep -P "$PID" 2>/dev/null || true); do
+      kill_pid "$child"
+    done
+  done <<< "$BROKERS"
+fi
+
+# Clean up orphan /tmp/cxc-* directories
+TMP_ROOT="${TMPDIR:-/tmp}"
+if [[ -d "$TMP_ROOT" ]]; then
+  say "scanning $TMP_ROOT for stale cxc-* dirs"
+  for d in "$TMP_ROOT"cxc-*; do
+    [[ -d "$d" ]] || continue
+    PID_FILE="$d/broker.pid"
+    if [[ -f "$PID_FILE" ]]; then
+      PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+      if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+        echo "  active: $d (PID $PID still alive)"
+        continue
+      fi
+    fi
+    if [[ "$DRY" -eq 1 ]]; then
+      echo "  (dry-run) would remove $d"
+    else
+      rm -rf "$d" && echo "  removed $d"
+    fi
+  done
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# Phase 8 + incident-2026-04-25: telegram channel plugin duplicates
+# ─────────────────────────────────────────────────────────────────
+#
+# The com.knowledge.channel-telegram LaunchAgent has KeepAlive=true.
+# Each fresh Claude session that touches the plugin can spawn a fresh
+# `bun run --cwd .../telegram/0.0.6 start` wrapper; the prior wrapper
+# is not killed, so they accumulate (17 stale ones = 100% CPU = mac
+# overheats — happened today, see incidents.md).
+#
+# Strategy: find all telegram-channel `bun run` wrappers; if N > 1,
+# keep the most-recently-started (assumed LaunchAgent-managed) and
+# kill the older N-1 + their bun-server.ts children.
+say "scanning for stale telegram channel plugin instances"
+TG_WRAPPERS=$(ps -ww -eo pid=,lstart=,args= \
+  | awk '/bun run.*claude-plugins-official\/telegram/ && !/grep/' \
+  || true)
+TG_COUNT=$(echo "$TG_WRAPPERS" | grep -c . 2>/dev/null || echo 0)
+TG_COUNT="${TG_COUNT//[^0-9]/}"  # strip non-digits (macOS grep quirk)
+TG_COUNT="${TG_COUNT:-0}"
+
+if [[ "$TG_COUNT" -eq 0 ]]; then
+  say "  no telegram channel instances running — bootstrap LaunchAgent if expected"
+  if [[ "$DRY" -eq 0 && -f "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" ]]; then
+    launchctl bootstrap "gui/$UID" \
+      "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" 2>/dev/null \
+      && echo "  re-bootstrapped channel-telegram" \
+      || echo "  bootstrap failed (may already be loaded)"
+  fi
+elif [[ "$TG_COUNT" -eq 1 ]]; then
+  say "  exactly 1 telegram channel instance — clean"
+else
+  say "  $TG_COUNT telegram channel instances — culling all + bootstrapping clean"
+  # macOS BSD utilities don't support `head -n -1`, and start-time sorting via
+  # `lstart` is fragile. Simplest robust approach: kill ALL wrappers and
+  # ALL bun server.ts processes (both wrappers and orphaned children),
+  # then re-bootstrap the LaunchAgent. KeepAlive=true gives us exactly one.
+  if [[ "$DRY" -eq 1 ]]; then
+    echo "  (dry-run) would kill all telegram wrappers + server.ts + bootstrap"
+  else
+    pkill -f 'bun run.*claude-plugins-official/telegram' 2>/dev/null || true
+    sleep 1
+    pkill -9 -f 'bun server\.ts' 2>/dev/null || true
+    sleep 1
+    if [[ -f "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" ]]; then
+      launchctl bootout "gui/$UID" \
+        "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" 2>/dev/null || true
+      sleep 1
+      launchctl bootstrap "gui/$UID" \
+        "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" 2>/dev/null \
+        && echo "  re-bootstrapped channel-telegram (1 clean instance)" \
+        || echo "  bootstrap failed — load manually"
+    fi
+    sleep 2
+    REMAINING=$(ps -ww -eo pid=,args= 2>/dev/null \
+      | awk '/bun run.*claude-plugins-official\/telegram/ && !/grep/' \
+      | wc -l | tr -d ' ')
+    echo "  remaining instances: $REMAINING"
+  fi
+fi
+
+say "done"

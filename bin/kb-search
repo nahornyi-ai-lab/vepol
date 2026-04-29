@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# kb-search — поиск по всей базе знаний (хаб + все симлинки проектов).
+# Использует ripgrep, если он установлен; иначе — grep -R (macOS BSD).
+#
+# Usage:
+#   kb-search "query"                         # везде
+#   kb-search "query" --project <slug>       # только один проект
+#   kb-search "query" --hub-only              # только хаб, без проектов
+#
+# По умолчанию ищет только в .md файлах, следуя симлинкам.
+
+set -euo pipefail
+
+HUB="${KNOWLEDGE_HUB:-$HOME/knowledge}"
+
+if [[ $# -lt 1 ]]; then
+  cat >&2 <<EOF
+Usage: kb-search <query> [--project <slug>] [--hub-only]
+
+Примеры:
+  kb-search "cold email"
+  kb-search "reply rate" --project <slug>
+  kb-search "Karpathy" --hub-only
+
+Совет: установи ripgrep для более быстрого/умного поиска — brew install ripgrep
+EOF
+  exit 1
+fi
+
+QUERY="$1"
+shift
+
+PROJECT_FILTER=""
+HUB_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) PROJECT_FILTER="$2"; shift 2 ;;
+    --hub-only) HUB_ONLY=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Собираем список корней.
+# Важно: для симлинков добавляем trailing "/" — BSD grep иначе не войдёт внутрь.
+ROOTS=()
+
+if [[ -n "$PROJECT_FILTER" ]]; then
+  # --project: только один проект, без хаб-файлов
+  link="$HUB/projects/$PROJECT_FILTER"
+  if [[ -L "$link" ]]; then
+    ROOTS+=("$link/")
+  else
+    echo "⚠ проект не найден: $PROJECT_FILTER (нет симлинка $link)" >&2
+    exit 2
+  fi
+else
+  # Хаб-уровневые файлы и папки
+  for f in CLAUDE.md registry.md index.md log.md; do
+    [[ -f "$HUB/$f" ]] && ROOTS+=("$HUB/$f")
+  done
+  for d in concepts people companies solutions raw; do
+    [[ -d "$HUB/$d" ]] && ROOTS+=("$HUB/$d")
+  done
+
+  # Все проекты (симлинки) — если не --hub-only
+  if [[ $HUB_ONLY -eq 0 ]]; then
+    for link in "$HUB"/projects/*; do
+      [[ -L "$link" ]] && ROOTS+=("$link/")
+    done
+  fi
+fi
+
+if [[ ${#ROOTS[@]} -eq 0 ]]; then
+  echo "⚠ нет корней для поиска" >&2
+  exit 3
+fi
+
+# Выбор движка: ripgrep → grep
+if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then
+  exec rg --follow --type md --color=always --heading --line-number "$QUERY" "${ROOTS[@]}"
+else
+  # macOS BSD grep: -R следует симлинкам, --include фильтрует расширение, -n номера строк
+  # --color=always для цвета даже в pipe; || true чтобы не падать если нет совпадений
+  grep -R --include='*.md' --color=always -n "$QUERY" "${ROOTS[@]}" 2>/dev/null || {
+    ec=$?
+    if [[ $ec -eq 1 ]]; then
+      echo "нет совпадений по запросу: $QUERY" >&2
+      exit 0
+    else
+      exit $ec
+    fi
+  }
+fi

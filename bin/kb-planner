@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Runs once per day (via launchd at 00:05). Fetches today's sunrise/sunset
+for the user's location and writes today-plan.json for kb-tick to consume.
+
+Geolocation chain:
+  1. macOS CoreLocationCLI (accurate under VPN/roaming). Requires Location Services permission.
+  2. ip-api.com (fallback; can be wrong under VPN).
+  3. Environment fallback constants: KB_FALLBACK_LAT, KB_FALLBACK_LON, KB_FALLBACK_TZ.
+  4. Hard-coded defaults (0.0, 0.0, UTC) — will produce nonsense sun times; set fallbacks in .secrets.
+
+Timing:
+  brief time = min(sunrise + 5min, 07:00 local)
+  retro time = sunset + 15min
+"""
+import datetime
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import urllib.request
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+PLAN_PATH = HUB / "logs" / "today-plan.json"
+LOG_PATH = HUB / "logs" / "planner.log"
+
+
+def _load_secrets() -> None:
+    """Populate os.environ from $HUB/personal/.secrets if keys not already set.
+    Under launchd, plist EnvironmentVariables doesn't carry personal secrets —
+    this bridges the gap so KB_FALLBACK_* (and future personalization vars) work
+    in the automated path, not only when a user sources .secrets manually."""
+    secrets = HUB / "personal" / ".secrets"
+    if not secrets.exists():
+        return
+    for raw in secrets.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_secrets()
+
+FALLBACK_LAT = float(os.environ.get("KB_FALLBACK_LAT", "0.0"))
+FALLBACK_LON = float(os.environ.get("KB_FALLBACK_LON", "0.0"))
+FALLBACK_TZ = os.environ.get("KB_FALLBACK_TZ", "UTC")
+
+
+def log(msg: str) -> None:
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_PATH.open("a") as f:
+        f.write(f"[{stamp}] {msg}\n")
+
+
+def _geo_corelocation() -> tuple[float, float, str] | None:
+    if shutil.which("CoreLocationCLI") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["CoreLocationCLI", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            log(f"CoreLocationCLI failed: rc={out.returncode} stderr={out.stderr.strip()[:200]}")
+            return None
+        d = json.loads(out.stdout)
+        return float(d["latitude"]), float(d["longitude"]), d.get("timeZone") or FALLBACK_TZ
+    except Exception as e:
+        log(f"CoreLocationCLI error: {e}")
+        return None
+
+
+def _geo_ipapi() -> tuple[float, float, str] | None:
+    try:
+        with urllib.request.urlopen(
+            "http://ip-api.com/json/?fields=lat,lon,timezone,status", timeout=5
+        ) as r:
+            d = json.load(r)
+        if d.get("status") == "success":
+            return d["lat"], d["lon"], d["timezone"]
+    except Exception as e:
+        log(f"ip-api failed: {e}")
+    return None
+
+
+def geo() -> tuple[float, float, str]:
+    for source, fn in (("corelocation", _geo_corelocation), ("ip-api", _geo_ipapi)):
+        result = fn()
+        if result is not None:
+            log(f"geo source={source} lat={result[0]} lon={result[1]} tz={result[2]}")
+            return result
+    log(f"geo: all sources failed, using fallback ({FALLBACK_LAT},{FALLBACK_LON} {FALLBACK_TZ})")
+    return FALLBACK_LAT, FALLBACK_LON, FALLBACK_TZ
+
+
+def sun_times(lat: float, lon: float, tz: str, date: str) -> tuple[datetime.datetime, datetime.datetime]:
+    url = (
+        f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}"
+        f"&tzid={tz}&formatted=0&date={date}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "kb-planner/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        resp = json.load(r)
+    sunrise = datetime.datetime.fromisoformat(resp["results"]["sunrise"])
+    sunset = datetime.datetime.fromisoformat(resp["results"]["sunset"])
+    return sunrise, sunset
+
+
+def main() -> None:
+    today = datetime.date.today().isoformat()
+    lat, lon, tz = geo()
+    sunrise, sunset = sun_times(lat, lon, tz, today)
+    brief = sunrise + datetime.timedelta(minutes=5)
+    cap = sunrise.replace(hour=7, minute=0, second=0, microsecond=0)
+    if brief > cap:
+        brief = cap
+    retro = sunset + datetime.timedelta(minutes=15)
+    now_hm = datetime.datetime.now().strftime("%H:%M")
+    plan = {
+        "date": today,
+        "brief_hm": brief.strftime("%H:%M"),
+        "retro_hm": retro.strftime("%H:%M"),
+        "brief_fired": now_hm > brief.strftime("%H:%M"),
+        "retro_fired": now_hm > retro.strftime("%H:%M"),
+        "sunrise": sunrise.strftime("%H:%M"),
+        "sunset": sunset.strftime("%H:%M"),
+        "lat": lat,
+        "lon": lon,
+        "tz": tz,
+    }
+    PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PLAN_PATH.write_text(json.dumps(plan, indent=2))
+    log(
+        f"planned {today}: brief={plan['brief_hm']} retro={plan['retro_hm']} "
+        f"(sunrise={plan['sunrise']} sunset={plan['sunset']}, {lat},{lon} {tz})"
+    )
+
+
+if __name__ == "__main__":
+    main()

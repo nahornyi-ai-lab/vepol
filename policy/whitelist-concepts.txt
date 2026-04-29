@@ -1,0 +1,23 @@
+# Vepol — public methodology concepts whitelist
+#
+# Default-deny enforcement: only concepts listed here are copied to public `vepol` repo.
+# Format: one concept slug per line, lowercase-kebab-case, no .md extension.
+# Comments allowed (lines starting with #).
+# Adding/removing requires explicit PR review (see CONTRIBUTING.md once published).
+#
+# Read by:
+#   - kb-seed-sync                            — copies only whitelisted concepts to seed
+#   - .git-pre-commit-hook.sh (this repo)     — blocks commits adding non-whitelisted concept files
+#   - .git-pre-push-hook.sh (kb-doctor)       — blocks push if docs/methodology/ contains non-whitelisted slug
+#   - GitHub Actions CI workflow              — fails build on whitelist drift
+#
+# Hash of this file is recorded in the generated build manifest at sync time.
+# See: ~/knowledge/concepts/vepol-product.md §7.2
+
+orchestrated-knowledge-base
+kb-authoring-discipline
+kb-freshness-loop
+triz-for-design
+spec-driven-workflow
+cross-agent-review
+parallel-orchestrators

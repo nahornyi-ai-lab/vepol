@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Runs every 15 minutes via launchd. Reads today-plan.json and fires kb-brief /
+kb-retro when their scheduled time arrives. Marks `brief_fired` / `retro_fired`
+so it only fires once per day. Self-heals: if plan is missing or stale (not for
+today), regenerates it by invoking kb-planner.
+"""
+import datetime
+import json
+import os
+import pathlib
+import subprocess
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+PLAN = HUB / "logs" / "today-plan.json"
+LOG = HUB / "logs" / "planner.log"
+
+
+def log(msg: str) -> None:
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    with LOG.open("a") as f:
+        f.write(f"[{stamp}] tick: {msg}\n")
+
+
+def load_plan() -> dict | None:
+    if not PLAN.exists():
+        return None
+    try:
+        return json.loads(PLAN.read_text())
+    except Exception as e:
+        log(f"plan parse error: {e}")
+        return None
+
+
+def save_plan(plan: dict) -> None:
+    PLAN.write_text(json.dumps(plan, indent=2))
+
+
+def regenerate_plan() -> dict | None:
+    log("regenerating plan via kb-planner")
+    subprocess.run([str(HUB / "bin" / "kb-planner")], check=False)
+    return load_plan()
+
+
+def fire(script: str) -> None:
+    log(f"firing {script}")
+    subprocess.Popen(
+        [str(HUB / "bin" / script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def channel_instances_guard() -> None:
+    """Incident-2026-04-25: every tick (15 min), check telegram channel
+    plugin instance count. If duplicates accumulated, run cleanup. If
+    channel is down, append escalation. Wrapped in try/except so a flap
+    here doesn't break brief/retro firing."""
+    try:
+        proc = subprocess.run(
+            [str(HUB / "bin" / "kb-doctor"), "channel-instances", "--format", "json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        findings = data.get("findings", [])
+        for f in findings:
+            kind = f.get("kind", "")
+            sev = f.get("severity", "")
+            if kind == "channel-instances:duplicate" and sev == "P1":
+                log(f"channel-instances:duplicate detected — running cleanup")
+                subprocess.run(
+                    [str(HUB / "bin" / "kb-codex-cleanup")],
+                    capture_output=True, timeout=30,
+                )
+            elif kind == "channel-instances:down" and sev == "P0":
+                log(f"channel-instances:down detected — re-bootstrapping LaunchAgent")
+                plist = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.knowledge.channel-telegram.plist"
+                if plist.is_file():
+                    subprocess.run(
+                        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
+                        capture_output=True, timeout=10,
+                    )
+    except Exception as exc:
+        log(f"channel-instances guard error (non-fatal): {exc!r}")
+
+
+def main() -> None:
+    today = datetime.date.today().isoformat()
+    now_hm = datetime.datetime.now().strftime("%H:%M")
+
+    # Incident-2026-04-25: telegram channel instance guard runs every tick.
+    channel_instances_guard()
+
+    plan = load_plan()
+    if plan is None or plan.get("date") != today:
+        plan = regenerate_plan()
+        if plan is None:
+            log("plan still missing after regen, abort")
+            return
+
+    # Brief
+    if not plan.get("brief_fired") and now_hm >= plan["brief_hm"]:
+        fire("kb-brief")
+        plan["brief_fired"] = True
+        save_plan(plan)
+
+    # Retro
+    if not plan.get("retro_fired") and now_hm >= plan["retro_hm"]:
+        fire("kb-retro")
+        plan["retro_fired"] = True
+        save_plan(plan)
+
+
+if __name__ == "__main__":
+    main()

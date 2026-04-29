@@ -1,0 +1,2355 @@
+#!/usr/bin/env python3
+"""kb-doctor — deterministic read-path audit for the shared knowledge base.
+
+Phase 1 scope:
+  - registry/project symlink + core files
+  - state freshness and live/skeleton mismatch
+  - open incident aging
+  - backlog due/in-progress hygiene
+
+Spec: ~/knowledge/concepts/kb-freshness-loop.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import datetime as dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shlex
+import shutil
+import sys
+import tempfile
+import time
+from dataclasses import asdict, dataclass
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+TODAY = dt.date.fromisoformat(os.environ.get("KB_DOCTOR_TODAY", dt.date.today().isoformat()))
+
+ACTIVE_STATUSES = {"live", "seeded", "pointer"}
+CORE_FILES = (
+    "README.md",
+    "index.md",
+    "state.md",
+    "log.md",
+    "backlog.md",
+    "escalations.md",
+    "incidents.md",
+)
+
+START_MARKER = "<!-- managed by kb-doctor; do not edit inside block -->"
+END_MARKER = "<!-- /managed by kb-doctor -->"
+SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "info": 3}
+DATE_TOKEN_RE = r"(?<!\d)(20\d{2}-\d{2}-\d{2})(?:T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?(?!\d)"
+COORDINATION_REQUIRED_HEADINGS = {
+    "backlog.md": ("Open", "In progress", "Done"),
+    "escalations.md": ("Open", "Resolved"),
+    "incidents.md": ("Ongoing", "Resolved"),
+}
+
+
+@dataclass(frozen=True)
+class RegistryEntry:
+    slug: str
+    status: str
+    path: pathlib.Path
+
+
+@dataclass(frozen=True)
+class Finding:
+    id: str
+    severity: str
+    slug: str
+    file: str
+    message: str
+    evidence: str
+
+
+def stable_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def finding(kind: str, slug: str, file: pathlib.Path | str, severity: str, message: str, evidence: str) -> Finding:
+    path = str(file)
+    suffix = stable_hash(f"{kind}|{slug}|{path}|{evidence}")
+    return Finding(
+        id=f"{kind}:{slug}:{suffix}",
+        severity=severity,
+        slug=slug,
+        file=path,
+        message=message,
+        evidence=evidence,
+    )
+
+
+def finding_with_key(kind: str, slug: str, key: str, file: pathlib.Path | str, severity: str, message: str, evidence: str) -> Finding:
+    path = str(file)
+    suffix = stable_hash(f"{kind}|{slug}|{key}|{path}|{evidence}")
+    return Finding(
+        id=f"{kind}:{slug}:{key}:{suffix}",
+        severity=severity,
+        slug=slug,
+        file=path,
+        message=message,
+        evidence=evidence,
+    )
+
+
+def read_text(path: pathlib.Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def parse_registry(path: pathlib.Path) -> list[RegistryEntry]:
+    text = read_text(path)
+    entries: list[RegistryEntry] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or "---" in line or "slug" in line.lower():
+            continue
+        cells = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        slug, status, raw_path = cells[0], cells[1], cells[2]
+        if not slug or status not in ACTIVE_STATUSES | {"no-wiki", "archived"}:
+            continue
+        entries.append(RegistryEntry(slug=slug, status=status, path=pathlib.Path(os.path.expanduser(raw_path))))
+    return entries
+
+
+def extract_latest_date(text: str) -> dt.date | None:
+    dates: list[dt.date] = []
+    for match in re.findall(DATE_TOKEN_RE, text):
+        try:
+            dates.append(dt.date.fromisoformat(match))
+        except ValueError:
+            continue
+    return max(dates) if dates else None
+
+
+def extract_latest_log_heading_date(text: str) -> dt.date | None:
+    dates: list[dt.date] = []
+    for match in re.findall(r"(?m)^## \[(20\d{2}-\d{2}-\d{2})", text):
+        try:
+            dates.append(dt.date.fromisoformat(match))
+        except ValueError:
+            continue
+    return max(dates) if dates else None
+
+
+def mtime_date(path: pathlib.Path) -> dt.date | None:
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime).date()
+    except FileNotFoundError:
+        return None
+
+
+def effective_state_date(path: pathlib.Path, text: str) -> dt.date | None:
+    # Internal dates are preferred over mtime to avoid false positives from
+    # Obsidian, sync tools, or seed copy operations.
+    return extract_latest_date(text) or mtime_date(path)
+
+
+def is_skeleton(text: str) -> bool:
+    lowered = text.lower()
+    patterns = (
+        "{{date}}",
+        "что это и в каком состоянии",
+        "таблица: метрика",
+        "что сейчас проверяем",
+        "3–7 пунктов",
+        "3-7 пунктов",
+        "что не ясно",
+        "_(пусто",
+    )
+    return any(pattern in lowered for pattern in patterns)
+
+
+def strip_html_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
+
+def missing_required_headings(text: str, headings: tuple[str, ...]) -> list[str]:
+    missing: list[str] = []
+    for heading in headings:
+        if not re.search(rf"(?m)^##\s+{re.escape(heading)}\s*$", text):
+            missing.append(f"## {heading}")
+    return missing
+
+
+def iter_backlog_lines(text: str) -> list[tuple[int, str, str]]:
+    clean = strip_html_comments(text)
+    rows: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(clean.splitlines(), 1):
+        match = re.match(r"^\s*-\s*(\[[ xX>]\])\s*(.+?)\s*$", line)
+        if match:
+            rows.append((lineno, match.group(1), match.group(2)))
+    return rows
+
+
+def check_project(entry: RegistryEntry, project_filter: str | None) -> list[Finding]:
+    if project_filter and entry.slug != project_filter:
+        return []
+    if entry.status not in ACTIVE_STATUSES:
+        return []
+
+    findings: list[Finding] = []
+    link = HUB / "projects" / entry.slug
+
+    if not link.exists():
+        kind = "registry-broken-symlink" if link.is_symlink() else "registry-missing-symlink"
+        findings.append(finding(kind, entry.slug, link, "P0", "registered active project is not reachable through projects/<slug>", f"status={entry.status} registry_path={entry.path}"))
+        return findings
+
+    if not link.is_symlink():
+        findings.append(finding("registry-not-symlink", entry.slug, link, "P1", "projects/<slug> exists but is not a symlink", f"path={link}"))
+
+    knowledge = link.resolve()
+    for name in CORE_FILES:
+        core = knowledge / name
+        if not core.is_file():
+            findings.append(finding_with_key("missing-core", entry.slug, name, core, "P0", f"missing core KB file {name}", f"expected={core}"))
+        elif name in COORDINATION_REQUIRED_HEADINGS:
+            missing_headings = missing_required_headings(read_text(core), COORDINATION_REQUIRED_HEADINGS[name])
+            if missing_headings:
+                findings.append(finding_with_key(
+                    "core-structure",
+                    entry.slug,
+                    name,
+                    core,
+                    "P1",
+                    f"coordination core file {name} is present but missing required headings",
+                    f"missing_headings={', '.join(missing_headings)}",
+                ))
+
+    state_path = knowledge / "state.md"
+    log_path = knowledge / "log.md"
+    state_text = read_text(state_path)
+    log_text = read_text(log_path)
+    state_date = effective_state_date(state_path, state_text) if state_text else None
+    log_date = extract_latest_log_heading_date(log_text) if log_text else None
+    skeleton = is_skeleton(state_text) if state_text else False
+
+    if state_text:
+        if entry.status == "live" and skeleton:
+            findings.append(finding("live-state-skeleton", entry.slug, state_path, "P1", "registry says live, but state.md still looks like a template skeleton", "skeleton placeholders found"))
+        elif entry.status == "seeded" and skeleton and not log_date:
+            findings.append(finding("seeded-skeleton", entry.slug, state_path, "info", "seeded project still has skeleton state and no dated activity", "status=seeded log_has_no_dates=true"))
+
+        if state_date:
+            age_days = (TODAY - state_date).days
+            if entry.status == "live" and age_days > 30:
+                findings.append(finding("live-state-old", entry.slug, state_path, "P1", "live project state.md has no recent internal date", f"state_date={state_date} age_days={age_days}"))
+            elif entry.status == "live" and age_days > 14:
+                findings.append(finding("state-old", entry.slug, state_path, "P2", "live project state.md is older than 14 days", f"state_date={state_date} age_days={age_days}"))
+
+        if state_date and log_date:
+            lag_days = (log_date - state_date).days
+            if lag_days > 3:
+                severity = "P1" if entry.status == "live" else "P2"
+                findings.append(finding("state-stale", entry.slug, state_path, severity, "state.md trails log.md activity by more than 3 days", f"state_date={state_date} log_date={log_date} lag_days={lag_days}"))
+
+    findings.extend(check_incidents(entry.slug, knowledge / "incidents.md"))
+    findings.extend(check_backlog(entry.slug, knowledge / "backlog.md"))
+    return findings
+
+
+def check_incidents(slug: str, path: pathlib.Path) -> list[Finding]:
+    text = read_text(path)
+    if not text:
+        return []
+    match = re.search(r"(?ms)^## Ongoing\s*(.*?)(?:^## Resolved|\Z)", text)
+    if not match:
+        return []
+    ongoing = match.group(1)
+    findings: list[Finding] = []
+    headers = list(re.finditer(r"^### \[(20\d{2}-\d{2}-\d{2})(?:[^\]]*)?\]\s*(.+)$", ongoing, flags=re.MULTILINE))
+    for idx, header in enumerate(headers):
+        opened = dt.date.fromisoformat(header.group(1))
+        title = header.group(2).strip()
+        end = headers[idx + 1].start() if idx + 1 < len(headers) else len(ongoing)
+        body = ongoing[header.end():end]
+        age = (TODAY - opened).days
+        if age > 7:
+            evidence = f"opened={opened} age_days={age} title={title}"
+            if "Automated guard (TBD)" in body:
+                evidence += " automated_guard_tbd=true"
+            findings.append(finding("incident-old", slug, path, "P1", "open incident is older than 7 days", evidence))
+    return findings
+
+
+def check_backlog(slug: str, path: pathlib.Path) -> list[Finding]:
+    text = read_text(path)
+    if not text:
+        return []
+    findings: list[Finding] = []
+    for lineno, marker, body in iter_backlog_lines(text):
+        if marker == "[ ]":
+            due = re.search(r"\bdue:\s*" + DATE_TOKEN_RE, body)
+            if due:
+                due_date = dt.date.fromisoformat(due.group(1))
+                if due_date < TODAY:
+                    findings.append(finding("backlog-due-past", slug, f"{path}:{lineno}", "P0", "open backlog item has explicit due date in the past", f"due={due_date} line={body}"))
+            if "auto: true" in body and "prompt:" not in body:
+                findings.append(finding("backlog-auto-no-prompt", slug, f"{path}:{lineno}", "P2", "auto:true backlog item has no explicit prompt", f"line={body}"))
+        elif marker == "[>]":
+            picked = re.search(r"\bpicked\s+" + DATE_TOKEN_RE, body)
+            if picked:
+                picked_date = dt.date.fromisoformat(picked.group(1))
+                age = (TODAY - picked_date).days
+                if age > 2:
+                    findings.append(finding("backlog-in-progress-stale", slug, f"{path}:{lineno}", "P1", "in-progress backlog item has been picked for more than 2 days", f"picked={picked_date} age_days={age} line={body}"))
+    return findings
+
+
+def collect(project_filter: str | None) -> list[Finding]:
+    registry_path = HUB / "registry.md"
+    entries = parse_registry(registry_path)
+    findings: list[Finding] = []
+    if not entries:
+        findings.append(finding("registry-empty", "hub", registry_path, "P0", "registry.md has no parseable project rows", f"path={registry_path}"))
+        return findings
+    for entry in entries:
+        findings.extend(check_project(entry, project_filter))
+    return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
+
+
+def visible_findings(findings: list[Finding], verbose: bool) -> tuple[list[Finding], int]:
+    if verbose:
+        return findings, 0
+    visible: list[Finding] = []
+    hidden = 0
+    p2_seen = 0
+    for item in findings:
+        if item.severity == "info":
+            hidden += 1
+            continue
+        if item.severity == "P2":
+            if p2_seen >= 10:
+                hidden += 1
+                continue
+            p2_seen += 1
+        visible.append(item)
+    return visible, hidden
+
+
+def render_text(findings: list[Finding], verbose: bool) -> str:
+    visible, hidden = visible_findings(findings, verbose)
+    counts = {severity: sum(1 for item in findings if item.severity == severity) for severity in SEVERITY_ORDER}
+    lines = [
+        f"kb-doctor {TODAY}: P0={counts['P0']} P1={counts['P1']} P2={counts['P2']} info={counts['info']}",
+    ]
+    if not visible:
+        lines.append("No visible findings.")
+    for severity in ("P0", "P1", "P2", "info"):
+        group = [item for item in visible if item.severity == severity]
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"## {severity}")
+        for item in group:
+            lines.append(f"- {item.slug}: {item.message} ({item.file})")
+            lines.append(f"  evidence: {item.evidence}")
+            lines.append(f"  doctor-id: {item.id}")
+    if hidden:
+        lines.append("")
+        lines.append(f"{hidden} finding(s) hidden; use --verbose.")
+    return "\n".join(lines) + "\n"
+
+
+def resolved_ids(existing: str) -> set[str]:
+    ids: set[str] = set()
+    for line in existing.splitlines():
+        if re.search(r"^\s*-\s*\[[xX]\]", line):
+            match = re.search(r"doctor-id:\s*([^\s`]+)", line)
+            if match:
+                ids.add(match.group(1))
+    return ids
+
+
+def resolved_lines(existing: str) -> list[str]:
+    return [
+        line.rstrip()
+        for line in existing.splitlines()
+        if re.search(r"^\s*-\s*\[[xX]\].*doctor-id:\s*([^\s`]+)", line)
+    ]
+
+
+def pending_line(item: Finding) -> str:
+    return (
+        f"- [ ] {item.severity} {item.slug}: {item.message} — detected {TODAY} — "
+        f"evidence: {item.evidence} — file: `{item.file}` — doctor-id: {item.id}"
+    )
+
+
+def write_pending(findings: list[Finding]) -> pathlib.Path:
+    path = HUB / "pending-curation.md"
+    existing = read_text(path)
+    resolved = resolved_ids(existing)
+    kept_resolved = resolved_lines(existing)
+    active = [item for item in findings if item.severity != "info" and item.id not in resolved]
+
+    body: list[str] = [
+        "## Automated freshness audit",
+        "",
+        START_MARKER,
+        f"Generated: {TODAY}",
+        "",
+    ]
+    if active:
+        body.extend(pending_line(item) for item in active)
+    else:
+        body.append("No active findings.")
+    if kept_resolved:
+        body.append("")
+        body.append("### Resolved findings kept for stable-id suppression")
+        body.extend(kept_resolved)
+    body.extend(["", END_MARKER, ""])
+    block = "\n".join(body)
+
+    if not existing:
+        new_text = "# Pending curation\n\n" + block
+    else:
+        pattern = re.compile(
+            r"(?ms)^## Automated freshness audit\s*\n\s*" + re.escape(START_MARKER) + r".*?^" + re.escape(END_MARKER) + r"\s*",
+        )
+        if pattern.search(existing):
+            new_text = pattern.sub(block, existing)
+        else:
+            new_text = existing.rstrip() + "\n\n" + block
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), prefix=".pending-curation.", suffix=".tmp") as tmp:
+        tmp.write(new_text)
+        tmp_path = pathlib.Path(tmp.name)
+    tmp_path.replace(path)
+    return path
+
+
+def strict_exit(findings: list[Finding], strict: bool) -> int:
+    if not strict:
+        return 0
+    if any(item.severity == "P0" for item in findings):
+        return 2
+    if any(item.severity == "P1" for item in findings):
+        return 1
+    return 0
+
+
+# ----------------------------------------------------------------------
+# concepts-consistency subcommand
+# ----------------------------------------------------------------------
+#
+# Encoded forbidden/required strings per concept-file. Phase 0 of vertical
+# orchestration plan (concepts/orchestrated-knowledge-base.md):
+#   forbidden = old schema mentions that must be erased after Phase 0 unblock
+#   required  = new schema mentions that must be present
+#
+# Adding a new concept-file: append entry to CONCEPTS_RULES.
+
+# ----------------------------------------------------------------------
+# hierarchy-check + migration-readiness subcommands (Phase 1a)
+# ----------------------------------------------------------------------
+
+MAX_DEPTH = int(os.environ.get("KB_CYCLE_MAX_DEPTH", "5"))
+MAX_FANOUT = int(os.environ.get("KB_CYCLE_MAX_FANOUT", "8"))
+
+# Hub root исключён из fanout cap (root исторически широкий — это normal).
+HIERARCHY_PATH = HUB / "hierarchy.yaml"
+MIGRATION_PATH = HUB / "migration-2026-04-25.yaml"
+REGISTRY_PATH = HUB / "registry.md"
+
+
+def _yaml_simple_value(raw: str):
+    s = raw.strip()
+    if s == "":
+        return None
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s == "null":
+        return None
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1].strip()
+        return [x.strip() for x in inner.split(",") if x.strip()] if inner else []
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return s
+
+
+def parse_hierarchy_yaml() -> dict:
+    """Минимальный parser для hierarchy.yaml формата, который пишет kb-rebuild-registry."""
+    if not HIERARCHY_PATH.is_file():
+        return {}
+    text = HIERARCHY_PATH.read_text(encoding="utf-8")
+    nodes: dict[str, dict] = {}
+    cur_node: str | None = None
+    in_nodes = False
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "nodes:":
+            in_nodes = True
+            continue
+        if not in_nodes:
+            continue
+        m_node = re.match(r"^\s\s([\w-]+):\s*$", line)
+        if m_node:
+            cur_node = m_node.group(1)
+            nodes[cur_node] = {}
+            continue
+        m_field = re.match(r"^\s{4}(\w+):\s*(.*)$", line)
+        if m_field and cur_node:
+            nodes[cur_node][m_field.group(1)] = _yaml_simple_value(m_field.group(2))
+    return nodes
+
+
+def hierarchy_check() -> list[Finding]:
+    findings: list[Finding] = []
+    nodes = parse_hierarchy_yaml()
+    if not nodes:
+        findings.append(
+            finding("hierarchy-missing", "hub", str(HIERARCHY_PATH), "P0",
+                    "hierarchy.yaml отсутствует или пуст",
+                    evidence=str(HIERARCHY_PATH))
+        )
+        return findings
+    if "hub" not in nodes:
+        findings.append(
+            finding("hierarchy-no-root", "hub", str(HIERARCHY_PATH), "P0",
+                    "root node 'hub' отсутствует",
+                    evidence="missing hub")
+        )
+        return findings
+
+    slugs = set(nodes.keys())
+    eligible_slugs = {s for s, n in nodes.items() if n.get("kind") == "project"}
+
+    # Cycles + depth + parent integrity + fanout
+    children_map: dict[str, list[str]] = {}
+    parents: dict[str, str | None] = {}
+    for slug, node in nodes.items():
+        children = node.get("children") or []
+        children_map[slug] = list(children)
+        parents[slug] = node.get("parent") if node.get("parent") not in (None, "null") else None
+
+    # Parent integrity (CR4-B2)
+    for slug, node in nodes.items():
+        if slug == "hub":
+            if parents.get(slug) is not None:
+                findings.append(
+                    finding("hierarchy-parent-invalid", slug, str(HIERARCHY_PATH), "P0",
+                            "hub root должен иметь parent: null", evidence=str(parents.get(slug)))
+                )
+            continue
+        parent = parents.get(slug)
+        if parent is None:
+            findings.append(
+                finding("hierarchy-parent-missing", slug, str(HIERARCHY_PATH), "P0",
+                        f"non-root node {slug} без parent", evidence="parent missing")
+            )
+            continue
+        if parent == slug:
+            findings.append(
+                finding("hierarchy-parent-self", slug, str(HIERARCHY_PATH), "P0",
+                        f"parent ссылается на self", evidence=f"parent={parent}")
+            )
+        elif parent != "hub" and parent not in eligible_slugs:
+            findings.append(
+                finding("hierarchy-parent-not-eligible", slug, str(HIERARCHY_PATH), "P0",
+                        f"parent '{parent}' не eligible узел", evidence=f"parent={parent}")
+            )
+
+    # Cycles via DFS
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {s: WHITE for s in slugs}
+
+    def visit(start: str) -> bool:
+        stack = [(start, iter(children_map.get(start, [])))]
+        color[start] = GRAY
+        while stack:
+            node, it = stack[-1]
+            try:
+                child = next(it)
+            except StopIteration:
+                color[node] = BLACK
+                stack.pop()
+                continue
+            if color.get(child, WHITE) == GRAY:
+                return True
+            if color.get(child, WHITE) == WHITE:
+                color[child] = GRAY
+                stack.append((child, iter(children_map.get(child, []))))
+        return False
+
+    for slug in slugs:
+        if color[slug] == WHITE:
+            if visit(slug):
+                findings.append(
+                    finding("hierarchy-cycle", slug, str(HIERARCHY_PATH), "P0",
+                            "cycle detected starting from this node", evidence=f"start={slug}")
+                )
+                break
+
+    # Depth (BFS from root)
+    depth: dict[str, int] = {"hub": 0}
+    queue = ["hub"]
+    while queue:
+        node = queue.pop(0)
+        for child in children_map.get(node, []):
+            if child in depth:
+                continue
+            depth[child] = depth[node] + 1
+            queue.append(child)
+            if depth[child] > MAX_DEPTH:
+                findings.append(
+                    finding("hierarchy-depth", child, str(HIERARCHY_PATH), "P0",
+                            f"depth {depth[child]} exceeds MAX_DEPTH={MAX_DEPTH}",
+                            evidence=f"depth={depth[child]}")
+                )
+
+    # Fanout (root excluded — historically wide)
+    for slug, children in children_map.items():
+        if slug == "hub":
+            if len(children) > MAX_FANOUT:
+                findings.append(
+                    finding("hierarchy-root-fanout-info", slug, str(HIERARCHY_PATH), "info",
+                            f"hub root has {len(children)} children > {MAX_FANOUT} (root cap relaxed)",
+                            evidence=f"fanout={len(children)}")
+                )
+            continue
+        if len(children) > MAX_FANOUT:
+            findings.append(
+                finding("hierarchy-fanout", slug, str(HIERARCHY_PATH), "P0",
+                        f"fanout {len(children)} exceeds MAX_FANOUT={MAX_FANOUT}",
+                        evidence=f"fanout={len(children)}")
+            )
+
+    # Filesystem checks for eligible nodes
+    for slug, node in nodes.items():
+        if slug == "hub":
+            continue
+        if node.get("kind") != "project":
+            continue
+        kp = node.get("knowledge_path")
+        if not kp or not pathlib.Path(kp).is_dir():
+            findings.append(
+                finding("hierarchy-knowledge-path-missing", slug, str(HIERARCHY_PATH), "P0",
+                        f"knowledge_path missing or not directory: {kp}",
+                        evidence=str(kp))
+            )
+            continue
+        readme = pathlib.Path(kp) / "README.md"
+        if not readme.is_file():
+            findings.append(
+                finding("hierarchy-readme-missing", slug, str(HIERARCHY_PATH), "P0",
+                        f"README.md missing in eligible project",
+                        evidence=str(readme))
+            )
+        orch = pathlib.Path(kp) / ".orchestration.yaml"
+        if not orch.is_file():
+            findings.append(
+                finding("hierarchy-orchestration-missing", slug, str(HIERARCHY_PATH), "P0",
+                        f".orchestration.yaml missing in eligible project",
+                        evidence=str(orch))
+            )
+
+    return findings
+
+
+def migration_readiness(slug: str) -> list[Finding]:
+    """Validate per-project precondition for `cycle_enabled: true` toggle."""
+    findings: list[Finding] = []
+    nodes = parse_hierarchy_yaml()
+    if slug not in nodes:
+        findings.append(
+            finding("readiness-not-eligible", slug, str(HIERARCHY_PATH), "P0",
+                    f"slug {slug} не в hierarchy.yaml — не orchestration_eligible",
+                    evidence=slug)
+        )
+        return findings
+    node = nodes[slug]
+    if node.get("kind") != "project":
+        findings.append(
+            finding("readiness-root-or-non-project", slug, str(HIERARCHY_PATH), "P0",
+                    "non-project node не подлежит cycle_enabled toggle",
+                    evidence=node.get("kind", ""))
+        )
+        return findings
+
+    kp = node.get("knowledge_path")
+    if not kp or not pathlib.Path(kp).is_dir():
+        findings.append(
+            finding("readiness-knowledge-path", slug, str(HIERARCHY_PATH), "P0",
+                    f"knowledge_path missing/invalid: {kp}",
+                    evidence=str(kp))
+        )
+        return findings
+
+    kp_path = pathlib.Path(kp)
+    required = ("README.md", ".orchestration.yaml", "backlog.md", "log.md", "state.md")
+    for fname in required:
+        if not (kp_path / fname).is_file():
+            findings.append(
+                finding("readiness-core-file", slug, str(HIERARCHY_PATH), "P0",
+                        f"core file missing: {fname}",
+                        evidence=fname)
+            )
+    if not (kp_path / "reports").is_dir():
+        findings.append(
+            finding("readiness-reports-dir", slug, str(HIERARCHY_PATH), "P1",
+                    "reports/ directory missing (needed for cycle retro)",
+                    evidence="reports/")
+        )
+
+    return findings
+
+
+CONCEPTS_RULES: dict[str, dict[str, dict[str, str]]] = {
+    "concepts/retro-roadmap-upgrade.md": {
+        "forbidden": {
+            r"pending_draft_file\b": "old field name; use pending_draft_ref",
+            r"5-секционный": "old retro section count; use 7-секционный (§6)",
+            r"now \+ \[auto-approved": "old approved_at marker; use approval_source field",
+            r"Sprint-review автоматически в воскресный retro": "Q1 v1 wording contradicts Q5 v2 (separate trigger 21:30)",
+        },
+        "required": {
+            r"pending_draft_ref\b": "new pending_draft_ref field with anchor",
+            r"pending_id\b": "new monotonic id for TG approval matching",
+            r"approval_source\b": "new field separating approved_at type from semantics",
+            r"^status: decisions-locked-v3-ready-for-impl\s*$": "frontmatter status updated to v3",
+        },
+    },
+}
+
+
+def concepts_consistency_check() -> list[Finding]:
+    """Encoded forbidden/required strings audit per concept-file."""
+    findings: list[Finding] = []
+    for rel_path, rules in CONCEPTS_RULES.items():
+        spec_path = HUB / rel_path
+        if not spec_path.is_file():
+            findings.append(
+                finding(
+                    "concepts-consistency-missing",
+                    "hub",
+                    str(spec_path),
+                    "P0",
+                    f"concept file missing: {rel_path}",
+                    evidence=rel_path,
+                )
+            )
+            continue
+        text = spec_path.read_text(encoding="utf-8")
+        for pattern, msg in rules.get("forbidden", {}).items():
+            for match in re.finditer(pattern, text, flags=re.MULTILINE):
+                line_no = text.count("\n", 0, match.start()) + 1
+                findings.append(
+                    finding(
+                        "concepts-forbidden",
+                        "hub",
+                        str(spec_path),
+                        "P0",
+                        f"forbidden pattern '{pattern}' at line {line_no}: {msg}",
+                        evidence=f"line {line_no}: {match.group(0)[:60]}",
+                    )
+                )
+        for pattern, msg in rules.get("required", {}).items():
+            if not re.search(pattern, text, flags=re.MULTILINE):
+                findings.append(
+                    finding(
+                        "concepts-required-missing",
+                        "hub",
+                        str(spec_path),
+                        "P0",
+                        f"required pattern '{pattern}' missing: {msg}",
+                        evidence=pattern,
+                    )
+                )
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 8 — periodic-audit checks
+# ──────────────────────────────────────────────────────────────────────────
+
+def decompose_staleness_check() -> list[Finding]:
+    """Flag `decompose:` markers older than 24h (Phase 5 hub-side decompose
+    spawns add a `[ ] decompose: ...` line to intermediate-parent backlogs;
+    they should close to `[x] decomposed: <date>` within a day).
+
+    Walks every project's backlog.md, picks open `[ ] decompose: ` lines,
+    parses the `opened YYYY-MM-DD` field, flags any > 24h old.
+    """
+    findings: list[Finding] = []
+    today = TODAY
+    proj_dir = HUB / "projects"
+    if not proj_dir.exists():
+        return findings
+    for link in sorted(proj_dir.iterdir()):
+        slug = link.name
+        target = link.resolve() if link.is_symlink() else link
+        bl = target / "backlog.md"
+        if not bl.is_file():
+            continue
+        text = read_text(bl)
+        for ln, line in enumerate(text.splitlines(), 1):
+            m = re.match(r"^\s*-\s*\[\s*\]\s*decompose:\s*(.+)$", line)
+            if not m:
+                continue
+            opened_m = re.search(r"opened\s+(\d{4}-\d{2}-\d{2})", line)
+            if not opened_m:
+                continue
+            try:
+                opened_date = dt.date.fromisoformat(opened_m.group(1))
+            except ValueError:
+                continue
+            age = (today - opened_date).days
+            if age > 1:
+                findings.append(finding(
+                    "decompose-staleness", slug, str(bl),
+                    "P1" if age > 7 else "P2",
+                    f"decompose marker stale {age} days (opened {opened_date})",
+                    evidence=f"backlog.md:{ln}",
+                ))
+    return findings
+
+
+def report_quality_check() -> list[Finding]:
+    """Verify each project's most-recent `reports/<date>.md` has the canonical
+    schema (frontmatter + 5 sections). Missing pieces → P1 finding.
+    """
+    findings: list[Finding] = []
+    today = TODAY
+    proj_dir = HUB / "projects"
+    if not proj_dir.exists():
+        return findings
+    for link in sorted(proj_dir.iterdir()):
+        slug = link.name
+        target = link.resolve() if link.is_symlink() else link
+        reports_dir = target / "reports"
+        if not reports_dir.is_dir():
+            continue
+        # Find the most recent dated report
+        dated = []
+        for r in reports_dir.glob("*.md"):
+            if r.name.startswith("_"):
+                continue
+            try:
+                d = dt.date.fromisoformat(r.stem)
+                dated.append((d, r))
+            except ValueError:
+                continue
+        if not dated:
+            continue
+        dated.sort()
+        last_date, last_path = dated[-1]
+        text = read_text(last_path)
+        # Frontmatter must include report_id, slug, date, cycle, status
+        required_fm_keys = ("report_id", "slug", "date", "cycle", "status")
+        for key in required_fm_keys:
+            if not re.search(rf"^{key}\s*:", text, re.MULTILINE):
+                findings.append(finding(
+                    "report-quality:missing-frontmatter-key", slug, str(last_path),
+                    "P1", f"report frontmatter missing key: {key}",
+                    evidence=key,
+                ))
+        # Status enum must be valid
+        m = re.search(r"^status\s*:\s*(\S+)", text, re.MULTILINE)
+        if m:
+            status = m.group(1).strip()
+            valid = {"pending", "done", "partial", "timeout", "error", "skipped"}
+            if status not in valid:
+                findings.append(finding(
+                    "report-quality:invalid-status", slug, str(last_path),
+                    "P1", f"invalid status enum: {status} (valid: {sorted(valid)})",
+                    evidence=status,
+                ))
+        # If status==done, check 5 required sections
+        if m and m.group(1).strip() == "done":
+            required_sections = (
+                "Что сделано", "Что было в плане", "Дельта",
+                "Candidates", "Escalations",
+            )
+            for sec in required_sections:
+                if sec not in text:
+                    findings.append(finding(
+                        "report-quality:missing-section", slug, str(last_path),
+                        "P2", f"report status:done missing section: {sec}",
+                        evidence=sec,
+                    ))
+        # Stale: last report > 7 days old (means cycle hasn't run for this slug)
+        age = (today - last_date).days
+        if age > 7:
+            findings.append(finding(
+                "report-quality:stale", slug, str(last_path),
+                "P1", f"latest report is {age} days old (cycle not running?)",
+                evidence=str(last_date),
+            ))
+    return findings
+
+
+def cycle_source_id_collision_check() -> list[Finding]:
+    """Audit cycle_source_id uniqueness across all backlogs. Same id appearing
+    on lines with different plan_item_ids OR in different slugs is a sign
+    the orchestrator's stable-id derivation broke.
+    """
+    findings: list[Finding] = []
+    csid_index: dict[str, list[tuple[str, int, str]]] = {}
+    proj_dir = HUB / "projects"
+    if not proj_dir.exists():
+        return findings
+    backlogs = [(slug, (HUB / "projects" / slug).resolve() / "backlog.md")
+                for slug in sorted(p.name for p in proj_dir.iterdir())]
+    backlogs.append(("hub", HUB / "backlog.md"))
+    for slug, bl in backlogs:
+        if not bl.is_file():
+            continue
+        text = read_text(bl)
+        for ln, line in enumerate(text.splitlines(), 1):
+            csid_m = re.search(r"cycle_source_id\s*:\s*([0-9a-f-]{16,})", line)
+            if not csid_m:
+                continue
+            csid = csid_m.group(1)
+            pid_m = re.search(r"plan_item_id\s*:\s*([0-9a-f-]+)", line)
+            pid = pid_m.group(1) if pid_m else "(no-pid)"
+            csid_index.setdefault(csid, []).append((slug, ln, pid))
+    for csid, hits in csid_index.items():
+        if len(hits) <= 1:
+            continue
+        pids = {pid for _, _, pid in hits}
+        slugs = {slug for slug, _, _ in hits}
+        if len(pids) > 1:
+            # Same csid, different plan_item_ids → derivation bug
+            findings.append(finding(
+                "cycle-source-id-collision:cross-pid", "hub", str(HUB),
+                "P1",
+                f"csid {csid[:12]}... shared by {len(pids)} different plan_item_ids: {sorted(pids)[:3]}",
+                evidence=csid,
+            ))
+        elif len(slugs) > 2:
+            # Same csid, same pid, but more than 2 slugs (would indicate a
+            # tombstone+restore+xfer chain) — unusual but not strictly wrong;
+            # info-level signal.
+            findings.append(finding(
+                "cycle-source-id-collision:multi-slug", "hub", str(HUB),
+                "info",
+                f"csid {csid[:12]}... appears in {len(slugs)} slugs: {sorted(slugs)[:5]}",
+                evidence=csid,
+            ))
+    return findings
+
+
+def seed_docs_drift_check() -> list[Finding]:
+    """Detect drift between live `~/knowledge/bin/*` and the seed copy at
+    `~/knowledge/orchestrator-seed/knowledge/bin/*`.
+
+    Drift means `kb-seed-sync` hasn't been run after a live edit. Per the
+    Seed-as-IaC convention, every infra-touching change must be followed
+    by `kb-seed-sync`. P1 finding per drifted file.
+    """
+    findings: list[Finding] = []
+    seed_bin = HUB / "orchestrator-seed" / "knowledge" / "bin"
+    if not seed_bin.is_dir():
+        return findings  # seed not present — fine for portable installs
+    live_bin = HUB / "bin"
+    # Files that should match (excluding seed's own __pycache__ etc.)
+    for live_file in live_bin.iterdir():
+        if not live_file.is_file():
+            continue
+        if live_file.name.startswith("."):
+            continue
+        seed_file = seed_bin / live_file.name
+        if not seed_file.is_file():
+            findings.append(finding(
+                "seed-docs-drift:missing-in-seed", "hub", str(seed_file),
+                "P2",
+                f"live bin/{live_file.name} not in seed (kb-seed-sync needs whitelist update)",
+                evidence=live_file.name,
+            ))
+            continue
+        try:
+            live_bytes = live_file.read_bytes()
+            seed_bytes = seed_file.read_bytes()
+        except OSError:
+            continue
+        # Allow sanitization differences: hash both with replacement of
+        # known sanitization patterns first. Simplistic check: just compare
+        # byte-for-byte. Drift exists if even sanitized files are different
+        # *modulo* what the sanitizer transforms — this would over-report,
+        # so we use file size as a coarse first signal.
+        if abs(len(live_bytes) - len(seed_bytes)) > 200:
+            findings.append(finding(
+                "seed-docs-drift:size-divergence", "hub", str(seed_file),
+                "P2",
+                f"live bin/{live_file.name} size differs from seed by "
+                f"{abs(len(live_bytes) - len(seed_bytes))} bytes (run kb-seed-sync)",
+                evidence=f"live={len(live_bytes)} seed={len(seed_bytes)}",
+            ))
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 8 + incident-2026-04-25 — telegram channel plugin instance guard
+# ──────────────────────────────────────────────────────────────────────────
+
+def seed_content_audit_check() -> list[Finding]:
+    """Comprehensive audit of `~/knowledge/orchestrator-seed/` to verify
+    only structural artifacts get tracked in git, NOT real personal data.
+
+    User concern (2026-04-25): «надо делать проверку на то не выкатываем
+    ли мы секьюрные данные, только основную структуру, работа, семья,
+    здоровья». The leak-scan in kb-seed-sync catches author-specific
+    identifier patterns; this audit goes deeper — verifies the seed
+    DOESN'T contain whole categories of files that would carry real data.
+
+    Forbidden in seed (must NOT be git-tracked):
+      - registry.md  (live, has real project names)
+      - hierarchy.yaml  (live, has real paths)
+      - migration-*.yaml  (live, real metadata)
+      - daily/*.md  (chronicle of real events)
+      - reports/2*.md  (cycle reports — only `reports/_template.md` allowed)
+      - personal/**  (private goals, secrets, contacts)
+      - concepts/**, people/**, companies/**, solutions/**  (cross-project knowledge)
+      - escalations.md, incidents.md, backlog.md, log.md, state.md, strategies.md
+        in `knowledge/` root (only `_template/` versions allowed)
+      - .orchestrator/  (audit journal, lock files, run results)
+      - logs/  (operational logs)
+
+    Each finding is P1 — flag and abort `kb-seed-sync --commit`.
+    """
+    findings: list[Finding] = []
+    seed = HUB / "orchestrator-seed"
+    if not seed.is_dir():
+        return findings  # no seed = no audit needed
+
+    # Forbidden globs (relative to seed root)
+    forbidden_patterns = [
+        ("knowledge/registry.md", "live registry — must stay home"),
+        ("knowledge/hierarchy.yaml", "live hierarchy — must stay home"),
+        ("knowledge/migration-*.yaml", "migration table — has real paths"),
+        ("knowledge/daily/*.md", "chronicle — real events leaked"),
+        ("knowledge/personal/", "private content — must stay home"),
+        ("knowledge/concepts/", "cross-project knowledge — must stay home"),
+        ("knowledge/people/", "people pages — must stay home"),
+        ("knowledge/companies/", "companies pages — must stay home"),
+        ("knowledge/solutions/", "solutions pages — must stay home"),
+        ("knowledge/raw/", "raw sources — must stay home"),
+        ("knowledge/sources/", "source summaries — must stay home"),
+        ("knowledge/.orchestrator/", "audit journal + locks — must stay home"),
+        ("knowledge/logs/", "operational logs — must stay home"),
+        # `knowledge/log.md`, `state.md`, etc. at hub root (templates OK)
+        ("knowledge/log.md", "live hub log — only _template/ version allowed"),
+        ("knowledge/state.md", "live hub state — only _template/ allowed"),
+        ("knowledge/backlog.md", "live hub backlog — only _template/ allowed"),
+        ("knowledge/escalations.md", "live escalations — only _template/ allowed"),
+        ("knowledge/incidents.md", "live incidents — only _template/ allowed"),
+        ("knowledge/strategies.md", "live strategies — only _template/ allowed"),
+    ]
+
+    # Get git-tracked files
+    import subprocess as _sp
+    try:
+        out = _sp.run(["git", "-C", str(seed), "ls-files"],
+                      capture_output=True, text=True, timeout=10)
+        tracked = set(out.stdout.strip().splitlines())
+    except (_sp.SubprocessError, FileNotFoundError):
+        return [finding(
+            "seed-content-audit:no-git", "hub", str(seed),
+            "P2", "could not run `git ls-files` in seed dir",
+            evidence="git",
+        )]
+
+    # Check each forbidden pattern
+    import fnmatch
+    for pattern, why in forbidden_patterns:
+        if pattern.endswith("/"):
+            # Directory prefix match
+            hits = [f for f in tracked if f.startswith(pattern)]
+        elif "*" in pattern:
+            hits = fnmatch.filter(tracked, pattern)
+        else:
+            hits = [f for f in tracked if f == pattern]
+        for h in hits:
+            findings.append(finding(
+                "seed-content-audit:forbidden-tracked", "hub", str(seed / h),
+                "P1", f"{h} tracked in seed — {why}",
+                evidence=h,
+            ))
+
+    # Allowed reports/_template.md only — no dated reports
+    import re as _re
+    for f in tracked:
+        if f.startswith("knowledge/_template/knowledge/reports/"):
+            base = pathlib.Path(f).name
+            if base != "_template.md" and base != ".gitkeep" and not _re.match(r"^\.", base):
+                if _re.match(r"^\d{4}-\d{2}-\d{2}", base):
+                    findings.append(finding(
+                        "seed-content-audit:dated-report", "hub", str(seed / f),
+                        "P1", f"dated report file {base} should not be in template",
+                        evidence=f,
+                    ))
+
+    # Slug-leak check: scan example slugs from migration table that are
+    # KNOWN to be real personal slugs (not generic placeholders).
+    # Generic placeholders OK: <slug>, <slug-a>, <umbrella-a>, etc.
+    # Real slugs read from the live migration table at runtime — keeps
+    # personal slug names OUT of the kb-doctor source code itself
+    # (otherwise the audit code would itself fail leak-scan).
+    # Filter out generic words / tool names that legitimately appear in
+    # English docs (false-positive class).
+    GENERIC_WORDS = {"auto", "family", "n8n", "hub", "personal"}
+    real_slugs: set[str] = set()
+    for mig_path in HUB.glob("migration-*.yaml"):
+        try:
+            mig_text = mig_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # Cheap parser — match `  - slug: <name>` lines (matches kb-rebuild-registry format).
+        for m in _re.finditer(r"^\s\s-\s+slug:\s*([A-Za-z0-9_-]+)", mig_text, _re.MULTILINE):
+            slug = m.group(1)
+            if slug not in GENERIC_WORDS and len(slug) >= 4:
+                real_slugs.add(slug)
+    # File patterns where slug examples would normally appear (not in code
+    # that legitimately processes them — those have actual slugs from
+    # migration-table reads at runtime).
+    slug_check_files = [
+        "PRODUCT.md",  # exempt by self-attribution
+        "docs/",
+        "knowledge/_template/",
+        "knowledge/CLAUDE.md",
+        "claude/CLAUDE.md",
+    ]
+    exempt_files = {"PRODUCT.md", "docs/security-and-privacy.md"}
+    for tracked_f in tracked:
+        if tracked_f in exempt_files:
+            continue
+        if not any(tracked_f.startswith(p) or tracked_f == p.rstrip("/")
+                   for p in slug_check_files):
+            continue
+        full = seed / tracked_f
+        if not full.is_file():
+            continue
+        try:
+            text = full.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for slug in real_slugs:
+            # Word-boundary match to avoid false positives in larger words
+            if _re.search(rf"\b{_re.escape(slug)}\b", text):
+                findings.append(finding(
+                    "seed-content-audit:real-slug-in-doc", "hub", str(full),
+                    "P2",
+                    f"real slug '{slug}' appears in {tracked_f} — replace with "
+                    f"placeholder like <slug-a> for seed publication",
+                    evidence=slug,
+                ))
+                break  # one finding per file, not per slug
+
+    # Vepol Phase-1: whitelist enforcement for docs/methodology/<slug>.md
+    # Only concepts listed in policy/whitelist-concepts.txt may be tracked
+    # under docs/methodology/. Default-deny if whitelist file missing.
+    # See: ~/knowledge/concepts/vepol-product.md §7.2
+    whitelist_path = seed / "policy" / "whitelist-concepts.txt"
+    whitelisted_slugs: set[str] = set()
+    if whitelist_path.is_file():
+        for line in whitelist_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if _re.match(r"^[a-z][a-z0-9_-]*$", line):
+                whitelisted_slugs.add(line)
+
+    methodology_files = [f for f in tracked
+                         if f.startswith("docs/methodology/") and f.endswith(".md")]
+    for tracked_f in methodology_files:
+        slug = pathlib.Path(tracked_f).stem
+        # Skip index/readme files
+        if slug in {"README", "_index", "index"}:
+            continue
+        if not whitelist_path.is_file():
+            findings.append(finding(
+                "seed-content-audit:no-whitelist", "hub", str(seed / tracked_f),
+                "P1",
+                f"docs/methodology/ contains {tracked_f} but "
+                f"policy/whitelist-concepts.txt missing — refusing to "
+                f"publish concept without explicit whitelist (default-deny)",
+                evidence=tracked_f,
+            ))
+        elif slug not in whitelisted_slugs:
+            findings.append(finding(
+                "seed-content-audit:non-whitelisted-concept", "hub",
+                str(seed / tracked_f),
+                "P1",
+                f"concept '{slug}' tracked under docs/methodology/ but not "
+                f"in policy/whitelist-concepts.txt — add slug to whitelist "
+                f"or remove file from seed",
+                evidence=slug,
+            ))
+
+    return findings
+
+
+def channel_instances_check() -> list[Finding]:
+    """Count live telegram-channel `bun server.ts` instances.
+
+    Background (incidents.md 2026-04-25 20:25): the LaunchAgent
+    `com.knowledge.channel-telegram` has KeepAlive=true, so each fresh
+    Claude session that touches the plugin can spawn an additional
+    instance without killing the prior one. 17 stale processes
+    accumulated over a day, each pinning ~80% of one CPU core.
+
+    Severity:
+      0 instances    → P0 (channel down — user can't see incoming TG)
+      1 instance     → no findings
+      N > 1          → P1 (run kb-codex-cleanup to drop duplicates)
+    """
+    import subprocess as _sp
+    findings: list[Finding] = []
+    plugin_marker = "claude-plugins-official/telegram"
+    try:
+        # `bun server.ts` itself doesn't carry the plugin path in argv; the
+        # parent `bun run --cwd .../telegram/...` wrapper does. We count
+        # the wrappers (one wrapper = one server child = one instance).
+        out = _sp.run(["pgrep", "-lf", "bun run.*claude-plugins-official/telegram"],
+                      capture_output=True, text=True, timeout=5)
+    except (_sp.SubprocessError, FileNotFoundError) as exc:
+        findings.append(finding(
+            "channel-instances:pgrep-failed", "hub", str(HUB),
+            "P2", f"pgrep failed: {exc!r}", evidence="pgrep -lf bun",
+        ))
+        return findings
+    matches = [ln for ln in (out.stdout or "").splitlines()
+               if plugin_marker in ln]
+    n = len(matches)
+    if n == 0:
+        findings.append(finding(
+            "channel-instances:down", "hub", str(HUB),
+            "P0",
+            "telegram channel plugin not running — incoming messages lost. "
+            "Fix: launchctl bootstrap \"gui/$UID\" "
+            "~/Library/LaunchAgents/com.knowledge.channel-telegram.plist",
+            evidence="0 bun server.ts processes",
+        ))
+    elif n > 1:
+        pids = [ln.split()[0] for ln in matches]
+        findings.append(finding(
+            "channel-instances:duplicate", "hub", str(HUB),
+            "P1",
+            f"{n} stale telegram channel plugins detected — "
+            f"run kb-codex-cleanup to keep only one. PIDs: {', '.join(pids[:5])}"
+            + (f" (+{n-5} more)" if n > 5 else ""),
+            evidence=f"{n} processes",
+        ))
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 1.6 — graph-audit (pure-Python wikilink parser + optional Obsidian CLI)
+# ──────────────────────────────────────────────────────────────────────────
+
+# Physical garbage — never walked at all.
+GRAPH_WALK_EXCLUDE = {
+    "_template", "orchestrator-seed", "bin", "raw",
+    "__pycache__", "node_modules", ".git", ".obsidian",
+    "worktrees", ".worktrees", "_events", ".orchestrator",
+    "logs",
+}
+# Walked (so wikilinks resolve into them) but excluded from orphan/zero-backlinks
+# checks: terminal chronicle directories that are intentionally not linked-into
+# from above (or only from their own log.md).
+GRAPH_AUDIT_ONLY_EXCLUDE = {"daily", "daily-inbox", "reports"}
+GRAPH_AUDIT_EXCLUDE = GRAPH_WALK_EXCLUDE | GRAPH_AUDIT_ONLY_EXCLUDE
+GRAPH_TRIAD_BASENAMES = {
+    "README.md", "index.md", "log.md", "state.md",
+    "backlog.md", "escalations.md", "incidents.md", "strategies.md",
+    "CLAUDE.md", "pending-curation.md",
+}
+GRAPH_CURATED_COMPONENTS = {"concepts", "solutions", "people", "companies"}
+
+# `[[Target]]`, `[[Target|alias]]`, `[[Target#heading]]`, `![[Target]]`
+WIKILINK_RE = re.compile(r"(!?)\[\[([^\]\n]+?)\]\]")
+# `[text](rel/path.md)` — exclude scheme-prefixed urls
+MDLINK_RE = re.compile(r"(?<!!)\[(?:[^\]]*?)\]\(([^)]+?\.md(?:#[^)\s]*)?)\)")
+# Fenced code block delimiter: ``` or ~~~ on a line by itself (with optional lang)
+FENCE_RE = re.compile(r"^(?:```|~~~)")
+# Inline code span — non-greedy match of backtick-delimited content
+INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+GRAPH_INDEX_PATHS = ("index.md",)
+
+
+def _has_excluded_component(rel_path: str, extra_excludes: set[str]) -> bool:
+    parts = pathlib.PurePosixPath(rel_path).parts
+    bad = GRAPH_AUDIT_EXCLUDE | extra_excludes
+    return any(p in bad for p in parts)
+
+
+def _is_curated(rel_path: str) -> bool:
+    parts = pathlib.PurePosixPath(rel_path).parts
+    return any(p in GRAPH_CURATED_COMPONENTS for p in parts)
+
+
+def _walk_md_files(hub: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """Yield (vault_relative_posix_path, abs_path) for every *.md under hub.
+
+    Follows symlinks but uses a visited-realpath set so a `loop` symlink
+    cannot make us recurse forever.
+    """
+    visited: set[str] = set()
+    results: list[tuple[str, pathlib.Path]] = []
+
+    def _walk(directory: pathlib.Path) -> None:
+        try:
+            real = str(directory.resolve())
+        except OSError:
+            return
+        if real in visited:
+            return
+        visited.add(real)
+        try:
+            entries = list(directory.iterdir())
+        except (PermissionError, FileNotFoundError, NotADirectoryError):
+            return
+        for child in entries:
+            try:
+                if child.is_dir():
+                    if child.name in GRAPH_WALK_EXCLUDE:
+                        continue
+                    _walk(child)
+                elif child.is_file() and child.suffix == ".md":
+                    rel = child.relative_to(hub).as_posix()
+                    results.append((rel, child))
+            except (PermissionError, OSError):
+                continue
+
+    _walk(hub)
+    return results
+
+
+def _strip_anchor(target: str) -> str:
+    return target.split("#", 1)[0]
+
+
+def _strip_alias(target: str) -> str:
+    return target.split("|", 1)[0]
+
+
+def _normalize_wikilink_target(raw: str) -> str:
+    return _strip_anchor(_strip_alias(raw)).strip()
+
+
+def _closest_by_prefix(candidates: list[str], source_dir_parts: tuple[str, ...]) -> str | None:
+    """Return candidate whose vault path shares the longest leading prefix
+    with the source file's directory. Ties → not resolved (returns None).
+    """
+    best: list[tuple[int, str]] = []
+    for cand in candidates:
+        cand_parts = pathlib.PurePosixPath(cand).parts
+        common = 0
+        for a, b in zip(source_dir_parts, cand_parts):
+            if a == b:
+                common += 1
+            else:
+                break
+        best.append((common, cand))
+    best.sort(reverse=True)
+    if len(best) == 1:
+        return best[0][1]
+    if best[0][0] > best[1][0]:
+        return best[0][1]
+    return None  # tie — leave ambiguous
+
+
+def _resolve_wikilink(target: str, hub: pathlib.Path, source_rel: str,
+                       basename_index: dict[str, list[str]]) -> tuple[str, list[str] | None]:
+    """Return (resolved_path | "", candidates_or_None).
+
+    On unique resolution: ("rel/path.md", None).
+    On 0 hits: ("", None).
+    On >1 hits: ("", [list of candidate rel paths]).
+
+    Mirrors Obsidian "shortest path when possible": for path-form wikilinks
+    we suffix-match across the vault, then pick the candidate whose path
+    shares the longest prefix with the source file's directory. For bare
+    wikilinks we do the same closest-path tiebreak.
+    """
+    cleaned = target.strip()
+    if not cleaned:
+        return "", None
+    source_dir_parts = pathlib.PurePosixPath(source_rel).parent.parts
+    if "/" in cleaned or cleaned.endswith(".md"):
+        # Path-form. Try literal hub-relative first.
+        candidate = cleaned if cleaned.endswith(".md") else cleaned + ".md"
+        candidate = pathlib.PurePosixPath(candidate).as_posix().lstrip("./")
+        if (hub / candidate).is_file():
+            return candidate, None
+        # Suffix match: e.g. `daily/2026-04-21` → `projects/x/daily/2026-04-21.md`
+        stem = pathlib.PurePosixPath(candidate).stem.lower()
+        suffix = "/" + candidate.lower()
+        suffix_matches = [
+            rel for rel in basename_index.get(stem, [])
+            if ("/" + rel.lower()).endswith(suffix)
+        ]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0], None
+        if not suffix_matches:
+            return "", None
+        closest = _closest_by_prefix(suffix_matches, source_dir_parts)
+        if closest:
+            return closest, None
+        return "", suffix_matches
+    # Bare basename — case-insensitive lookup
+    key = cleaned.lower()
+    matches = basename_index.get(key, [])
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return "", None
+    closest = _closest_by_prefix(matches, source_dir_parts)
+    if closest:
+        return closest, None
+    return "", matches
+
+
+def _resolve_mdlink(raw: str, source_rel: str, hub: pathlib.Path) -> str:
+    """Resolve `[text](path.md)` relative to source file. Return vault-relative or ''."""
+    cleaned = raw.split("#", 1)[0].strip()
+    if not cleaned:
+        return ""
+    # Skip schemes (http://, https://, mailto:, obsidian://, etc.)
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", cleaned):
+        return ""
+    source_dir = pathlib.PurePosixPath(source_rel).parent
+    joined = (source_dir / cleaned).as_posix()
+    # Normalize ./../ etc using PurePosixPath; PurePosixPath does not collapse
+    # ".." automatically, so use os.path.normpath but preserve forward slashes.
+    normalized = os.path.normpath(joined).replace(os.sep, "/")
+    if normalized.startswith("../") or normalized == ".." or normalized.startswith("/"):
+        return ""
+    if not normalized.endswith(".md"):
+        return ""
+    if (hub / normalized).is_file():
+        return normalized
+    return ""
+
+
+def _build_basename_index(files: list[tuple[str, pathlib.Path]]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for rel, _ in files:
+        stem = pathlib.PurePosixPath(rel).stem.lower()
+        index.setdefault(stem, []).append(rel)
+    return index
+
+
+def _strip_code_regions(text: str) -> str:
+    """Replace fenced code blocks and inline code spans with blank space.
+
+    Wikilinks and md-links inside `code` or fenced ```blocks``` are syntax
+    examples / quoted text, not real graph edges. Stripping them in-place
+    (preserving offsets is unnecessary) avoids polluting the graph with
+    spec-doc literals like `[[Target]]` placeholders.
+    """
+    lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE_RE.match(line.lstrip()):
+            in_fence = not in_fence
+            lines.append("")
+            continue
+        if in_fence:
+            lines.append("")
+            continue
+        lines.append(INLINE_CODE_RE.sub("", line))
+    return "\n".join(lines)
+
+
+def _parse_links(text: str, source_rel: str, hub: pathlib.Path,
+                  basename_index: dict[str, list[str]]):
+    """Yield (resolved_target_rel_or_empty, kind, raw_target, candidates).
+
+    kind ∈ {"wiki", "wiki-embed", "mdlink"}.
+    Code regions are stripped before parsing so doc/spec examples don't
+    pollute the graph.
+    """
+    text = _strip_code_regions(text)
+    for match in WIKILINK_RE.finditer(text):
+        raw = match.group(2)
+        kind = "wiki-embed" if match.group(1) == "!" else "wiki"
+        normalized = _normalize_wikilink_target(raw)
+        if not normalized:
+            continue
+        resolved, candidates = _resolve_wikilink(normalized, hub, source_rel, basename_index)
+        yield resolved, kind, normalized, candidates
+    for match in MDLINK_RE.finditer(text):
+        raw = match.group(1)
+        resolved = _resolve_mdlink(raw, source_rel, hub)
+        # mdlinks resolved-or-not; we don't dedup unresolved mdlinks
+        # (they could be intentional external/draft links, less reliable signal).
+        yield resolved, "mdlink", raw, None
+
+
+def _run_obsidian_validate(cli: str, timeout: float) -> tuple[bool, set[str] | None, str | None]:
+    """Return (is_available, orphans_set_or_None, error_msg_or_None).
+
+    is_available=False + error_msg=None → silent skip (binary missing/vault gone).
+    is_available=True + error_msg=str → unknown CLI error (P2 finding).
+    is_available=True + orphans_set → success.
+    """
+    import shutil
+    import subprocess as _sp
+    resolved = shutil.which(cli) or (cli if pathlib.Path(cli).is_file() else None)
+    if not resolved:
+        return False, None, None
+    try:
+        vault_check = _sp.run(
+            [resolved, "vault"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (_sp.SubprocessError, OSError):
+        return False, None, None
+    if vault_check.returncode != 0 or "knowledge" not in (vault_check.stdout or ""):
+        return False, None, None
+    try:
+        orphans_run = _sp.run(
+            [resolved, "vault=knowledge", "orphans"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (_sp.SubprocessError, OSError) as exc:
+        return True, None, f"subprocess failed: {exc!r}"
+    if orphans_run.returncode != 0:
+        tail = (orphans_run.stderr or orphans_run.stdout or "").strip().splitlines()[-3:]
+        return True, None, "orphans cmd nonzero: " + " | ".join(tail)
+    parsed: set[str] = set()
+    for line in orphans_run.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("Loading") or "installer is out" in line:
+            continue
+        if line.endswith(".md"):
+            parsed.add(line)
+    return True, parsed, None
+
+
+def graph_audit_check(*, validate_with_obsidian: bool = False) -> list[Finding]:
+    findings: list[Finding] = []
+    hub = HUB
+    start = time.monotonic()
+    budget = float(os.environ.get("KB_DOCTOR_GRAPH_RUN_BUDGET_S", "30"))
+    grace_days = int(os.environ.get("KB_DOCTOR_GRAPH_ORPHAN_GRACE_DAYS", "7"))
+    extra_excludes_raw = os.environ.get("KB_DOCTOR_GRAPH_EXCLUDE_COMPONENTS", "")
+    extra_excludes = {x.strip() for x in extra_excludes_raw.split(",") if x.strip()}
+    root_concepts_raw = os.environ.get(
+        "KB_DOCTOR_ROOT_CONCEPTS",
+        "concepts/orchestrated-knowledge-base.md",
+    )
+    root_concepts = {x.strip() for x in root_concepts_raw.split(",") if x.strip()}
+
+    files = _walk_md_files(hub)
+    basename_index = _build_basename_index(files)
+
+    incoming: dict[str, set[str]] = {rel: set() for rel, _ in files}
+    outgoing: dict[str, set[str]] = {rel: set() for rel, _ in files}
+    broken_pairs: set[tuple[str, str]] = set()  # (source, raw_target)
+    ambiguous_pairs: dict[tuple[str, str, frozenset[str]], None] = {}
+
+    budget_exceeded = False
+    for idx, (rel, abs_path) in enumerate(files):
+        if time.monotonic() - start > budget:
+            budget_exceeded = True
+            break
+        if _has_excluded_component(rel, extra_excludes):
+            continue
+        try:
+            text = abs_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            findings.append(finding(
+                "graph-audit-unreadable", "hub", rel, "P2",
+                "could not decode markdown as utf-8",
+                evidence=rel,
+            ))
+            continue
+        for resolved, kind, raw_target, candidates in _parse_links(text, rel, hub, basename_index):
+            if resolved:
+                outgoing.setdefault(rel, set()).add(resolved)
+                incoming.setdefault(resolved, set()).add(rel)
+                continue
+            # Unresolved — ONLY wikilinks generate broken/ambiguous findings.
+            if kind == "mdlink":
+                continue
+            if candidates and len(candidates) > 1:
+                key = (rel, raw_target, frozenset(candidates))
+                if key not in ambiguous_pairs:
+                    ambiguous_pairs[key] = None
+            else:
+                broken_pairs.add((rel, raw_target))
+
+    for source_rel, raw in sorted(broken_pairs):
+        findings.append(finding_with_key(
+            "graph-broken-link", "hub", raw, source_rel, "P2",
+            f"wikilink target not found: [[{raw}]]",
+            evidence=f"source={source_rel} target={raw}",
+        ))
+    for (source_rel, raw, candidates), _ in ambiguous_pairs.items():
+        cand_list = sorted(candidates)
+        findings.append(finding_with_key(
+            "graph-ambiguous-link", "hub", raw, source_rel, "P2",
+            f"wikilink [[{raw}]] resolves to {len(cand_list)} candidates",
+            evidence=f"source={source_rel} candidates={','.join(cand_list[:5])}",
+        ))
+
+    # Curated zero-backlinks + index-only-backlink, with dedup of orphan signal.
+    suppressed_orphans: set[str] = set()
+    now = time.time()
+    for rel, _ in files:
+        if _has_excluded_component(rel, extra_excludes):
+            continue
+        if not _is_curated(rel):
+            continue
+        if pathlib.PurePosixPath(rel).name in GRAPH_TRIAD_BASENAMES:
+            continue
+        sources = incoming.get(rel, set())
+        if not sources:
+            findings.append(finding(
+                "graph-zero-backlinks", "hub", rel, "P1",
+                "curated page has zero incoming links",
+                evidence=f"path={rel}",
+            ))
+            suppressed_orphans.add(rel)
+        elif sources <= set(GRAPH_INDEX_PATHS):
+            findings.append(finding(
+                "graph-zero-backlinks", "hub", rel, "P2",
+                "curated page is referenced only from index.md",
+                evidence=f"path={rel}",
+            ))
+            suppressed_orphans.add(rel)
+
+    # Orphans (any non-excluded, non-triad page with zero incoming).
+    for rel, abs_path in files:
+        if rel in suppressed_orphans:
+            continue
+        if _has_excluded_component(rel, extra_excludes):
+            continue
+        basename = pathlib.PurePosixPath(rel).name
+        if basename in GRAPH_TRIAD_BASENAMES:
+            continue
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            continue
+        age_days = (now - mtime) / 86400
+        if age_days < grace_days:
+            continue
+        if incoming.get(rel):
+            continue
+        findings.append(finding(
+            "graph-orphan", "hub", rel, "P2",
+            "markdown page has zero incoming links",
+            evidence=f"path={rel} age_days={int(age_days)}",
+        ))
+
+    # Root zero-outgoing
+    for root_rel in root_concepts:
+        # Compare against actual files (case-sensitive).
+        if not (hub / root_rel).is_file():
+            continue
+        out = outgoing.get(root_rel, set())
+        if not out:
+            findings.append(finding(
+                "graph-zero-outgoing", "hub", root_rel, "P1",
+                "root-concept page has zero outgoing wikilinks",
+                evidence=f"path={root_rel}",
+            ))
+
+    if budget_exceeded:
+        findings.append(finding(
+            "graph-audit:budget-exceeded", "hub", str(hub), "P2",
+            f"graph-audit exceeded run budget of {budget}s",
+            evidence=f"files_scanned={idx}",
+        ))
+
+    if validate_with_obsidian:
+        cli = os.environ.get("KB_DOCTOR_GRAPH_OBSIDIAN_CLI", "obsidian")
+        timeout = float(os.environ.get("KB_DOCTOR_GRAPH_OBSIDIAN_TIMEOUT", "10"))
+        is_avail, obsidian_orphans, err = _run_obsidian_validate(cli, timeout)
+        if not is_avail:
+            pass  # silent skip
+        elif err is not None:
+            findings.append(finding(
+                "graph-audit:cli-error", "hub", str(hub), "P2",
+                "Obsidian CLI returned error during validation",
+                evidence=err[:200],
+            ))
+        elif obsidian_orphans is not None:
+            our_orphans = {
+                f.file for f in findings if f.id.startswith("graph-orphan:")
+            }
+            diff = obsidian_orphans.symmetric_difference(our_orphans)
+            if len(diff) > 5:
+                sample = sorted(diff)[:5]
+                findings.append(finding(
+                    "graph-audit:obsidian-orphan-mismatch", "hub", str(hub), "P2",
+                    f"orphan set diverges from Obsidian by {len(diff)} entries",
+                    evidence=f"sample_diff={','.join(sample)}",
+                ))
+
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase A — install-health (Cycle A of public-release readiness)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Spec: ~/knowledge/concepts/release-readiness-cycle-a.md (A7).
+# Verifies install-manifest.json + LaunchAgents + settings hooks + memory-
+# compiler patches + required binaries are coherent. Read-only — no fixes
+# (those land in Cycle B kb-update + deterministic settings merge).
+
+INSTALL_HEALTH_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+INSTALL_HEALTH_REQUIRED_HOOKS = {
+    "SessionStart": "kb-session-start",
+    "SessionEnd": "kb-session-end",
+    "PreCompact": "kb-pre-compact",
+}
+INSTALL_HEALTH_REQUIRED_MANIFEST_FIELDS = (
+    "category", "source_path", "install_path", "source_hash", "installed_hash",
+)
+INSTALL_HEALTH_REQUIRED_BINS = ("node", "python3", "rg", "gh", "uv", "bun", "jq", "claude")
+
+
+def _ih_home() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("HOME", os.path.expanduser("~")))
+
+
+def _ih_seed_path() -> pathlib.Path:
+    return pathlib.Path(os.environ.get(
+        "KB_DOCTOR_INSTALL_HEALTH_SEED_PATH",
+        HUB / "orchestrator-seed",
+    ))
+
+
+def _ih_manifest_path() -> pathlib.Path:
+    return HUB / ".orchestrator" / "install-manifest.json"
+
+
+def _ih_sha256(path: pathlib.Path) -> str | None:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _ih_check_manifest(home: pathlib.Path, seed: pathlib.Path) -> tuple[list[Finding], dict | None]:
+    findings: list[Finding] = []
+    manifest_path = _ih_manifest_path()
+    if not manifest_path.is_file():
+        findings.append(finding(
+            "install-health:no-manifest", "hub", str(manifest_path), "P0",
+            "install-manifest.json missing — run `kb-bootstrap-manifest` to create it",
+            evidence=str(manifest_path),
+        ))
+        return findings, None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        findings.append(finding(
+            "install-health:no-manifest", "hub", str(manifest_path), "P0",
+            "install-manifest.json unparseable",
+            evidence=f"error={exc!r}",
+        ))
+        return findings, None
+    schema = data.get("schema_version")
+    if schema != 1:
+        if isinstance(schema, int) and schema > 1:
+            findings.append(finding(
+                "install-health:manifest-schema-newer", "hub", str(manifest_path), "P1",
+                f"install-manifest.json schema_version={schema} (newer than this kb-doctor knows)",
+                evidence=f"schema_version={schema}",
+            ))
+        else:
+            findings.append(finding(
+                "install-health:no-manifest", "hub", str(manifest_path), "P0",
+                f"install-manifest.json has invalid schema_version={schema!r}",
+                evidence=f"schema_version={schema!r}",
+            ))
+            return findings, None
+    return findings, data
+
+
+def _ih_check_entries(manifest: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    files = manifest.get("files") or {}
+    for art_id, entry in files.items():
+        if not isinstance(entry, dict):
+            findings.append(finding_with_key(
+                "install-health:manifest-malformed", "hub", art_id, art_id, "P0",
+                f"manifest entry {art_id!r} is not a dict",
+                evidence=str(type(entry).__name__),
+            ))
+            continue
+        missing_fields = [f for f in INSTALL_HEALTH_REQUIRED_MANIFEST_FIELDS if f not in entry]
+        if missing_fields:
+            findings.append(finding_with_key(
+                "install-health:manifest-malformed", "hub", art_id, art_id, "P0",
+                f"manifest entry {art_id!r} missing required fields: {','.join(missing_fields)}",
+                evidence=f"missing={missing_fields}",
+            ))
+            continue
+        # Hash format
+        for hash_field in ("source_hash", "installed_hash"):
+            value = entry.get(hash_field)
+            if value is None:
+                if hash_field == "installed_hash":
+                    continue
+                findings.append(finding_with_key(
+                    "install-health:manifest-malformed", "hub", art_id, art_id, "P0",
+                    f"{art_id}.{hash_field} is null (only installed_hash may be null)",
+                    evidence=f"{hash_field}=null",
+                ))
+                continue
+            if not INSTALL_HEALTH_SHA256_RE.fullmatch(value):
+                findings.append(finding_with_key(
+                    "install-health:manifest-malformed", "hub", art_id, art_id, "P0",
+                    f"{art_id}.{hash_field} has invalid format (expected sha256:<64hex>)",
+                    evidence=f"{hash_field}={value!r}",
+                ))
+        if entry.get("installed_hash") is None:
+            findings.append(finding_with_key(
+                "install-health:installed-hash-null", "hub", art_id,
+                entry.get("install_path", art_id), "P0",
+                f"{art_id}: installed_hash is null — file was missing at bootstrap time",
+                evidence=f"install_path={entry.get('install_path')}",
+            ))
+            continue
+        install_path = pathlib.Path(entry.get("install_path", ""))
+        if not install_path.is_file():
+            findings.append(finding_with_key(
+                "install-health:install-path-missing", "hub", art_id,
+                str(install_path), "P0",
+                f"{art_id}: install_path does not exist on disk",
+                evidence=f"install_path={install_path}",
+            ))
+            continue
+        actual_hash = _ih_sha256(install_path)
+        if actual_hash != entry["installed_hash"]:
+            findings.append(finding_with_key(
+                "install-health:install-hash-drift", "hub", art_id,
+                str(install_path), "P1",
+                f"{art_id}: live file hash differs from installed_hash (locally modified)",
+                evidence=f"recorded={entry['installed_hash'][:20]}... actual={actual_hash[:20] if actual_hash else None}...",
+            ))
+    return findings
+
+
+def _ih_check_seed_git(seed: pathlib.Path, manifest: dict | None) -> list[Finding]:
+    findings: list[Finding] = []
+    if not (seed / ".git").exists():
+        findings.append(finding(
+            "install-health:seed-not-git", "hub", str(seed), "P0",
+            "seed directory is not a git repository — kb-update will not work",
+            evidence=str(seed),
+        ))
+        return findings
+    import subprocess as _sp
+    try:
+        remote_check = _sp.run(
+            ["git", "-C", str(seed), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (_sp.SubprocessError, OSError) as exc:
+        findings.append(finding(
+            "install-health:seed-no-remote", "hub", str(seed), "P1",
+            f"git remote check failed: {exc!r}",
+            evidence=str(exc),
+        ))
+        return findings
+    if remote_check.returncode != 0:
+        findings.append(finding(
+            "install-health:seed-no-remote", "hub", str(seed), "P1",
+            "seed has no `origin` git remote — kb-update will have nowhere to fetch from",
+            evidence=(remote_check.stderr or "").strip()[:200],
+        ))
+        return findings
+    if not manifest:
+        return findings
+    try:
+        head_check = _sp.run(
+            ["git", "-C", str(seed), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        head = (head_check.stdout or "").strip()
+    except (_sp.SubprocessError, OSError):
+        head = ""
+    expected = manifest.get("seed_commit") or ""
+    if head and expected and head != expected:
+        findings.append(finding(
+            "install-health:seed-commit-drift", "hub", str(seed), "P2",
+            "seed HEAD has moved since install-manifest.json was written",
+            evidence=f"manifest={expected[:12]} head={head[:12]}",
+        ))
+    return findings
+
+
+def _ih_check_version(seed: pathlib.Path, manifest: dict | None) -> list[Finding]:
+    if not manifest:
+        return []
+    seed_version_file = seed / "VERSION"
+    if not seed_version_file.is_file():
+        return []
+    seed_version = seed_version_file.read_text(encoding="utf-8").strip()
+    installed_version = manifest.get("installed_version")
+    if not installed_version or installed_version == "unknown":
+        return []
+    if seed_version != installed_version:
+        return [finding(
+            "install-health:version-drift", "hub", str(seed_version_file), "P1",
+            f"seed VERSION ({seed_version}) != manifest installed_version ({installed_version})",
+            evidence=f"seed={seed_version} installed={installed_version}",
+        )]
+    return []
+
+
+def _ih_check_settings(home: pathlib.Path) -> list[Finding]:
+    findings: list[Finding] = []
+    settings_path = home / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        for hook in INSTALL_HEALTH_REQUIRED_HOOKS:
+            findings.append(finding_with_key(
+                "install-health:settings-hook-missing", "hub", hook,
+                str(settings_path), "P0",
+                f"settings.json missing — required hook {hook} unreachable",
+                evidence="settings.json absent",
+            ))
+        return findings
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        findings.append(finding(
+            "install-health:settings-unparseable", "hub", str(settings_path), "P0",
+            f"~/.claude/settings.json unparseable: {exc!r}",
+            evidence=str(exc)[:200],
+        ))
+        return findings
+    hooks_root = (settings or {}).get("hooks") or {}
+    for hook_name, expected_basename in INSTALL_HEALTH_REQUIRED_HOOKS.items():
+        configs = hooks_root.get(hook_name) or []
+        if not _ih_hook_basename_matches(configs, expected_basename):
+            findings.append(finding_with_key(
+                "install-health:settings-hook-missing", "hub", hook_name,
+                str(settings_path), "P0",
+                f"settings.json hook {hook_name} does not invoke {expected_basename}",
+                evidence=f"expected_basename={expected_basename}",
+            ))
+    return findings
+
+
+def _ih_hook_basename_matches(configs, expected_basename: str) -> bool:
+    """Walk a hook config tree and return True if any command token has the expected basename."""
+    if not configs:
+        return False
+    if isinstance(configs, list):
+        return any(_ih_hook_basename_matches(item, expected_basename) for item in configs)
+    if not isinstance(configs, dict):
+        return False
+    if "hooks" in configs:
+        return _ih_hook_basename_matches(configs["hooks"], expected_basename)
+    cmd = configs.get("command")
+    if not cmd:
+        return False
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    # Walk both the shlex tokens AND a whitespace re-split of each token,
+    # so wrappers like `/bin/bash -lc "/path/kb-X --flag"` still match —
+    # shlex returns the quoted string as one token, but we want to look
+    # at every word inside it.
+    for tok in tokens:
+        for sub in tok.split():
+            if pathlib.PurePosixPath(sub).name == expected_basename:
+                return True
+    return False
+
+
+def _ih_check_launchagents(home: pathlib.Path, manifest: dict | None) -> list[Finding]:
+    findings: list[Finding] = []
+    if not manifest:
+        return findings
+    files = manifest.get("files") or {}
+    launchctl = shutil.which("launchctl")
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    import subprocess as _sp
+    for art_id, entry in files.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("category") != "managed-templated":
+            continue
+        if not art_id.startswith("launchd-"):
+            continue
+        plist_path = pathlib.Path(entry.get("install_path", ""))
+        label = plist_path.stem  # e.g. com.knowledge.planner
+        if not plist_path.is_file():
+            findings.append(finding_with_key(
+                "install-health:launchagent-missing", "hub", label,
+                str(plist_path), "P0",
+                f"LaunchAgent plist missing: {label}",
+                evidence=str(plist_path),
+            ))
+            continue
+        if not launchctl or uid is None:
+            continue
+        try:
+            res = _sp.run(
+                [launchctl, "print", f"gui/{uid}/{label}"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (_sp.SubprocessError, OSError):
+            continue
+        if res.returncode != 0:
+            findings.append(finding_with_key(
+                "install-health:launchagent-not-loaded", "hub", label,
+                str(plist_path), "P1",
+                f"LaunchAgent {label} is not loaded (launchctl print exit {res.returncode})",
+                evidence=(res.stderr or res.stdout or "").strip().splitlines()[0:1],
+            ))
+    return findings
+
+
+def _ih_check_memory_compiler(home: pathlib.Path) -> list[Finding]:
+    findings: list[Finding] = []
+    cmc_dir = home / "claude-memory-compiler"
+    if not cmc_dir.is_dir():
+        findings.append(finding(
+            "install-health:memory-compiler-missing", "hub", str(cmc_dir), "P1",
+            "claude-memory-compiler clone missing — SessionEnd / PreCompact hooks will fail",
+            evidence=str(cmc_dir),
+        ))
+        return findings
+    flush_path = cmc_dir / "scripts" / "flush.py"
+    if not flush_path.is_file():
+        findings.append(finding(
+            "install-health:memory-compiler-patch-drift", "hub", str(flush_path), "P0",
+            "scripts/flush.py missing in claude-memory-compiler",
+            evidence=str(flush_path),
+        ))
+        return findings
+    try:
+        source = flush_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as exc:
+        findings.append(finding(
+            "install-health:memory-compiler-unparseable", "hub", str(flush_path), "P0",
+            f"flush.py unparseable: {exc!r}",
+            evidence=str(exc)[:200],
+        ))
+        return findings
+    funcs = {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for required in ("maybe_trigger_compilation", "append_to_daily_log", "main"):
+        if required not in funcs:
+            findings.append(finding_with_key(
+                "install-health:memory-compiler-function-missing", "hub", required,
+                str(flush_path), "P0",
+                f"flush.py missing required function: {required}",
+                evidence=required,
+            ))
+    if "maybe_trigger_compilation" in funcs:
+        if not _ih_has_no_compile_early_return(funcs["maybe_trigger_compilation"]):
+            findings.append(finding_with_key(
+                "install-health:memory-compiler-patch-drift", "hub", "no-compile-early-return",
+                str(flush_path), "P0",
+                "flush.py:maybe_trigger_compilation missing CLAUDE_KB_NO_COMPILE early return",
+                evidence="invariant=CLAUDE_KB_NO_COMPILE early return",
+            ))
+    if "append_to_daily_log" in funcs:
+        body_src = ast.unparse(funcs["append_to_daily_log"])
+        if "CLAUDE_KB_DAILY_DIR" not in body_src:
+            findings.append(finding_with_key(
+                "install-health:memory-compiler-patch-drift", "hub", "daily-dir-branch",
+                str(flush_path), "P0",
+                "flush.py:append_to_daily_log missing CLAUDE_KB_DAILY_DIR branch",
+                evidence="invariant=CLAUDE_KB_DAILY_DIR branch",
+            ))
+    if "main" in funcs:
+        main_src = ast.unparse(funcs["main"])
+        if "CLAUDE_KB_DAILY_DIR" not in main_src:
+            findings.append(finding_with_key(
+                "install-health:memory-compiler-patch-drift", "hub", "main-suppress-default-append",
+                str(flush_path), "P0",
+                "flush.py:main missing CLAUDE_KB_DAILY_DIR-aware suppression of default append",
+                evidence="invariant=main suppress default append under KB mode",
+            ))
+    return findings
+
+
+def _ih_has_no_compile_early_return(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """First non-docstring statement must be `if os.environ.get('CLAUDE_KB_NO_COMPILE'): return ...`."""
+    body = list(func.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if not body:
+        return False
+    stmt = body[0]
+    if not isinstance(stmt, ast.If):
+        return False
+    test_src = ast.unparse(stmt.test)
+    if "CLAUDE_KB_NO_COMPILE" not in test_src:
+        return False
+    return any(isinstance(s, ast.Return) for s in stmt.body)
+
+
+def _ih_check_binaries(home: pathlib.Path, env_path: str | None = None) -> list[Finding]:
+    findings: list[Finding] = []
+    # Tests can use KB_DOCTOR_INSTALL_HEALTH_PATH to scope binary visibility
+    # without disturbing the PATH that runs kb-doctor itself (avoids shadowing
+    # /usr/bin/env python3 when the kb-doctor shebang fires).
+    path_env = (
+        env_path
+        if env_path is not None
+        else os.environ.get("KB_DOCTOR_INSTALL_HEALTH_PATH",
+                              os.environ.get("PATH", ""))
+    )
+    for name in INSTALL_HEALTH_REQUIRED_BINS:
+        if shutil.which(name, path=path_env) is None:
+            findings.append(finding_with_key(
+                "install-health:binary-missing", "hub", name,
+                name, "P1",
+                f"required binary missing from PATH: {name}",
+                evidence=f"binary={name}",
+            ))
+    # Optional: corelocationcli via cask
+    corelocation_paths = [
+        "/usr/local/bin/CoreLocationCLI",
+        "/opt/homebrew/bin/CoreLocationCLI",
+    ]
+    if not any(pathlib.Path(p).is_file() for p in corelocation_paths):
+        findings.append(finding(
+            "install-health:binary-missing-corelocationcli", "hub", "CoreLocationCLI", "P2",
+            "CoreLocationCLI cask not installed (only kb-tick location-aware brief uses it)",
+            evidence="searched=" + ",".join(corelocation_paths),
+        ))
+    # Optional: obsidian
+    if shutil.which("obsidian", path=path_env) is None:
+        findings.append(finding(
+            "install-health:obsidian-cli-not-installed", "hub", "obsidian", "info",
+            "obsidian CLI not on PATH (only graph-audit --validate-with-obsidian uses it)",
+            evidence="optional dependency",
+        ))
+    return findings
+
+
+def _ih_check_codex_currency(env_path: str | None = None) -> list[Finding]:
+    import subprocess as _sp
+    path_env = (
+        env_path
+        if env_path is not None
+        else os.environ.get("KB_DOCTOR_INSTALL_HEALTH_PATH",
+                              os.environ.get("PATH", ""))
+    )
+    codex_bin = shutil.which("codex", path=path_env)
+    if not codex_bin:
+        # Already reported by binary-missing.
+        return []
+    try:
+        res = _sp.run([codex_bin, "--version"], capture_output=True, text=True, timeout=5)
+    except (_sp.SubprocessError, OSError):
+        return []
+    if res.returncode != 0:
+        return []
+    output = (res.stdout or res.stderr or "").strip()
+    match = re.search(r"(\d+\.\d+\.\d+)", output)
+    if not match:
+        return []
+    version = match.group(1)
+    known_good_raw = os.environ.get("KB_DOCTOR_KNOWN_GOOD_CODEX_VERSIONS", "")
+    if not known_good_raw:
+        return []
+    patterns = [p.strip() for p in known_good_raw.split(",") if p.strip()]
+    if any(_ih_version_matches(version, pat) for pat in patterns):
+        return []
+    return [finding(
+        "install-health:codex-version-stale", "hub", codex_bin, "P2",
+        f"codex CLI version {version} outside known-good range {known_good_raw!r}",
+        evidence=f"version={version} known_good={known_good_raw}",
+    )]
+
+
+def _ih_version_matches(version: str, pattern: str) -> bool:
+    """Glob-style version match: '0.45.*' matches '0.45.X'."""
+    parts_v = version.split(".")
+    parts_p = pattern.split(".")
+    if len(parts_v) != len(parts_p):
+        return False
+    for v, p in zip(parts_v, parts_p):
+        if p == "*":
+            continue
+        if p != v:
+            return False
+    return True
+
+
+def install_health_check() -> list[Finding]:
+    home = _ih_home()
+    seed = _ih_seed_path()
+    findings: list[Finding] = []
+    manifest_findings, manifest = _ih_check_manifest(home, seed)
+    findings.extend(manifest_findings)
+    if manifest:
+        findings.extend(_ih_check_entries(manifest))
+    findings.extend(_ih_check_seed_git(seed, manifest))
+    findings.extend(_ih_check_version(seed, manifest))
+    findings.extend(_ih_check_settings(home))
+    findings.extend(_ih_check_launchagents(home, manifest))
+    findings.extend(_ih_check_memory_compiler(home))
+    findings.extend(_ih_check_binaries(home))
+    findings.extend(_ih_check_codex_currency())
+    return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Deterministic KB read-path audit.")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        default="audit",
+        choices=[
+            "audit", "concepts-consistency", "hierarchy-check", "migration-readiness",
+            # Phase 8 periodic audits
+            "decompose-staleness", "report-quality-check",
+            "cycle-source-id-collision", "seed-docs-drift",
+            # Incident 2026-04-25: telegram channel plugin instance guard
+            "channel-instances",
+            # Pre-push guard: verify seed contains only structural artifacts,
+            # not real personal data (any life domain).
+            "seed-content-audit",
+            # Phase 1.6 — wikilink graph connectivity audit
+            "graph-audit",
+            # Cycle A — install-manifest + system health
+            "install-health",
+        ],
+        help=(
+            "audit (default) | concepts-consistency | hierarchy-check | "
+            "migration-readiness <slug> | "
+            "decompose-staleness | report-quality-check | "
+            "cycle-source-id-collision | seed-docs-drift | "
+            "channel-instances | seed-content-audit | graph-audit | "
+            "install-health"
+        ),
+    )
+    parser.add_argument(
+        "slug_arg",
+        nargs="?",
+        help="slug for migration-readiness (positional)",
+    )
+    parser.add_argument("--project", help="Filter by project slug (audit mode only)")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--write", action="store_true", help="Write managed findings to pending-curation.md (audit mode only)")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero for P0/P1 findings")
+    parser.add_argument("--verbose", action="store_true", help="Show info and all P2 findings in text output")
+    parser.add_argument("--validate-with-obsidian", action="store_true",
+                        help="(graph-audit only) cross-check orphans against Obsidian CLI")
+    args = parser.parse_args()
+
+    if args.mode == "graph-audit":
+        findings = graph_audit_check(validate_with_obsidian=args.validate_with_obsidian)
+        if args.write:
+            write_pending(findings)
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": "graph-audit",
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        raise SystemExit(strict_exit(findings, args.strict))
+
+    if args.mode == "install-health":
+        findings = install_health_check()
+        if args.write:
+            write_pending(findings)
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": "install-health",
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        raise SystemExit(strict_exit(findings, args.strict))
+
+    phase8_modes = {"decompose-staleness", "report-quality-check",
+                    "cycle-source-id-collision", "seed-docs-drift",
+                    "channel-instances", "seed-content-audit"}
+    if args.mode in {"concepts-consistency", "hierarchy-check", "migration-readiness"} | phase8_modes:
+        if args.mode == "concepts-consistency":
+            findings = concepts_consistency_check()
+        elif args.mode == "hierarchy-check":
+            findings = hierarchy_check()
+        elif args.mode == "migration-readiness":
+            if not args.slug_arg:
+                print("ERROR: migration-readiness requires <slug> argument", file=sys.stderr)
+                raise SystemExit(2)
+            findings = migration_readiness(args.slug_arg)
+        elif args.mode == "decompose-staleness":
+            findings = decompose_staleness_check()
+        elif args.mode == "report-quality-check":
+            findings = report_quality_check()
+        elif args.mode == "cycle-source-id-collision":
+            findings = cycle_source_id_collision_check()
+        elif args.mode == "seed-docs-drift":
+            findings = seed_docs_drift_check()
+        elif args.mode == "channel-instances":
+            findings = channel_instances_check()
+        else:  # seed-content-audit
+            findings = seed_content_audit_check()
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": args.mode,
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        # gate-by-design: any P0 finding → exit 2.
+        if any(item.severity == "P0" for item in findings):
+            raise SystemExit(2)
+        raise SystemExit(0)
+
+    findings = collect(args.project)
+    if args.write:
+        write_pending(findings)
+
+    if args.format == "json":
+        print(json.dumps({
+            "generated_at": TODAY.isoformat(),
+            "hub": str(HUB),
+            "findings": [asdict(item) for item in findings],
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(render_text(findings, args.verbose), end="")
+
+    raise SystemExit(strict_exit(findings, args.strict))
+
+
+if __name__ == "__main__":
+    main()

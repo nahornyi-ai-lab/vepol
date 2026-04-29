@@ -1,0 +1,19 @@
+#!/bin/zsh
+# Launch a persistent Claude Code session with the Telegram channel plugin.
+# Run this once in a terminal (or under tmux / screen) to keep the orchestrator
+# alive. While this process runs, messages to your Telegram bot are pushed into
+# THIS session and Claude replies back through the same chat.
+#
+# Requirements:
+#   - Claude Code >= 2.1.80 (have: $(claude --version))
+#   - Bun installed
+#   - Plugin installed and configured (/plugin install + /telegram:configure)
+#   - Paired once (/telegram:access pair <code>)
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+
+cd "$HUB"
+exec claude \
+  --channels "plugin:telegram@claude-plugins-official" \
+  --dangerously-skip-permissions

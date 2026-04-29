@@ -1,0 +1,217 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill",
+      "ToolSearch",
+      "ScheduleWakeup",
+      "Monitor",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate",
+      "AskUserQuestion",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "EnterWorktree",
+      "ExitWorktree",
+      "PushNotification",
+      "RemoteTrigger",
+      "mcp__claude_ai_Gmail__create_draft",
+      "mcp__claude_ai_Gmail__create_label",
+      "mcp__claude_ai_Gmail__get_thread",
+      "mcp__claude_ai_Gmail__label_message",
+      "mcp__claude_ai_Gmail__label_thread",
+      "mcp__claude_ai_Gmail__list_drafts",
+      "mcp__claude_ai_Gmail__list_labels",
+      "mcp__claude_ai_Gmail__search_threads",
+      "mcp__claude_ai_Gmail__unlabel_message",
+      "mcp__claude_ai_Gmail__unlabel_thread",
+      "mcp__claude_ai_Google_Calendar__create_event",
+      "mcp__claude_ai_Google_Calendar__delete_event",
+      "mcp__claude_ai_Google_Calendar__get_event",
+      "mcp__claude_ai_Google_Calendar__list_calendars",
+      "mcp__claude_ai_Google_Calendar__list_events",
+      "mcp__claude_ai_Google_Calendar__respond_to_event",
+      "mcp__claude_ai_Google_Calendar__suggest_time",
+      "mcp__claude_ai_Google_Calendar__update_event",
+      "mcp__claude_ai_Google_Drive__authenticate",
+      "mcp__claude_ai_Google_Drive__complete_authentication",
+      "Bash",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(chmod:*)",
+      "Bash(chown:*)",
+      "Bash(touch:*)",
+      "Bash(ln:*)",
+      "Bash(readlink:*)",
+      "Bash(realpath:*)",
+      "Bash(basename:*)",
+      "Bash(dirname:*)",
+      "Bash(stat:*)",
+      "Bash(file:*)",
+      "Bash(du:*)",
+      "Bash(df:*)",
+      "Bash(sleep:*)",
+      "Bash(date:*)",
+      "Bash(echo:*)",
+      "Bash(printf:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(tee:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(cut:*)",
+      "Bash(wc:*)",
+      "Bash(diff:*)",
+      "Bash(xargs:*)",
+      "Bash(find:*)",
+      "Bash(which:*)",
+      "Bash(pwd:*)",
+      "Bash(env:*)",
+      "Bash(test:*)",
+      "Bash(true)",
+      "Bash(false)",
+      "Bash(ps:*)",
+      "Bash(pgrep:*)",
+      "Bash(pkill:*)",
+      "Bash(kill:*)",
+      "Bash(launchctl:*)",
+      "Bash(afplay:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(bun:*)",
+      "Bash(bunx:*)",
+      "Bash(uv:*)",
+      "Bash(uvx:*)",
+      "Bash(pipx:*)",
+      "Bash(brew:*)",
+      "Bash(jq:*)",
+      "Bash(rg:*)",
+      "Bash(claude:*)",
+      "Bash(codex:*)",
+      "Bash(flutter:*)",
+      "Bash(dart:*)",
+      "Bash(fvm:*)",
+      "Bash(pod:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(open:*)",
+      "Bash(__HOME__/fvm/default/bin/flutter:*)",
+      "Bash(__HOME__/Development/flutter/bin/flutter:*)",
+      "Bash(__HOME__/Development/flutter/bin/dart:*)",
+      "Bash(__HOME__/knowledge/bin/*:*)",
+      "Bash(~/knowledge/bin/*:*)",
+      "Bash(__HOME__/.claude/plugins/cache/*:*)",
+      "Bash(~/.claude/plugins/cache/*:*)",
+      "Bash(__HOME__/.bun/bin/*:*)",
+      "Bash(/opt/homebrew/bin/*:*)"
+    ],
+    "defaultMode": "default"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay /System/Library/Sounds/Glass.aiff"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash __HOME__/knowledge/bin/kb-session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash __HOME__/knowledge/bin/kb-session-end",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash __HOME__/knowledge/bin/kb-pre-compact",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash __HOME__/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "telegram@claude-plugins-official": true,
+    "codex@openai-codex": true,
+    "obsidian@obsidian-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    },
+    "openai-codex": {
+      "source": {
+        "source": "github",
+        "repo": "openai/codex-plugin-cc"
+      }
+    },
+    "obsidian-skills": {
+      "source": {
+        "source": "github",
+        "repo": "kepano/obsidian-skills"
+      }
+    }
+  },
+  "effortLevel": "high",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "light-daltonized"
+}

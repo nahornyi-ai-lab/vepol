@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# kb-session-end — SessionEnd hook wrapper.
+# Delegates to patched upstream flush pipeline, redirecting data to
+# <project>/knowledge/daily/ and cross-referencing from <project>/knowledge/log.md.
+# Opt-in: requires <project>/knowledge/log.md. Opt-out: <project>/.kb-ignore.
+set -e
+
+STDIN_JSON="$(cat)"
+PROJECT="${CLAUDE_PROJECT_DIR:-}"
+if [[ -z "$PROJECT" ]]; then
+  PROJECT=$(printf '%s' "$STDIN_JSON" | python3 -c 'import sys,json
+try:
+    print(json.load(sys.stdin).get("cwd",""))
+except Exception:
+    pass' 2>/dev/null || true)
+fi
+
+if [[ -z "$PROJECT" || ! -f "$PROJECT/knowledge/log.md" || -e "$PROJECT/.kb-ignore" ]]; then
+  exit 0
+fi
+
+# Hard exclusions: не писать в вику при работе в $HOME/tmp/system
+case "$PROJECT" in
+  "$HOME"|/tmp|/tmp/*|/private/tmp|/private/tmp/*|/usr|/usr/*|/opt|/opt/*|/etc|/etc/*)
+    exit 0
+    ;;
+esac
+
+export CLAUDE_KB_DAILY_DIR="$PROJECT/knowledge/daily"
+export CLAUDE_KB_LOG_FILE="$PROJECT/knowledge/log.md"
+export CLAUDE_KB_NO_COMPILE=1
+
+# Resolve uv. Spawned-from-claude / launchd contexts may have a reduced PATH that
+# excludes the interactive shell's uv install. Fallback to known absolute paths.
+UV_BIN="$(command -v uv || true)"
+if [[ -z "$UV_BIN" ]]; then
+  for candidate in \
+    /opt/homebrew/bin/uv \
+    /usr/local/bin/uv \
+    "$HOME/.local/bin/uv" \
+    "$HOME/.cargo/bin/uv" \
+    "$HOME/.langflow/uv/uv"; do
+    if [[ -x "$candidate" ]]; then
+      UV_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$UV_BIN" ]]; then
+  echo "kb-session-end: uv not found in PATH or known locations; skipping flush" >&2
+  exit 0
+fi
+
+printf '%s' "$STDIN_JSON" | "$UV_BIN" run --directory "$HOME/claude-memory-compiler" python "$HOME/claude-memory-compiler/hooks/session-end.py"

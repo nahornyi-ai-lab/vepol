@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# kb-session-start — SessionStart hook wrapper.
+# Reads user's curated knowledge/ (README, state, index, log, recent dailies)
+# and injects as additionalContext for the new Claude Code session.
+# Opt-in: requires <project>/knowledge/log.md to exist.
+# Opt-out: <project>/.kb-ignore file.
+set -e
+
+STDIN_JSON="$(cat)"
+PROJECT="${CLAUDE_PROJECT_DIR:-}"
+if [[ -z "$PROJECT" ]]; then
+  PROJECT=$(printf '%s' "$STDIN_JSON" | python3 -c 'import sys,json
+try:
+    print(json.load(sys.stdin).get("cwd",""))
+except Exception:
+    pass' 2>/dev/null || true)
+fi
+
+if [[ -z "$PROJECT" || -e "$PROJECT/.kb-ignore" ]]; then
+  echo '{}'
+  exit 0
+fi
+
+# Hard exclusions — никогда не инжектим в home/tmp/system, даже если рядом есть knowledge/
+# (example: $HOME содержит сам хаб ~/knowledge/, это не значит что home — проект).
+case "$PROJECT" in
+  "$HOME"|/tmp|/tmp/*|/private/tmp|/private/tmp/*|/usr|/usr/*|/opt|/opt/*|/etc|/etc/*)
+    echo '{}'
+    exit 0
+    ;;
+esac
+
+# Хаб — это сам knowledge-dir без вложенного knowledge/. Триада лежит прямо в $PROJECT.
+# Отдаём python-блоку флаг через env, чтобы он не искал $PROJECT/knowledge/*.
+HUB_MODE=0
+if [[ "$PROJECT" == "$HOME/knowledge" && -f "$PROJECT/log.md" ]]; then
+  HUB_MODE=1
+fi
+
+# Если вики нет — проверить, выглядит ли это как реальный проект, и подсказать init-kb
+if [[ $HUB_MODE -eq 0 && ! -f "$PROJECT/knowledge/log.md" ]]; then
+  # Project markers
+  IS_PROJECT=0
+  for m in .git CLAUDE.md pyproject.toml package.json Cargo.toml go.mod requirements.txt Makefile; do
+    [[ -e "$PROJECT/$m" ]] && { IS_PROJECT=1; break; }
+  done
+  if [[ $IS_PROJECT -eq 1 ]]; then
+    HINT="## Knowledge Base (not yet initialized)
+
+This project looks like a real project (has marker files), but does not have a \`knowledge/\` wiki yet. The user's personal knowledge system hasn't been set up here.
+
+**If the user wants to start tracking this project in their knowledge base**, invoke the **init-kb** skill. It will analyze the project, propose slug/category/description, and bootstrap the structure with a single dialog. After that, SessionStart/SessionEnd hooks will automatically maintain the wiki going forward.
+
+**Trigger phrases**: «заведи вику», «init-kb», «/init-kb», «создай базу знаний здесь», «нужна вика».
+
+Do NOT run init-kb automatically — wait for the user to ask or indicate they want it."
+    python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":sys.argv[1]}}))' "$HINT"
+    exit 0
+  fi
+  echo '{}'
+  exit 0
+fi
+
+python3 - "$PROJECT" "$HUB_MODE" <<'PY'
+import json, sys
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+p = Path(sys.argv[1])
+hub_mode = sys.argv[2] == "1"
+k = p if hub_mode else p / "knowledge"
+parts = []
+
+today = datetime.now(timezone.utc).astimezone()
+parts.append(f"## Today\n{today.strftime('%A, %B %d, %Y')}")
+
+for name, label in [
+    ("README.md", "Project README"),
+    ("state.md", "Project State"),
+    ("index.md", "Knowledge Index"),
+]:
+    f = k / name
+    if f.exists():
+        parts.append(f"## {label}\n\n{f.read_text(encoding='utf-8')}")
+
+# Triad — coordination files every agent must see on entry.
+# Per ~/.claude/CLAUDE.md: backlog/escalations/incidents are core session context.
+# Injected BEFORE log tail so they survive the 20k total-context cap.
+for name, label, cap in [
+    ("backlog.md", "Backlog (open tasks for this project)", 4000),
+    ("escalations.md", "Escalations (open asks from project upward)", 3000),
+    ("incidents.md", "Incidents (ongoing + recent resolved, prevention rules)", 4000),
+]:
+    f = k / name
+    if f.exists():
+        content = f.read_text(encoding='utf-8')
+        if len(content) > cap:
+            content = content[:cap] + f"\n...(truncated, full file: {f})"
+        parts.append(f"## {label}\n\n{content}")
+
+log = k / "log.md"
+if log.exists():
+    lines = log.read_text(encoding='utf-8').splitlines()
+    tail = lines if len(lines) <= 80 else lines[-80:]
+    parts.append("## Recent Log\n\n" + "\n".join(tail))
+
+daily_dir = k / "daily"
+if daily_dir.exists():
+    for offset in range(2):
+        d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        f = daily_dir / f"{d}.md"
+        if f.exists():
+            body = f.read_text(encoding='utf-8').splitlines()[-60:]
+            parts.append(f"## Recent Daily ({d})\n\n" + "\n".join(body))
+            break
+
+context = "\n\n---\n\n".join(parts)
+if len(context) > 20000:
+    context = context[:20000] + "\n\n...(truncated)"
+
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": context,
+    }
+}))
+PY

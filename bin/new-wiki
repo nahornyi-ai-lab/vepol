@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# new-wiki — bootstrap локальной вики в проекте и регистрация в хабе.
+# Создаёт <project>/CLAUDE.md и <project>/knowledge/ со всей структурой,
+# симлинкает knowledge/ в ~/knowledge/projects/<slug> и логирует в хаб.
+#
+# Usage: new-wiki <path-to-project> [slug] [category]
+#   category: lab | order | pet | personal (по умолчанию — personal)
+
+set -euo pipefail
+
+HUB="${KNOWLEDGE_HUB:-$HOME/knowledge}"
+TEMPLATE="$HUB/_template"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: new-wiki <project-path> [slug] [category]" >&2
+  exit 1
+fi
+
+PROJECT_PATH="$(cd "$1" && pwd)"
+PROJECT_NAME="$(basename "$PROJECT_PATH")"
+SLUG="${2:-$(echo "$PROJECT_NAME" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')}"
+CATEGORY="${3:-personal}"
+DATE="$(date +%Y-%m-%d)"
+
+echo "→ Project:  $PROJECT_NAME"
+echo "→ Path:     $PROJECT_PATH"
+echo "→ Slug:     $SLUG"
+echo "→ Category: $CATEGORY"
+
+# 1. Создать структуру knowledge/
+mkdir -p "$PROJECT_PATH/knowledge/raw/assets"
+mkdir -p "$PROJECT_PATH/knowledge/sources"
+mkdir -p "$PROJECT_PATH/knowledge/daily"
+mkdir -p "$PROJECT_PATH/knowledge/reports"
+: > "$PROJECT_PATH/knowledge/daily/.gitkeep"
+: > "$PROJECT_PATH/knowledge/reports/.gitkeep"
+
+# 2. Рендер шаблонов
+render() {
+  local src="$1" dst="$2"
+  if [[ -e "$dst" ]]; then
+    echo "  ⚠ skip (exists): $dst"
+    return
+  fi
+  sed -e "s|{{PROJECT_NAME}}|$PROJECT_NAME|g" \
+      -e "s|{{PROJECT_SLUG}}|$SLUG|g" \
+      -e "s|{{CATEGORY}}|$CATEGORY|g" \
+      -e "s|{{DATE}}|$DATE|g" \
+      "$src" > "$dst"
+  echo "  ✓ $dst"
+}
+
+render "$TEMPLATE/CLAUDE.md"            "$PROJECT_PATH/CLAUDE.md"
+render "$TEMPLATE/knowledge/README.md"  "$PROJECT_PATH/knowledge/README.md"
+render "$TEMPLATE/knowledge/index.md"   "$PROJECT_PATH/knowledge/index.md"
+render "$TEMPLATE/knowledge/log.md"     "$PROJECT_PATH/knowledge/log.md"
+render "$TEMPLATE/knowledge/state.md"   "$PROJECT_PATH/knowledge/state.md"
+render "$TEMPLATE/knowledge/backlog.md"      "$PROJECT_PATH/knowledge/backlog.md"
+render "$TEMPLATE/knowledge/escalations.md"  "$PROJECT_PATH/knowledge/escalations.md"
+render "$TEMPLATE/knowledge/incidents.md"    "$PROJECT_PATH/knowledge/incidents.md"
+render "$TEMPLATE/knowledge/strategies.md"   "$PROJECT_PATH/knowledge/strategies.md"
+
+# Phase 2: ship the canonical report template + .orchestration.yaml so this
+# project participates in the orchestration cycle once `cycle_enabled` flips.
+render "$TEMPLATE/knowledge/reports/_template.md" "$PROJECT_PATH/knowledge/reports/_template.md"
+render "$TEMPLATE/knowledge/.orchestration.yaml"  "$PROJECT_PATH/knowledge/.orchestration.yaml"
+
+# 2.5. Добавить knowledge/ и .kb-ignore в .gitignore (вика не трекается git).
+GITIGNORE="$PROJECT_PATH/.gitignore"
+ensure_gitignore_line() {
+  local line="$1"
+  if [[ -f "$GITIGNORE" ]] && grep -Fxq "$line" "$GITIGNORE"; then
+    return
+  fi
+  if [[ ! -f "$GITIGNORE" ]]; then
+    {
+      echo "# Knowledge base (personal wiki, curated outside git)"
+      echo "# See ~/knowledge/CLAUDE.md"
+    } > "$GITIGNORE"
+  fi
+  echo "$line" >> "$GITIGNORE"
+  echo "  ✓ .gitignore += $line"
+}
+ensure_gitignore_line "knowledge/"
+ensure_gitignore_line ".kb-ignore"
+
+# 3. Симлинк в хаб (target = knowledge/, НЕ корень проекта — чтобы код не попал в Obsidian)
+LINK="$HUB/projects/$SLUG"
+if [[ -L "$LINK" || -e "$LINK" ]]; then
+  echo "  ⚠ symlink exists: $LINK"
+else
+  ln -s "$PROJECT_PATH/knowledge" "$LINK"
+  echo "  ✓ symlink: $LINK → $PROJECT_PATH/knowledge"
+fi
+
+# 4. Включить Codex review gate для этого проекта (требование: везде, где есть knowledge/).
+# Резолвим companion через glob — версия плагина меняется при upgrade, хардкодить нельзя.
+CODEX_COMPANION=$(ls -1 "$HOME/.claude/plugins/cache/openai-codex/codex/"*/scripts/codex-companion.mjs 2>/dev/null | sort -V | tail -1)
+if [[ -n "$CODEX_COMPANION" && -f "$CODEX_COMPANION" ]]; then
+  if (cd "$PROJECT_PATH" && node "$CODEX_COMPANION" setup --enable-review-gate --json > /tmp/codex-gate-$$.json 2>&1); then
+    echo "  ✓ codex review gate enabled (via $CODEX_COMPANION)"
+  else
+    echo "  ⚠ codex review gate: failed to enable (see /tmp/codex-gate-$$.json) — включи вручную из папки проекта"
+  fi
+  rm -f /tmp/codex-gate-$$.json
+else
+  echo "  ⚠ codex companion не найден в ~/.claude/plugins/cache/openai-codex/codex/*/scripts/ — review gate не включён"
+fi
+
+# 5. Запись в лог хаба
+{
+  echo ""
+  echo "## [$DATE] hub | $SLUG | Вика заведена через new-wiki ($CATEGORY)"
+  echo "Путь: \`$PROJECT_PATH\`. Симлинк: \`projects/$SLUG → $PROJECT_PATH/knowledge\`. Codex review gate включён."
+} >> "$HUB/log.md"
+
+echo ""
+echo "✅ Вика заведена. Дальше:"
+echo "  1. Открой $PROJECT_PATH/CLAUDE.md и заполни «О проекте» и «Категории»."
+echo "  2. Открой $PROJECT_PATH/knowledge/README.md и напиши 1–2 предложения описания."
+echo "  3. Обнови запись в $HUB/registry.md (статус seeded/live, описание)."
+echo "  4. Дропни первый источник в $PROJECT_PATH/knowledge/raw/ и скажи Claude «ingest»."

@@ -1,0 +1,95 @@
+# Vepol — privacy allowlist for Layer-4 semantic LLM scan
+#
+# Lists known false-positive patterns: things that look like personal data
+# (names, contacts, entity references) to a generic LLM, but are actually
+# methodology terms, TRIZ vocabulary, or attribution-context proper nouns.
+#
+# Format:
+#   allowlist:
+#     - pattern: "<exact string or POSIX regex>"
+#       reason: "<why this is safe to publish>"
+#       expires: <YYYY-MM-DD>           # mandatory — force re-review on this date
+#       scope: <docs|code|both>         # optional, default both
+#
+# Read by: bin/kb-leak-scan-semantic (L4 layer, see vepol-product.md §7.4)
+# Adding entries requires explicit PR review.
+#
+# Why expiry: methodology vocabulary evolves. A term safe today might overlap
+# with a new personal-data-bearing pattern next year. Re-review keeps allowlist
+# from becoming a permanent privacy hole.
+
+allowlist:
+  # Methodology process terms
+  - pattern: "cross-agent review"
+    reason: "Layer-1/Layer-2 review process between Claude and Codex orchestrators (methodology, not person)"
+    expires: 2027-04-29
+    scope: both
+
+  - pattern: "spec-driven workflow"
+    reason: "Methodology — spec → tests → code → tests → revisions cycle"
+    expires: 2027-04-29
+
+  - pattern: "parallel orchestrators"
+    reason: "Architecture term — Claude + Codex on same KB, no split-brain"
+    expires: 2027-04-29
+
+  # TRIZ vocabulary
+  - pattern: "В1|В2|substance-field|Vepol B1|Vepol B2"
+    reason: "TRIZ substance-field model nomenclature — Vepol's architectural foundation"
+    expires: 2027-04-29
+
+  - pattern: "ИКР|Ideal Final Result"
+    reason: "TRIZ methodology term — north-star concept in design"
+    expires: 2027-04-29
+
+  - pattern: "ТРИЗ|TRIZ|АРИЗ|ARIZ"
+    reason: "Methodology framework name (Theory of Inventive Problem Solving)"
+    expires: 2027-04-29
+
+  - pattern: "Веполь|Vepol|veпол"
+    reason: "Product name itself; TRIZ term it derives from"
+    expires: 2027-04-29
+
+  # Public attribution proper nouns (allowed only in explicit attribution context)
+  - pattern: "Альтшуллер|Altshuller"
+    reason: "TRIZ founder Genrich Altshuller — public historical figure, not personal contact"
+    expires: 2027-04-29
+    scope: docs
+
+  - pattern: "Karpathy"
+    reason: "Andrej Karpathy referenced in 'Karpathy LLM Wiki pattern' attribution in architecture docs (per vepol-naming-platform.md decision: name not used for product, but pattern attribution preserved)"
+    expires: 2027-04-29
+    scope: docs
+
+  # GitHub organization URL — nahornyi-ai-lab is the public org name where vepol
+  # repos are hosted (https://github.com/nahornyi-ai-lab). Allowed in URL/slug
+  # form (lowercase, kebab-case) but NOT in capitalized personal-name form,
+  # which remains blocked by Layer 1.
+  - pattern: "nahornyi-ai-lab"
+    reason: "GitHub org slug for repository URLs (org is public). Capitalized personal-name form remains blocked."
+    expires: 2027-04-29
+    scope: both
+
+  # Public maintainer contact email — explicitly published in vepol's
+  # SECURITY.md, COMMERCIAL.md, and README.md as the project's contact
+  # channel. Maintainer's explicit publication decision: this is a public
+  # contact, not a private leak. Note: scope=docs only (we do NOT want
+  # this email leaking into code/scripts/runtime — only in published
+  # documentation).
+  - pattern: "vadym@nahornyi.ai"
+    reason: "Public maintainer contact email — published intentionally in vepol public docs (SECURITY.md, COMMERCIAL.md, README.md). Re-review 2027 to confirm still in use."
+    expires: 2027-04-29
+    scope: docs
+
+  # Org legal name — appears in LICENSE copyright notice. Public information
+  # (Spanish SL registered business name). Allowed in attribution context only
+  # (LICENSE header, COMMERCIAL.md scope statements). Mixed-line check still
+  # applies: line containing both the org name AND a personal-name pattern still
+  # blocks because personal-name patterns remain blocked.
+  - pattern: "Nahornyi AI Lab"
+    reason: "Public legal entity name (Spanish SL registered company), appears in FSL LICENSE copyright notice. Public business information."
+    expires: 2027-04-29
+    scope: docs
+
+# Removed entries log (auditability):
+# (none yet)

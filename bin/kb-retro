@@ -1,0 +1,97 @@
+#!/bin/zsh
+# Evening retrospective: reviews the day's inbox + recent changes, asks reflection questions.
+#
+# Same secrets/env contract as kb-brief (see header there).
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+source "$HUB/personal/.secrets"
+
+USER_NAME="${USER_NAME:-}"
+USER_CITY="${USER_CITY:-}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-7}"
+ORCH="$HUB/bin/kb-orchestrator-run"
+
+TODAY=$(date +%Y-%m-%d)
+NOW=$(date +%H:%M)
+LOG="$HUB/logs/retro.log"
+INBOX="$HUB/personal/daily-inbox/$TODAY.md"
+
+ADDRESS="${USER_NAME:+ $USER_NAME}"
+LOCATION="${USER_CITY:+, $USER_CITY}"
+
+# Snapshot open backlog across hub + all projects (unified Jira-style view).
+BACKLOG_SNAPSHOT=$("$HUB/bin/kb-backlog" --open 2>/dev/null | sed $'s/\x1b\\[[0-9;]*m//g' || echo "(kb-backlog failed)")
+
+# Today's closed items + session events across hub + all live projects.
+# Grep lines starting with "- [x] ... closed YYYY-MM-DD" from hub/project backlog.md,
+# plus session-log lines for today from hub/project log.md.
+DONE_TODAY=$(
+  {
+    grep -Hn "closed $TODAY" "$HUB/backlog.md" 2>/dev/null || true
+    for link in "$HUB/projects"/*; do
+      [ -L "$link" ] || continue
+      slug="${link##*/}"
+      tgt="$(readlink "$link")"
+      grep -Hn "closed $TODAY" "$tgt/backlog.md" 2>/dev/null | sed "s|$tgt|[$slug]|g" || true
+    done
+    echo "---"
+    grep -H "^## \[$TODAY" "$HUB/log.md" 2>/dev/null || true
+    for link in "$HUB/projects"/*; do
+      [ -L "$link" ] || continue
+      slug="${link##*/}"
+      tgt="$(readlink "$link")"
+      grep -H "^## \[$TODAY" "$tgt/log.md" 2>/dev/null | sed "s|$tgt|[$slug]|g" || true
+    done
+    true
+  } 2>/dev/null | head -80 || true
+)
+
+PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодня $TODAY, $NOW${LOCATION}. Вечер — время ретроспективы.
+
+Прочитай:
+- $INBOX (всё что писали боту сегодня — сигнал того, что делали/думали)
+- последние 50 строк $HUB/log.md
+- сегодняшний файл $HUB/daily/$TODAY.md (если есть — это авто-компилированный extract сессий Claude Code)
+- утренний брифинг в $HUB/logs/brief.log (последняя запись)
+
+Кроме того, используй готовые снэпшоты (НЕ перечитывай их из файлов):
+
+<backlog_snapshot>
+$BACKLOG_SNAPSHOT
+</backlog_snapshot>
+
+<closed_today_and_log_events>
+$DONE_TODAY
+</closed_today_and_log_events>
+
+Выдай вечернее ретро по-русски, ≤900 символов:
+1. ✅ Что закрыто сегодня — 2–4 самых значимых пункта по факту из \`closed_today_and_log_events\`, не по плану.
+2. 📋 Backlog сейчас — одной строкой сколько open всего, и 1–2 проекта с наибольшей нагрузкой.
+3. ⏸ Что висит / перенесено — 1–2 важных open-пункта, которые требуют внимания (приоритет: hub > user > self).
+4. 💡 1 инсайт или паттерн, замеченный сегодня.
+5. 🌙 1 вопрос для рефлексии перед сном.
+
+Если inbox пустой, backlog пустой, в логах ничего — скажи это прямо, не выдумывай.
+
+НЕ пиши в файлы. Только текст ретро."
+
+cd "$HUB"
+RETRO=$("$ORCH" --cwd "$HUB" --timeout 180 "$PROMPT" 2>&1) || {
+  echo "[$(date -Iseconds)] orchestrator failed: $RETRO" >> "$LOG"
+  RETRO="⚠️ Ретро не собралось. Проверь $LOG"
+}
+
+MSG="🌙 Ретро $TODAY $NOW
+
+$RETRO"
+
+if [[ "${KB_RETRO_DRY:-}" == "1" ]]; then
+  echo "$MSG"
+  echo "[$(date -Iseconds)] retro dry-run ($(echo -n "$RETRO" | wc -c) chars)" >> "$LOG"
+else
+  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=$MSG" > /dev/null
+  echo "[$(date -Iseconds)] retro sent ($(echo -n "$RETRO" | wc -c) chars)" >> "$LOG"
+fi

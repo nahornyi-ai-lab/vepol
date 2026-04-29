@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""kb-orchestrator-reset-preferred — one-shot migration after provider-order flip.
+
+Removes `preferred_backend` from every session in state.json so new runs follow the
+current default order (codex first, claude fallback). Keeps `claude_session_id` and
+`claude_resume_ready` intact so Claude can still resume if it ever gets the job again.
+
+Hard-fails on JSON parse errors (unlike the permissive load_state in the wrapper).
+Writes atomically via tmp+rename. No file locking — do not run concurrently with
+scheduled jobs that touch state.json.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sys
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+STATE_DIR = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_STATE_DIR", HUB / ".orchestrator"))
+STATE_FILE = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_STATE_FILE", STATE_DIR / "state.json"))
+
+
+def main() -> int:
+    if not STATE_FILE.exists():
+        print(f"state file not found: {STATE_FILE}", file=sys.stderr)
+        return 0
+
+    raw = STATE_FILE.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"state file is not valid JSON: {STATE_FILE}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(data, dict):
+        print(f"state file is not a JSON object: {STATE_FILE}", file=sys.stderr)
+        return 1
+
+    sessions = data.get("sessions") or {}
+    if not isinstance(sessions, dict):
+        print("sessions is not an object; nothing to migrate", file=sys.stderr)
+        return 0
+
+    changed = 0
+    for key, record in sessions.items():
+        if isinstance(record, dict) and record.pop("preferred_backend", None) is not None:
+            changed += 1
+
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+    print(f"cleared preferred_backend on {changed} session(s) in {STATE_FILE}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,1225 @@
+#!/usr/bin/env python3
+"""kb-orchestrator-cycle — N-level evening retro + (Phase 5) morning plan.
+
+Spec: ~/.claude/plans/rustling-marinating-sketch.md (Phase 3).
+
+Subcommands:
+  retro              — evening bottom-up cycle (Phase 3)
+  plan               — morning top-down decompose (Phase 5)
+  cycle              — retro + plan in one run (mostly for test fixtures)
+
+Algorithm (retro):
+  1. Run `kb-rebuild-registry check` — refuse if drift.
+  2. Parse hierarchy.yaml → DAG → topological levels (leaves at 0).
+  3. Pre-cycle terminal-report pass: for each enabled project missing a
+     `reports/<date>.md`, write `status: pending, reason: cycle-not-started`.
+     This is a first-class lifecycle state — parents always read a valid
+     enum status from children, even before spawn.
+  4. For each level bottom-up, parallel within level (cap KB_CYCLE_PARALLELISM=4):
+     - Spawn agent in child cwd via kb-orchestrator-run (broker contract:
+       positional prompt; --cwd; --timeout). Output report atomically.
+     - Pass child report paths via env KB_CHILD_REPORT_PATHS (newline-separated).
+  5. Hub level — inline kb-retro with KB_RETRO_CYCLE_MODE=1.
+  6. Append `### Cycle summary (HH:MM)` to daily/<date>.md.
+
+Per-category circuit breaker (CR-N1):
+  Categories: ok, rate_limit, auth, network, timeout, code_error, crash, other.
+  Thresholds (open / half-open):
+    rate_limit/auth/network: 5 fails / 2h → open 30 min
+    timeout: 3 fails / 3 days → open 24h
+    code_error/crash: 2 fails / 1 day → open 48h
+    other: 3 fails / 1 day → open 12h
+  State file: ~/knowledge/.orchestrator/circuit-<slug>.json
+
+Degradation (CR-N2):
+  - If cycle overshoots (>5 min from 20:45 → not done by 21:00):
+    1. kb-retro at 21:00 waits for .cycle.lock up to 5 min.
+    2. If not acquired — kb-retro writes "in-progress" cycle summary in
+       daily.md and partial state in .orchestrator/cycle-<date>.partial.json.
+    3. Cycle finishes async, writes full cycle-<date>.json.
+    4. Next morning kb-brief detects partial+full and signals delay.
+
+Exit codes:
+  0   all good
+  3   circuit-breaker triggered (one or more children opened)
+  4   hub-retro failed
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import uuid
+from typing import Optional
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+HIERARCHY_PATH = HUB / "hierarchy.yaml"
+CYCLE_LOCK = HUB / ".cycle.lock"
+ORCHESTRATOR_DIR = HUB / ".orchestrator"
+CIRCUIT_DIR = ORCHESTRATOR_DIR / "circuits"
+RUNS_DIR = ORCHESTRATOR_DIR / "runs"
+DAILY_DIR = HUB / "daily"
+REPORTS_DIR_NAME = "reports"
+# Sibling-to-self CLI lookups. KB_HUB controls *data* (registry, hierarchy,
+# audit, locks); the binaries are always in the directory containing this
+# script. Required for sandboxed tests that override KB_HUB.
+_BIN_DIR = pathlib.Path(__file__).resolve().parent
+RETRO_PROMPT_PATH = _BIN_DIR / "templates" / "cycle-retro.prompt.md"
+KB_ORCHESTRATOR_RUN = _BIN_DIR / "kb-orchestrator-run"
+KB_REBUILD_REGISTRY = _BIN_DIR / "kb-rebuild-registry"
+KB_RETRO = _BIN_DIR / "kb-retro"
+KB_BACKLOG = _BIN_DIR / "kb-backlog"
+
+# Anti-loop invariants (CR-N1)
+DEFAULT_PARALLELISM = int(os.environ.get("KB_CYCLE_PARALLELISM", "4"))
+HARD_PARALLELISM_CAP = 6
+DEFAULT_MAX_DEPTH = int(os.environ.get("KB_CYCLE_MAX_DEPTH", "5"))
+DEFAULT_TOTAL_TIMEOUT = int(os.environ.get("KB_CYCLE_TOTAL_TIMEOUT", "1800"))
+DEFAULT_MAX_FANOUT = int(os.environ.get("KB_CYCLE_MAX_FANOUT", "8"))
+
+# Circuit breaker thresholds per category (fails, window_seconds, open_seconds)
+CIRCUIT_THRESHOLDS = {
+    "rate_limit": (5, 2 * 3600, 30 * 60),
+    "auth":       (5, 2 * 3600, 30 * 60),
+    "network":    (5, 2 * 3600, 30 * 60),
+    "timeout":    (3, 3 * 24 * 3600, 24 * 3600),
+    "code_error": (2, 24 * 3600, 48 * 3600),
+    "crash":      (2, 24 * 3600, 48 * 3600),
+    "other":      (3, 24 * 3600, 12 * 3600),
+}
+
+
+def say(msg: str) -> None:
+    print(f"\033[1;36m→\033[0m {msg}", file=sys.stderr)
+
+
+def warn(msg: str) -> None:
+    print(f"\033[1;33m!\033[0m {msg}", file=sys.stderr)
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"\033[1;31m✘\033[0m {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Hierarchy loader
+# ──────────────────────────────────────────────────────────────────────────
+
+def _parse_yaml(path: pathlib.Path) -> dict:
+    """Minimal YAML parser sufficient for hierarchy.yaml format. Avoids a
+    PyYAML dependency for portability of the seed.
+
+    Supports: top-level scalars, mappings, single-line list literals
+    `[a, b, c]`, nested 2-space mappings.
+    """
+    text = path.read_text(encoding="utf-8")
+    out: dict = {}
+    stack: list[tuple[int, dict]] = [(0, out)]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Indent level
+        indent = len(line) - len(line.lstrip(" "))
+        # Pop stack to current indent
+        while stack and stack[-1][0] > indent:
+            stack.pop()
+        parent = stack[-1][1]
+        if ":" not in stripped:
+            continue
+        key, _, val = stripped.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if val == "":
+            # Mapping start
+            new = {}
+            parent[key] = new
+            stack.append((indent + 2, new))
+        elif val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            parent[key] = [s.strip() for s in inner.split(",") if s.strip()] if inner else []
+        else:
+            # Scalar
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            elif val == "null":
+                val = None
+            elif val == "true":
+                val = True
+            elif val == "false":
+                val = False
+            elif val.isdigit():
+                val = int(val)
+            parent[key] = val
+    return out
+
+
+def load_hierarchy() -> dict:
+    if not HIERARCHY_PATH.is_file():
+        die(f"hierarchy.yaml missing at {HIERARCHY_PATH}; run kb-rebuild-registry apply first")
+    return _parse_yaml(HIERARCHY_PATH)
+
+
+def topological_levels(hier: dict) -> list[list[str]]:
+    """Return [[level-0 leaves], [level-1], ..., [hub]] in BFS bottom-up order.
+
+    Level = max depth from any leaf descendant. Hub is at the top level.
+    """
+    nodes = hier["nodes"]
+    # Compute depth from leaves (longest path to any leaf descendant)
+    depth: dict[str, int] = {}
+
+    def get_depth(slug: str) -> int:
+        if slug in depth:
+            return depth[slug]
+        node = nodes.get(slug, {})
+        children = node.get("children") or []
+        if not children:
+            depth[slug] = 0
+            return 0
+        depth[slug] = 1 + max(get_depth(c) for c in children)
+        return depth[slug]
+
+    for slug in nodes:
+        get_depth(slug)
+
+    levels: dict[int, list[str]] = {}
+    for slug, d in depth.items():
+        levels.setdefault(d, []).append(slug)
+    return [sorted(levels[d]) for d in sorted(levels)]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Circuit breaker
+# ──────────────────────────────────────────────────────────────────────────
+
+def _circuit_path(slug: str) -> pathlib.Path:
+    return CIRCUIT_DIR / f"{slug}.json"
+
+
+def _load_circuit(slug: str) -> dict:
+    p = _circuit_path(slug)
+    if not p.is_file():
+        return {"category_fails": {}, "open_until": 0, "open_reason": None}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"category_fails": {}, "open_until": 0, "open_reason": None}
+
+
+def _save_circuit(slug: str, state: dict) -> None:
+    CIRCUIT_DIR.mkdir(parents=True, exist_ok=True)
+    p = _circuit_path(slug)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def circuit_is_open(slug: str) -> tuple[bool, Optional[str]]:
+    """Return (is_open, reason_if_open).
+
+    Implementation: simple time-based — `open_until > now` blocks all
+    spawns. The first spawn after `open_until` IS the half-open probe — if
+    it succeeds, `circuit_record_success` resets the breaker; if it fails,
+    `circuit_record_fail` re-opens via the same threshold logic. There is
+    no separate half-open marker stored.
+    """
+    state = _load_circuit(slug)
+    open_until = state.get("open_until", 0)
+    now = time.time()
+    if open_until > now:
+        return True, state.get("open_reason")
+    return False, None
+
+
+def circuit_record_fail(slug: str, category: str, detail: str) -> bool:
+    """Record a fail in the given category. Returns True if the breaker
+    transitioned from closed to open (caller should not retry this run).
+    """
+    state = _load_circuit(slug)
+    fails = state.setdefault("category_fails", {}).setdefault(category, [])
+    now = time.time()
+    fails.append(now)
+    # Prune fails outside the window for this category.
+    if category in CIRCUIT_THRESHOLDS:
+        threshold, window_s, open_s = CIRCUIT_THRESHOLDS[category]
+        cutoff = now - window_s
+        fails[:] = [t for t in fails if t > cutoff]
+        if len(fails) >= threshold:
+            state["open_until"] = now + open_s
+            state["open_reason"] = f"{category}: {detail} ({len(fails)} fails in {window_s//60} min)"
+            _save_circuit(slug, state)
+            return True
+    _save_circuit(slug, state)
+    return False
+
+
+def circuit_record_success(slug: str) -> None:
+    """Reset all category fails and any open state on a successful run."""
+    state = {"category_fails": {}, "open_until": 0, "open_reason": None}
+    _save_circuit(slug, state)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Pre-cycle terminal-report pass
+# ──────────────────────────────────────────────────────────────────────────
+
+def write_terminal_report(slug: str, knowledge_path: str, parent: Optional[str],
+                          children: list[str], date: str, run_id: str,
+                          status: str, reason: str = "") -> pathlib.Path:
+    """Atomically write a minimal terminal report for the cycle state machine.
+
+    Used:
+      - `status: pending, reason: cycle-not-started` before spawn (pre-cycle pass)
+      - `status: timeout|error|skipped|partial` when spawn finishes abnormally
+
+    Frontmatter only — the agent fills in body sections during spawn. If the
+    agent writes a full report, it overwrites this terminal file.
+    """
+    reports_dir = pathlib.Path(knowledge_path) / REPORTS_DIR_NAME
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    target = reports_dir / f"{date}.md"
+    fm_lines = [
+        "---",
+        f"report_id: {slug}-{date}",
+        f"slug: {slug}",
+        f"date: {date}",
+        "cycle: evening",
+        f"parent: {parent or 'null'}",
+        f"children_rolled_up: [{', '.join(children)}]",
+        f"status: {status}",
+        f"run_id: {run_id}",
+    ]
+    if reason:
+        fm_lines.append(f"reason: \"{reason}\"")
+    fm_lines.append("---")
+    body = ""
+    if status == "pending":
+        body = "\n_(cycle not started yet — terminal report scaffold)_\n"
+    elif status in ("timeout", "error"):
+        body = f"\n_(spawn ended in `{status}`; check executor.log for details)_\n"
+    elif status == "skipped":
+        body = "\n_(cycle_enabled: false; no spawn attempted)_\n"
+    text = "\n".join(fm_lines) + body
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+    return target
+
+
+def report_exists_with_run_id(knowledge_path: str, date: str, run_id: str) -> bool:
+    """True iff a report file exists with this exact run_id AND has finished
+    (status != pending). The pre-cycle terminal pass writes pending reports
+    with the same run_id, so we explicitly exclude pending state from the
+    idempotency check — only a completed-or-failed-spawn report counts.
+    """
+    p = pathlib.Path(knowledge_path) / REPORTS_DIR_NAME / f"{date}.md"
+    if not p.is_file():
+        return False
+    try:
+        text = p.read_text(encoding="utf-8")
+        if f"run_id: {run_id}" not in text:
+            return False
+        # Reject pending — that's the pre-cycle scaffold, not a real spawn.
+        if "status: pending" in text:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def read_existing_report_status(knowledge_path: str, date: str) -> Optional[str]:
+    """Return the `status:` field of an existing report, or None if no report
+    exists. Used by pre-cycle pass to avoid overwriting completed reports with
+    a fresh `pending` scaffold (CR4-B3).
+    """
+    p = pathlib.Path(knowledge_path) / REPORTS_DIR_NAME / f"{date}.md"
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("status:"):
+                return stripped.split(":", 1)[1].strip()
+        return None
+    except OSError:
+        return None
+
+
+def read_broker_result(run_id: str) -> Optional[dict]:
+    """Read the broker's run-result file written by `--json-status --run-id`.
+    Returns the parsed dict if the file exists, otherwise None — which the
+    caller distinguishes from `{"category": "other"}` (a real broker verdict).
+    """
+    p = RUNS_DIR / f"{run_id}.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Spawn one project's retro via broker
+# ──────────────────────────────────────────────────────────────────────────
+
+def _build_retro_prompt(slug: str, knowledge_path: str, date: str, run_id: str,
+                        parent: Optional[str], children: list[str],
+                        child_report_paths: list[str]) -> str:
+    template = RETRO_PROMPT_PATH.read_text(encoding="utf-8")
+    if child_report_paths:
+        block = (
+            "5. **Reports children** (absolute paths, read-only):\n"
+            + "\n".join(f"   - `{p}`" for p in child_report_paths)
+        )
+    else:
+        block = "5. _(no children — leaf project)_"
+    return (template
+            .replace("{{SLUG}}", slug)
+            .replace("{{KNOWLEDGE_PATH}}", knowledge_path)
+            .replace("{{DATE}}", date)
+            .replace("{{RUN_ID}}", run_id)
+            .replace("{{PARENT_SLUG}}", parent or "null")
+            .replace("{{CHILDREN_LIST}}", "[" + ", ".join(children) + "]")
+            .replace("{{CHILD_REPORTS_BLOCK}}", block))
+
+
+def _spawn_one(node: dict, date: str, cycle_run_id: str,
+               child_report_paths: list[str], total_deadline: float,
+               force: bool) -> dict:
+    """Spawn the broker for one project. Returns a result dict.
+
+    Result keys: slug, status, category, detail, duration, reused.
+    """
+    slug = node["slug"]
+    knowledge_path = node["knowledge_path"]
+    parent = node.get("parent")
+    children = node.get("children") or []
+    sla = int(node.get("sla_report_timeout_sec", 300))
+
+    # Idempotency (CR5-B3 broadened): if today's report already has a
+    # completed status (`done`/`partial` etc., NOT `pending`), do NOT spawn —
+    # otherwise a re-run after crash could downgrade `done` to `timeout` or
+    # overwrite a real report with `error`. Skip with `reused=True`.
+    # `--force` overrides this and always spawns.
+    run_id = f"{cycle_run_id}-{slug}"
+    if not force:
+        existing_status = read_existing_report_status(knowledge_path, date)
+        if existing_status and existing_status != "pending":
+            return {"slug": slug, "status": existing_status, "category": "ok",
+                    "detail": f"report already exists (status={existing_status}, idempotent skip)",
+                    "reused": True}
+
+    # Circuit breaker check
+    open_, reason = circuit_is_open(slug)
+    if open_ and not force:
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="skipped", reason=f"circuit-open: {reason}")
+        return {"slug": slug, "status": "skipped", "category": "circuit-open",
+                "detail": reason or "open", "reused": False}
+
+    # cycle_enabled toggle
+    if not node.get("cycle_enabled", False):
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="skipped", reason="cycle_enabled: false")
+        return {"slug": slug, "status": "skipped", "category": "ok",
+                "detail": "cycle_enabled: false", "reused": False}
+
+    # Timeout calculation: limit by remaining cycle deadline.
+    # CR4-B4: if the remaining cycle deadline is exhausted, refuse to spawn.
+    # Don't extend beyond the total cycle timeout.
+    remaining = int(total_deadline - time.time())
+    if remaining <= 0:
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="skipped", reason="cycle deadline exhausted")
+        return {"slug": slug, "status": "skipped", "category": "ok",
+                "detail": "cycle-deadline-exhausted", "reused": False}
+    effective_timeout = min(sla, remaining)
+    if effective_timeout < 30:
+        # Less than 30s left — not worth spawning; mark skipped.
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="skipped",
+                              reason=f"cycle deadline near ({remaining}s left, sla={sla}s)")
+        return {"slug": slug, "status": "skipped", "category": "ok",
+                "detail": f"deadline-near {remaining}s", "reused": False}
+
+    prompt = _build_retro_prompt(slug, knowledge_path, date, run_id, parent,
+                                 children, child_report_paths)
+
+    # Broker invocation. Pass --run-id so we can read the result-file
+    # deterministically (CR4-B1: previously we guessed category from stderr,
+    # which collapsed everything to "other").
+    broker_run_id = str(uuid.uuid4())
+    cmd = [str(KB_ORCHESTRATOR_RUN), prompt,
+           "--cwd", knowledge_path,
+           "--timeout", str(effective_timeout),
+           "--json-status", "--run-id", broker_run_id]
+    env = os.environ.copy()
+    env["KB_CHILD_REPORT_PATHS"] = "\n".join(child_report_paths)
+
+    t0 = time.time()
+    try:
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                              timeout=effective_timeout + 30)
+        elapsed = int(time.time() - t0)
+    except subprocess.TimeoutExpired:
+        elapsed = int(time.time() - t0)
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="timeout", reason=f"broker timeout ({elapsed}s)")
+        opened = circuit_record_fail(slug, "timeout", f"{elapsed}s")
+        return {"slug": slug, "status": "timeout", "category": "timeout",
+                "detail": f"{elapsed}s", "circuit_opened": opened, "reused": False}
+
+    # Read structured result from broker's JSON file (CR4-B1 fix).
+    broker_result = read_broker_result(broker_run_id)
+    if broker_result is None:
+        # No result file. If the broker exited 0, treat as ok (broker just
+        # didn't bother writing the file — common in stub/test broker paths).
+        # If it exited non-zero, fall back to "other" with stderr tail.
+        category = "ok" if proc.returncode == 0 else "other"
+        broker_detail = (
+            (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        )[0][:200]
+    else:
+        category = broker_result.get("category", "other")
+        broker_detail = broker_result.get("detail", "") or (
+            (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        )[0][:200]
+
+    if proc.returncode != 0:
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="error", reason=f"broker rc={proc.returncode} ({category})")
+        opened = circuit_record_fail(slug, category, broker_detail)
+        return {"slug": slug, "status": "error", "category": category,
+                "detail": broker_detail, "circuit_opened": opened,
+                "duration": elapsed, "reused": False}
+
+    # Success: agent should have written reports/<date>.md. Verify.
+    report_path = pathlib.Path(knowledge_path) / REPORTS_DIR_NAME / f"{date}.md"
+    if not report_path.is_file():
+        # Agent succeeded per broker but didn't write the report.
+        # CR4-N3: count partial as a code_error fail in the circuit breaker
+        # — broker says ok but agent didn't deliver, that's an agent bug.
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="partial", reason="agent did not write report file")
+        opened = circuit_record_fail(slug, "code_error", "agent did not write report")
+        return {"slug": slug, "status": "partial", "category": "code_error",
+                "detail": "no report file produced",
+                "circuit_opened": opened, "duration": elapsed, "reused": False}
+
+    # Bug-1 fix (false-green from first production cycle 2026-04-25):
+    # the file may EXIST but still hold our pre-cycle pending scaffold —
+    # broker exit 0 + file exists is NOT enough to claim done. Read the
+    # file's actual `status:` field; if it's still `pending`, the agent
+    # didn't deliver real content.
+    post_status = read_existing_report_status(knowledge_path, date)
+    if post_status == "pending":
+        write_terminal_report(slug, knowledge_path, parent, children, date, run_id,
+                              status="partial",
+                              reason="agent left pre-cycle pending scaffold (didn't overwrite)")
+        opened = circuit_record_fail(slug, "code_error",
+                                     "agent didn't overwrite pending scaffold")
+        return {"slug": slug, "status": "partial", "category": "code_error",
+                "detail": "report still status: pending after spawn",
+                "circuit_opened": opened, "duration": elapsed, "reused": False}
+
+    circuit_record_success(slug)
+    return {"slug": slug, "status": "done", "category": category or "ok",
+            "detail": broker_detail or "ok", "duration": elapsed, "reused": False}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Main retro algorithm
+# ──────────────────────────────────────────────────────────────────────────
+
+def cmd_retro(args) -> int:
+    # Step 1: registry consistency check
+    if not args.skip_registry_check:
+        rc = subprocess.run([str(KB_REBUILD_REGISTRY), "check"],
+                            capture_output=True, text=True).returncode
+        if rc != 0:
+            die(f"kb-rebuild-registry check failed (rc={rc}); fix drift before cycle")
+
+    # Step 2: parse hierarchy
+    hier = load_hierarchy()
+    nodes_dict = hier["nodes"]
+    levels = topological_levels(hier)
+    say(f"hierarchy: {sum(len(l) for l in levels)} nodes across {len(levels)} levels")
+
+    date = args.date or dt.date.today().isoformat()
+    cycle_run_id = str(uuid.uuid4())
+    total_deadline = time.time() + DEFAULT_TOTAL_TIMEOUT
+
+    # CR4-B2: validate "enabled implies all ancestors enabled".
+    # Root (hub) is exempt — it doesn't run a project-style spawn. Otherwise
+    # any enabled child whose parent (chain) is disabled would have its
+    # report ignored by parent rollup. Refuse to run rather than silently
+    # losing data.
+    # CR5-N1: use hier["root"] rather than hardcoded "hub" so the cycle CLI
+    # remains correct if the root is ever renamed.
+    root_slug = hier.get("root", "hub")
+    invalid: list[tuple[str, str]] = []
+    for slug, node in nodes_dict.items():
+        if not node.get("cycle_enabled", False) or node.get("kind") == "root":
+            continue
+        cur = node.get("parent")
+        while cur and cur != root_slug:
+            pnode = nodes_dict.get(cur, {})
+            if not pnode.get("cycle_enabled", False):
+                invalid.append((slug, cur))
+                break
+            cur = pnode.get("parent")
+    if invalid:
+        for child, ancestor in invalid:
+            warn(f"INVALID: {child} cycle_enabled=true but ancestor {ancestor} cycle_enabled=false")
+        die("hierarchy invalid: enabled child under disabled ancestor — "
+            "fix .orchestration.yaml or call hub-only ancestor enabled. "
+            "Run kb-doctor hierarchy-check for details.", code=2)
+
+    # CR4-B4: enforce MAX_DEPTH (max levels - 1) and MAX_FANOUT.
+    if len(levels) - 1 > DEFAULT_MAX_DEPTH:
+        die(f"hierarchy depth {len(levels) - 1} > MAX_DEPTH {DEFAULT_MAX_DEPTH}")
+    for slug, node in nodes_dict.items():
+        if node.get("kind") == "root":
+            # Root may have many top-level children; relax cap (matches
+            # kb-doctor hierarchy-check root-relaxation).
+            continue
+        kids = node.get("children") or []
+        if len(kids) > DEFAULT_MAX_FANOUT:
+            die(f"node {slug} has fanout {len(kids)} > MAX_FANOUT {DEFAULT_MAX_FANOUT}")
+
+    # Step 3: pre-cycle terminal-report pass.
+    # CR4-B3: only write `pending` when no report exists OR existing is stale
+    # (status: pending from a prior aborted cycle). Don't clobber completed
+    # reports just because today's cycle_run_id is fresh.
+    say(f"pre-cycle terminal-report pass for {date}")
+    for slug, node in nodes_dict.items():
+        if node.get("kind") == "root":
+            continue
+        if not node.get("cycle_enabled", False):
+            continue
+        run_id = f"{cycle_run_id}-{slug}"
+        existing_status = read_existing_report_status(node["knowledge_path"], date)
+        if existing_status is None or existing_status == "pending" or args.force:
+            write_terminal_report(
+                slug, node["knowledge_path"], node.get("parent"), node.get("children") or [],
+                date, run_id, status="pending", reason="cycle-not-started",
+            )
+        # else: existing report has status: done|partial|timeout|error|skipped — preserve it.
+
+    # Step 4: BFS bottom-up
+    results: dict[str, dict] = {}
+    parallelism = min(args.parallelism, HARD_PARALLELISM_CAP)
+
+    def child_report_paths_for(slug: str) -> list[str]:
+        node = nodes_dict.get(slug, {})
+        out = []
+        for c in node.get("children") or []:
+            cnode = nodes_dict.get(c)
+            if not cnode:
+                continue
+            p = pathlib.Path(cnode["knowledge_path"]) / REPORTS_DIR_NAME / f"{date}.md"
+            out.append(str(p))
+        return out
+
+    for level_idx, level in enumerate(levels[:-1]):  # exclude top (hub)
+        say(f"level {level_idx}: {len(level)} nodes — {', '.join(level)}")
+        # Filter to enabled, non-root
+        enabled = [
+            slug for slug in level
+            if nodes_dict[slug].get("kind") != "root"
+            and nodes_dict[slug].get("cycle_enabled", False)
+        ]
+        if not enabled:
+            continue
+
+        if args.dry_run:
+            for slug in enabled:
+                print(f"[dry-run] would spawn retro for {slug}")
+                results[slug] = {"slug": slug, "status": "dry-run"}
+            continue
+
+        # Parallel within level
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as ex:
+            futures = {
+                ex.submit(_spawn_one, {**nodes_dict[slug], "slug": slug}, date, cycle_run_id,
+                          child_report_paths_for(slug), total_deadline, args.force): slug
+                for slug in enabled
+            }
+            for f in concurrent.futures.as_completed(futures):
+                slug = futures[f]
+                try:
+                    results[slug] = f.result()
+                except Exception as exc:
+                    results[slug] = {"slug": slug, "status": "error",
+                                     "category": "crash", "detail": repr(exc)}
+                    circuit_record_fail(slug, "crash", repr(exc)[:200])
+                say(f"  {slug}: {results[slug].get('status')} ({results[slug].get('category', '?')})")
+
+    # Step 5: hub level — inline kb-retro
+    say("hub level — inline kb-retro")
+    summary_path = ORCHESTRATOR_DIR / f"cycle-{date}.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "date": date,
+        "cycle_run_id": cycle_run_id,
+        "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "results": results,
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    if not args.dry_run and not args.skip_hub_retro:
+        env = os.environ.copy()
+        env["KB_RETRO_CYCLE_MODE"] = "1"
+        env["KB_RETRO_CYCLE_SUMMARY"] = str(summary_path)
+        rc = subprocess.run([str(KB_RETRO)], env=env).returncode
+        if rc != 0:
+            warn(f"kb-retro returned rc={rc}")
+            return 4
+
+    # Step 6: append cycle summary to daily/<date>.md
+    DAILY_DIR.mkdir(parents=True, exist_ok=True)
+    daily_path = DAILY_DIR / f"{date}.md"
+    summary_section = _format_cycle_summary(summary)
+    if not args.dry_run:
+        with open(daily_path, "a", encoding="utf-8") as fh:
+            fh.write("\n" + summary_section + "\n")
+        say(f"appended cycle summary to {daily_path}")
+
+    # Post-cycle cleanup hook (incident-2026-04-25 lesson):
+    # each parallel codex spawn loads its own copy of the telegram channel
+    # MCP plugin and doesn't always release it on exit. Across 14 spawns
+    # this leaves multiple `bun server.ts` processes pinning CPU until the
+    # next channel-instances tick. Run kb-codex-cleanup at end of cycle to
+    # cull duplicates immediately rather than wait 5 min for kb-tick.
+    if not args.dry_run and not args.skip_post_cleanup:
+        cleanup_path = _BIN_DIR / "kb-codex-cleanup"
+        if cleanup_path.is_file():
+            try:
+                subprocess.run([str(cleanup_path)], capture_output=True,
+                               text=True, timeout=30)
+                say("post-cycle cleanup ran")
+            except subprocess.SubprocessError as exc:
+                warn(f"post-cycle cleanup failed (non-fatal): {exc!r}")
+
+    # Exit code
+    any_open = any(r.get("circuit_opened") for r in results.values())
+    if any_open:
+        return 3
+    return 0
+
+
+def _format_cycle_summary(summary: dict) -> str:
+    now = dt.datetime.now()
+    lines = [f"### Cycle summary ({now.strftime('%H:%M')})"]
+    by_status: dict[str, list[str]] = {}
+    for slug, res in summary["results"].items():
+        by_status.setdefault(res.get("status", "?"), []).append(slug)
+    for status in ("done", "skipped", "partial", "timeout", "error"):
+        slugs = by_status.get(status, [])
+        if slugs:
+            lines.append(f"- **{status}** ({len(slugs)}): {', '.join(sorted(slugs))}")
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 5: morning top-down plan decompose
+# ──────────────────────────────────────────────────────────────────────────
+
+# Re-export kb-backlog parsing helpers without importing the whole package
+# at startup (which is slow). We do a lightweight inline import only inside
+# cmd_plan().
+
+_PLAN_ITEM_RE = re.compile(
+    r"plan_item_id\s*:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+_SLUG_PREFIX_RE = re.compile(r"\(\s*([A-Za-z0-9_-]+)\s*\)")
+_TASK_LINE_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(.+)$")
+
+
+def _parse_approved_plan(plan_path: pathlib.Path) -> tuple[list[dict], Optional[str]]:
+    """Parse `daily-plan/<date>.md` looking for items in the form:
+
+        - [ ] (slug) <body> — plan_item_id: <uuid> — ...
+
+    Returns (items, approved_at_string).
+
+    Each item dict: {target_slug, body, plan_item_id, raw_line, lineno}.
+
+    `approved_at_string` is the value of the first `approved_at:` field
+    found anywhere in the file (frontmatter or body). None if absent.
+    """
+    if not plan_path.is_file():
+        die(f"approved plan not found: {plan_path}")
+    text = plan_path.read_text(encoding="utf-8")
+
+    approved_at: Optional[str] = None
+    for line in text.splitlines():
+        m = re.match(r"\s*approved_at\s*:\s*(.+?)\s*$", line)
+        if m:
+            v = m.group(1).strip()
+            if v and v not in ("null", "~", '""', "''"):
+                approved_at = v
+                break
+
+    items: list[dict] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        m = _TASK_LINE_RE.match(line)
+        if not m:
+            continue
+        body = m.group(1)
+        slug_m = _SLUG_PREFIX_RE.match(body)
+        if not slug_m:
+            continue
+        target_slug = slug_m.group(1)
+        # Strip the (slug) prefix
+        body_after_slug = body[slug_m.end():].lstrip()
+        pid_m = _PLAN_ITEM_RE.search(body)
+        plan_item_id = pid_m.group(1).lower() if pid_m else None
+        if not plan_item_id:
+            warn(f"plan line {lineno} missing plan_item_id, skipping: {body[:80]}")
+            continue
+        # Strip the `— plan_item_id: ...` and any other field suffixes from
+        # the body — kb-backlog append will re-add plan_item_id as its own
+        # field, so leaving it in body would produce duplicates on the
+        # rendered line (CR-Phase5 bug found while testing B1 fixture).
+        body_clean = re.split(r"\s+—\s+\w+\s*:\s*", body_after_slug)[0].strip()
+        items.append({
+            "target_slug": target_slug,
+            "body": body_clean,
+            "plan_item_id": plan_item_id,
+            "raw_line": line,
+            "lineno": lineno,
+        })
+    return items, approved_at
+
+
+def _global_plan_item_lookup() -> dict[str, list[dict]]:
+    """Walk every project backlog (via ~/knowledge/projects/*/backlog.md +
+    hub backlog.md) and index every line by plan_item_id.
+
+    Returns: { plan_item_id: [{slug, lineno, status, body}, ...], ... }
+
+    Used by cmd_plan to determine carried-item state (open / closed /
+    parent-moved / multi-file-dup).
+    """
+    # CR-Phase5-N: sibling-to-self lookup, not HUB-relative (sandboxed
+    # tests would otherwise look in the wrong place).
+    sys.path.insert(0, str(_BIN_DIR))
+    from _kb_backlog import parsing as _parsing  # noqa: E402
+
+    out: dict[str, list[dict]] = {}
+
+    def _index_backlog(slug: str, path: pathlib.Path) -> None:
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8")
+        for ln, parsed in _parsing.parse_lines(text):
+            if parsed is None:
+                continue
+            pid = parsed.get("plan_item_id")
+            if not pid:
+                continue
+            out.setdefault(pid, []).append({
+                "slug": slug,
+                "lineno": ln,
+                "status": parsed.status,
+                "body": parsed.title,
+            })
+
+    _index_backlog("hub", HUB / "backlog.md")
+    proj = HUB / "projects"
+    if proj.exists():
+        for link in sorted(proj.iterdir()):
+            slug = link.name
+            target = link.resolve() if link.is_symlink() else link
+            _index_backlog(slug, target / "backlog.md")
+    return out
+
+
+def _kb_backlog_call(*args) -> tuple[int, dict]:
+    """Call kb-backlog CLI in --json mode. Returns (returncode, parsed_json)."""
+    full = [str(KB_BACKLOG), *args]
+    if "--json" not in full:
+        full.append("--json")
+    proc = subprocess.run(full, capture_output=True, text=True)
+    try:
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        data = {"_raw_stdout": proc.stdout, "_raw_stderr": proc.stderr}
+    return proc.returncode, data
+
+
+def _resolve_target_path(item: dict, hier: dict) -> tuple[str, list[str]]:
+    """Given an item targeting some descendant slug, return:
+        (immediate_child_slug_under_hub, path_from_hub_to_target)
+
+    For now we use a simplified strategy: the target_slug IS the
+    immediate child under hub (we don't model deep paths in this
+    initial Phase 5 implementation — the agent decomposes deeper levels
+    via decompose-marker spawns).
+
+    If target_slug isn't in the hierarchy at all → caller must escalate.
+    """
+    nodes = hier.get("nodes", {})
+    target_slug = item["target_slug"]
+    if target_slug not in nodes:
+        return "", []
+
+    # Walk up from target to find the direct hub-child ancestor.
+    cur = target_slug
+    path: list[str] = [cur]
+    root_slug = hier.get("root", "hub")
+    while True:
+        node = nodes.get(cur, {})
+        parent = node.get("parent")
+        if not parent or parent == root_slug:
+            return cur, list(reversed(path))
+        path.append(parent)
+        cur = parent
+
+
+def cmd_plan(args) -> int:
+    """Morning top-down plan: read approved daily-plan/<date>.md, group items
+    by immediate child, dispatch via kb-backlog ops with carried-item logic.
+    """
+    plan_path = pathlib.Path(args.approved_plan).expanduser().resolve()
+    items, approved_at = _parse_approved_plan(plan_path)
+    if not approved_at:
+        warn(f"plan {plan_path} has no approved_at; refusing to dispatch")
+        return 5
+    if not items:
+        say("plan has no actionable items — nothing to dispatch")
+        return 0
+    say(f"plan has {len(items)} items, approved_at={approved_at}")
+
+    if not args.skip_registry_check:
+        rc = subprocess.run([str(KB_REBUILD_REGISTRY), "check"],
+                            capture_output=True, text=True).returncode
+        if rc != 0:
+            die("kb-rebuild-registry check failed; fix drift before plan")
+
+    hier = load_hierarchy()
+    nodes_dict = hier.get("nodes", {})
+
+    cycle_run_id = str(uuid.uuid4())
+    date = args.date or dt.date.today().isoformat()
+
+    # Group items by immediate child slug (for the hub-level dispatch).
+    by_immediate: dict[str, list[dict]] = {}
+    unrouted: list[dict] = []
+    for item in items:
+        immediate, full_path = _resolve_target_path(item, hier)
+        if not immediate:
+            unrouted.append(item)
+            continue
+        item["_immediate"] = immediate
+        item["_full_path"] = full_path
+        by_immediate.setdefault(immediate, []).append(item)
+
+    # CR-Phase5-CR4 fix: run per-slug recovery for every plan-relevant slug
+    # BEFORE building the global plan_item_id lookup. Without this, a prior
+    # X2→X3 crash (src tombstoned, dst missing) leaves the lookup blind to
+    # the dangling xfer; a subsequent kb-backlog append would trigger
+    # recovery (restoring src open), then proceed to dispatch from stale
+    # state — creating an open duplicate across slugs.
+    #
+    # We invoke `kb-backlog recover <slug>` for each immediate slug + every
+    # slug already known to hold this plan_item_id (which we discover via
+    # an initial best-effort lookup; recovery itself may change the lookup,
+    # so we re-build it after).
+    plan_relevant_slugs: set[str] = set(by_immediate.keys())
+    # Best-effort first lookup just to discover currently-known slugs.
+    initial_lookup = _global_plan_item_lookup()
+    for item in items:
+        for entry in initial_lookup.get(item["plan_item_id"], []):
+            plan_relevant_slugs.add(entry["slug"])
+    # CR-Phase5-CR5 fix: recover failures must abort/retry, not
+    # warn-and-continue. If recovery couldn't run for any plan-relevant
+    # slug (transient lock contention, journal corruption, etc.), the
+    # rebuilt lookup would be stale and the dispatch could re-create
+    # the duplicate-row path that CR4/CR5 are trying to close.
+    #
+    # CR-Phase5-CR6 fix: include `hub` in recovery scope. The lookup
+    # walks ~/knowledge/backlog.md (hub) too, so a dangling xfer
+    # involving hub leaves the lookup stale just like any other slug.
+    # Use shorter --lock-timeout per attempt so retry-loop budget is
+    # bounded (~30s worst case, not 3*30s = 90s).
+    for slug in sorted(plan_relevant_slugs):
+        if slug != "hub" and slug not in nodes_dict:
+            continue
+        max_retries = 3
+        last_rc = None
+        last_res = None
+        for attempt in range(max_retries):
+            rc, res = _kb_backlog_call(
+                "recover", slug, "--lock-timeout", "5",
+            )
+            last_rc, last_res = rc, res
+            if rc == 0:
+                break
+            # rc=2 → lock-busy or dangling-xfer retry-exhausted (transient).
+            # rc=3 → preflight refused (corruption — fatal, no retry).
+            if rc == 3:
+                die(f"recover {slug} refused: journal corruption — manual resolve required (kb-doctor journal-integrity)", code=3)
+            time.sleep(0.5 * (attempt + 1))
+        if last_rc != 0:
+            die(f"recover {slug} failed after {max_retries} attempts (rc={last_rc}); "
+                f"refusing to dispatch — fix root cause before retry", code=2)
+
+    # Now rebuild lookup AFTER recovery so dangling-xfer side effects are
+    # reflected (e.g. a restored open row in src after coordinator
+    # rollback).
+    lookup = _global_plan_item_lookup()
+
+    if unrouted:
+        warn(f"{len(unrouted)} item(s) target unknown slugs — escalating")
+
+    # CR-Phase5-B1 fix: stable cycle_source_id per plan item. Derived from
+    # (plan_path, approved_at, plan_item_id, target_slug) so the same
+    # approved plan re-dispatched produces the same id, allowing
+    # `kb-backlog append` collision check to skip even after the prior
+    # row has been closed (F2 idempotency).
+    import hashlib as _hashlib
+
+    def _stable_cycle_source_id(plan_path: pathlib.Path, approved_at_str: str,
+                                pid: str, target: str) -> str:
+        seed = f"{plan_path}|{approved_at_str}|{pid}|{target}"
+        return _hashlib.sha1(seed.encode("utf-8")).hexdigest()[:32]
+
+    # CR-Phase5-B3 fix: durable escalations for unrouted + F4 abort.
+    def _escalate(reason: str) -> None:
+        esc = HUB / "escalations.md"
+        today = dt.date.today().isoformat()
+        line = f"- [ ] [orchestrator-cycle plan {today}] {reason}"
+        text = esc.read_text(encoding="utf-8") if esc.is_file() else "# Escalations\n\n## Open\n\n"
+        if "## Open" not in text:
+            text += "\n\n## Open\n\n"
+        text = text.rstrip() + "\n" + line + "\n"
+        esc.write_text(text, encoding="utf-8")
+
+    for item in unrouted:
+        _escalate(f"unknown target slug '{item['target_slug']}' (plan_item_id {item['plan_item_id']})")
+
+    # Dispatch each item per the carried-item rules (F1-F4)
+    results: dict[str, list[dict]] = {}
+    for immediate, batch in by_immediate.items():
+        slug_results: list[dict] = []
+        for item in batch:
+            pid = item["plan_item_id"]
+            existing = lookup.get(pid, [])
+
+            # CR-Phase5-B2 fix: include `[>]` (in_progress) in the carried-set
+            # so we don't append a duplicate while a claim is in-flight.
+            # The locked plan: a `[ ]` OR `[>]` carried row should NOT
+            # produce a duplicate.
+            carried = [e for e in existing if e["status"] in ("open", "in_progress")]
+
+            # F4: multi-file dup (>1 carried across different slugs) → abort+escalate
+            if len(carried) > 1:
+                multi_slugs = sorted({e["slug"] for e in carried})
+                if len(multi_slugs) > 1:
+                    reason = f"F4 multi-file dup: open in {multi_slugs}"
+                    _escalate(f"plan_item_id {pid} {reason}")
+                    slug_results.append({
+                        "plan_item_id": pid,
+                        "action": "abort",
+                        "reason": reason,
+                    })
+                    continue
+
+            # F1: carried in same immediate child → update fields (open) OR
+            # skip silently (in_progress — claim-token in-flight, don't touch).
+            same_immediate_carried = next(
+                (e for e in carried if e["slug"] == immediate), None,
+            )
+            if same_immediate_carried:
+                if same_immediate_carried["status"] == "in_progress":
+                    slug_results.append({
+                        "plan_item_id": pid,
+                        "action": "skip-in-progress",
+                        "reason": "row is [>] (claimed by executor); won't disturb",
+                    })
+                    continue
+                rc, res = _kb_backlog_call(
+                    "update", immediate,
+                    "--plan-item-id", pid,
+                    "--field", "due={}".format(_today()),
+                    "--by", "hub",
+                )
+                slug_results.append({
+                    "plan_item_id": pid,
+                    "action": "update",
+                    "rc": rc,
+                    "result": res,
+                })
+                continue
+
+            # F3: parent-moved (carried elsewhere, target now `immediate`).
+            # Refuse to xfer an in_progress row — that would yank it from
+            # the executor mid-spawn. Skip with escalation.
+            other_carried = next(
+                (e for e in carried if e["slug"] != immediate),
+                None,
+            )
+            if other_carried:
+                if other_carried["status"] == "in_progress":
+                    _escalate(
+                        f"plan_item_id {pid} carried-and-claimed by {other_carried['slug']}; "
+                        f"plan now targets {immediate} but executor is mid-spawn"
+                    )
+                    slug_results.append({
+                        "plan_item_id": pid,
+                        "action": "skip-claimed-elsewhere",
+                        "from": other_carried["slug"],
+                    })
+                    continue
+                # CR-Phase5-CR3 fix: pass cycle_source_id INTO xfer so the
+                # destination row is stamped atomically as part of the X3
+                # phase (the dst append). Previously a two-step xfer + update
+                # had a race window where kb-execute-next could claim the new
+                # row before the stamp landed; op_update only stamps open
+                # rows, so the stamp would be lost. Now the stamp is part of
+                # the atomic dst append, no race.
+                xfer_csid = _stable_cycle_source_id(plan_path, approved_at, pid, immediate)
+                rc, res = _kb_backlog_call(
+                    "xfer",
+                    "--plan-item-id", pid,
+                    "--from", other_carried["slug"],
+                    "--to", immediate,
+                    "--by", "hub",
+                    "--cycle-source-id", xfer_csid,
+                )
+                slug_results.append({
+                    "plan_item_id": pid,
+                    "action": "xfer",
+                    "from": other_carried["slug"],
+                    "to": immediate,
+                    "cycle_source_id": xfer_csid,
+                    "rc": rc,
+                    "result": res,
+                })
+                continue
+
+            # F2: closed carried (no carried, but plan_item_id exists
+            # somewhere closed) → fresh append. F-d: never seen → fresh
+            # append. Stable cycle_source_id makes both idempotent on
+            # re-run of the same approved plan.
+            cycle_source_id = _stable_cycle_source_id(
+                plan_path, approved_at, pid, immediate,
+            )
+            rc, res = _kb_backlog_call(
+                "append", immediate,
+                item["body"],
+                "--plan-item-id", pid,
+                "--cycle-source-id", cycle_source_id,
+                "--by", "hub",
+            )
+            slug_results.append({
+                "plan_item_id": pid,
+                "action": "append",
+                "cycle_source_id": cycle_source_id,
+                "rc": rc,
+                "result": res,
+            })
+
+        results[immediate] = slug_results
+
+    # Summary
+    summary = {
+        "date": date,
+        "cycle_run_id": cycle_run_id,
+        "approved_at": approved_at,
+        "items_total": len(items),
+        "items_dispatched": sum(len(v) for v in results.values()),
+        "unrouted": len(unrouted),
+        "results": results,
+    }
+    plan_summary_path = ORCHESTRATOR_DIR / f"plan-{date}.json"
+    plan_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    say(f"plan dispatched; summary at {plan_summary_path}")
+
+    actions: dict[str, int] = {}
+    for slug_results in results.values():
+        for r in slug_results:
+            actions[r["action"]] = actions.get(r["action"], 0) + 1
+    for action, count in actions.items():
+        say(f"  {action}: {count}")
+
+    if unrouted:
+        return 5
+    return 0
+
+
+def _today() -> str:
+    return dt.date.today().isoformat()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="kb-orchestrator-cycle",
+                                description="N-level evening retro + morning plan.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pr = sub.add_parser("retro", help="Evening bottom-up retro cycle (Phase 3)")
+    pr.add_argument("--date", help="ISO date (default: today)")
+    pr.add_argument("--dry-run", action="store_true",
+                    help="Print BFS plan without spawning agents")
+    pr.add_argument("--force", action="store_true",
+                    help="Re-run even if reports exist with this run_id")
+    pr.add_argument("--parallelism", type=int, default=DEFAULT_PARALLELISM,
+                    help=f"Concurrent spawns within a level (default {DEFAULT_PARALLELISM}, cap {HARD_PARALLELISM_CAP})")
+    pr.add_argument("--skip-registry-check", action="store_true",
+                    help="Skip pre-flight kb-rebuild-registry check (testing)")
+    pr.add_argument("--skip-hub-retro", action="store_true",
+                    help="Skip the inline kb-retro at hub level (testing)")
+    pr.add_argument("--skip-post-cleanup", action="store_true",
+                    help="Skip kb-codex-cleanup at end of cycle (testing)")
+
+    pp = sub.add_parser("plan", help="Morning top-down decompose (Phase 5)")
+    pp.add_argument("--approved-plan", required=True,
+                    help="Path to daily-plan/<date>.md with approved_at: set")
+    pp.add_argument("--date", help="ISO date (default: today)")
+    pp.add_argument("--skip-registry-check", action="store_true",
+                    help="Skip pre-flight kb-rebuild-registry check (testing)")
+
+    args = p.parse_args()
+
+    # Acquire global cycle lock for both retro and plan (single-writer
+    # invariant on the .orchestrator/ directory and per-slug backlog mutations).
+    if args.cmd in ("retro", "plan"):
+        CYCLE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        cycle_lock_fh = open(CYCLE_LOCK, "w")
+        try:
+            fcntl.flock(cycle_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            die("another cycle in progress (.cycle.lock held)", code=2)
+        try:
+            if args.cmd == "retro":
+                return cmd_retro(args)
+            return cmd_plan(args)
+        finally:
+            fcntl.flock(cycle_lock_fh, fcntl.LOCK_UN)
+            cycle_lock_fh.close()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

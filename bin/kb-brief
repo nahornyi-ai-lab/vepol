@@ -1,0 +1,192 @@
+#!/bin/zsh
+# Morning briefing v2 — spec: ~/knowledge/concepts/morning-briefing-design.md (Cross-review 2026-04-22, approved).
+#
+# V1 implementation: single oracle call with mandatory internal two-pass.
+# Agent outputs Pass 1 table + delimiter `---BRIEF---` + Pass 2 text.
+# Shell strips everything up to and including the delimiter, splits brief across
+# two Telegram messages if >1500 Unicode chars.
+#
+# Required secrets (in $HUB/personal/.secrets):
+#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+# Optional:
+#   USER_NAME, USER_CITY, CLAUDE_MODEL (default claude-opus-4-7)
+#   KB_BRIEF_DRY=1 (print instead of sending Telegram; for smoke tests)
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+source "$HUB/personal/.secrets"
+
+USER_NAME="${USER_NAME:-}"
+USER_CITY="${USER_CITY:-}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-7}"
+ORCH="$HUB/bin/kb-orchestrator-run"
+BRIEF_CHAR_LIMIT="${BRIEF_CHAR_LIMIT:-1500}"
+BRIEF_TIMEOUT="${BRIEF_TIMEOUT:-360}"
+
+TODAY=$(date +%Y-%m-%d)
+NOW=$(date +%H:%M)
+LOG="$HUB/logs/brief.log"
+INBOX="$HUB/personal/daily-inbox/$TODAY.md"
+
+ADDRESS="${USER_NAME:+ $USER_NAME}"
+LOCATION="${USER_CITY:+, $USER_CITY}"
+
+send_tg() {
+  local text="$1"
+  if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
+    print -- "$text"
+  else
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+      -d "chat_id=${TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=$text" > /dev/null
+  fi
+}
+
+PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодня $TODAY, сейчас $NOW${LOCATION}.
+
+Твоя задача — утренний брифинг по спеке \`$HUB/concepts/morning-briefing-design.md\` (approved Codex 2026-04-22). Ниже — исполняемое resume этой спеки.
+
+# Обязательный вход (прочитай ВСЁ перед Pass 1)
+1. \`$HUB/registry.md\` — фильтр по status ∈ {live, seeded}, это active-проекты (должно быть ~14).
+2. Для каждого active-проекта: \`<project_path>/knowledge/state.md\` — первые ~30 строк (одной строкой + ключевые метрики).
+3. Вывод \`$HUB/bin/kb-backlog --open\` — все открытые задачи всех проектов. Извлеки дедлайны: явные \`due: YYYY-MM-DD\` + текстовые (\`до DD.MM\`, \`через N дней\`, weekdays).
+4. \`$HUB/personal/goals.md\`, \`$HUB/personal/roadmap.md\`, \`$HUB/personal/context.md\`.
+5. Для каждого active-проекта: секция \`## Open\` в \`<project_path>/knowledge/escalations.md\` (если файл есть).
+6. Последние 3 \`$HUB/daily/*.md\` (если не пустой) + последние 80 строк \`$HUB/log.md\`.
+7. \`$INBOX\` — если файл существует.
+8. \`$HUB/personal/habits.md\` — только если не пустой (0-скип, иначе включить).
+
+# Pass 1 — internal scan (ОБЯЗАТЕЛЬНО, идёт первым в твоём ответе)
+
+Построй markdown-таблицу:
+\`\`\`
+| project | status | one-line state | earliest_deadline | open_blockers | leverage_to_goals | escalation_asks |
+\`\`\`
+
+**Нормализация дедлайнов** — все к \`YYYY-MM-DD[THH:MM]\` в Europe/Madrid:
+- ISO \`due: YYYY-MM-DD[THH:MM]\` — как есть.
+- \`до DD.MM\` / \`до DD.MM.YYYY\` — год текущий; если дата < сегодня, +1 год.
+- \`через N дней\` / \`через N–M дней\` — от \`opened YYYY-MM-DD\` строки; для диапазона брать **раннюю** границу.
+- \`завтра\` / \`сегодня\` / weekday (\`понедельник\`…) — от сегодня; если день прошёл, следующий такой.
+- Время не указано → подразумевать \`09:00 Europe/Madrid\`.
+
+**Бакетизация по hard deadline:**
+- TODAY — дедлайн ≤24ч от сейчас.
+- THIS_WEEK — дедлайн ≤7 дней, не TODAY.
+- LATER — всё остальное.
+
+**Внутри бакета — аддитивный score:** \`score = 3·urgency + 2·leverage − 1·blocker_cost\`, все ∈ [0,1].
+
+**Правила surface:**
+- TODAY — весь бакет целиком, даже при низком leverage.
+- THIS_WEEK — все с hard-deadline обязательно.
+- LATER — только top-3 по score → идут в 🎯 Strategic focus.
+
+**Idle-список:** active-проекты вне TODAY/THIS_WEEK, у которых нет записи в \`log.md\` за последние 7 дней — в 🟡 Idle.
+
+После таблицы — строка-разделитель:
+\`\`\`
+---BRIEF---
+\`\`\`
+
+# Pass 2 — user-facing brief (после разделителя, ≤${BRIEF_CHAR_LIMIT} символов Unicode)
+
+Пиши строго на основе Pass 1, без повторного обращения к файлам. Структура в этом порядке, пустые секции ВЫПУСКАЙ ЦЕЛИКОМ (без \"—\"/\"нет\"):
+
+\`\`\`
+☀️ Брифинг $TODAY $NOW
+
+⏰ Today (hard deadline ≤24ч)
+  • HH:MM <точная задача> (<project>) — <откуда пришла>
+
+📅 This week (hard deadline ≤7 дней, не Today)
+  • <YYYY-MM-DD>: <точная задача> (<project>)
+
+🎯 Strategic focus (2–3 проекта из LATER)
+  1. <project>: <конкретный следующий шаг>. Привязка к цели: <goal>.
+
+🧱 Открытые escalations
+  • <project>: <ask одной строкой> — opened <YYYY-MM-DD>
+
+🟡 Idle — в памяти
+  <slug1>, <slug2>, <slug3>… (одна строка, без описаний)
+
+🔁 Life-напоминание
+  <из habits/goals — здоровье, сон, фокус-блок>
+
+❓ <Open-вопрос ТОЛЬКО если не разрешим из Pass 1. Иначе секцию НЕ писать.>
+\`\`\`
+
+# Жёсткие правила Pass 2
+- **Не врать оптимистичнее state.md.** Запрещённые слова без прямого подтверждения в state.md проекта: \`live\`, \`готов\`, \`ready\`, \`submitted\`, \`закрыто\`, \`пайплайн\`, \`работает\`. Если state говорит \"не верифицировано\" — пиши \"не верифицировано\".
+- **Задачи — точные.** Не \"сделать шаг\", а \"купить билеты Renfe на 27.04\". Копируй формулировку из backlog.
+- **Open-вопрос — conditional.** Если в Pass 1 есть данные для ответа, секцию НЕ писать. Не перекладывай на пользователя то, что просчитал сам.
+- **Idle обязательна**, если есть active-проекты вне TODAY/THIS_WEEK.
+- **Escalations обязательны**, если Pass 1 нашёл открытые asks.
+
+Начни ответ сразу с markdown-таблицы Pass 1. Никакой преамбулы."
+
+cd "$HUB"
+set +e
+RAW=$("$ORCH" --cwd "$HUB" --timeout "$BRIEF_TIMEOUT" "$PROMPT" 2>&1)
+RC=$?
+set -e
+
+if [ "$RC" -ne 0 ]; then
+  echo "[$(date -Iseconds)] orchestrator failed rc=$RC" >> "$LOG"
+  echo "$RAW" >> "$LOG"
+  case "$RC" in
+    2)  BRIEF="⚠️ Брифинг не запущен: ошибка вызова (rc=2, caller-bug). Проверь $LOG" ;;
+    75) BRIEF="⚠️ Оба оркестратора не ответили (rc=75, exhausted). Проверь $LOG" ;;
+    *)  BRIEF="⚠️ Оркестратор упал (rc=$RC). Проверь $LOG" ;;
+  esac
+  # short path — send error and exit
+  send_tg "☀️ Брифинг $TODAY $NOW
+
+$BRIEF"
+  exit 0
+fi
+
+# Strip everything up to and including `---BRIEF---` delimiter.
+# If delimiter missing, fall back to full RAW (agent misbehaved; still better to send something).
+if print -- "$RAW" | grep -q '^---BRIEF---$'; then
+  BRIEF=$(print -- "$RAW" | awk '/^---BRIEF---$/{found=1; next} found' )
+else
+  echo "[$(date -Iseconds)] WARN: ---BRIEF--- delimiter missing, sending full output" >> "$LOG"
+  BRIEF="$RAW"
+fi
+
+# Trim leading/trailing whitespace
+BRIEF=$(print -- "$BRIEF" | awk 'NF {p=1} p' | awk '{lines[NR]=$0} END {for(i=NR;i>=1;i--) if(lines[i]!~/^[[:space:]]*$/){last=i;break} for(i=1;i<=last;i++) print lines[i]}')
+
+CHAR_COUNT=$(print -- "$BRIEF" | wc -m | tr -d ' ')
+
+if [ "$CHAR_COUNT" -le "$BRIEF_CHAR_LIMIT" ]; then
+  send_tg "$BRIEF"
+  SPLIT="no"
+else
+  # Split at last blank line before BRIEF_CHAR_LIMIT. Fallback: hard split at BRIEF_CHAR_LIMIT.
+  PART1=$(print -- "$BRIEF" | awk -v lim="$BRIEF_CHAR_LIMIT" '
+    BEGIN { total=0; last_break=0; buf="" }
+    {
+      line_len = length($0) + 1
+      if (total + line_len > lim && last_break > 0) { exit }
+      buf = buf $0 "\n"
+      total += line_len
+      if ($0 ~ /^[[:space:]]*$/) { last_break = total; part1 = buf }
+    }
+    END { if (part1 != "") print part1; else print buf }
+  ')
+  PART1_CHARS=$(print -- "$PART1" | wc -m | tr -d ' ')
+  PART2=$(print -- "$BRIEF" | tail -c +$((PART1_CHARS+1)))
+  send_tg "$PART1"
+  sleep 1
+  send_tg "$PART2"
+  SPLIT="yes"
+fi
+
+DELIVERY="sent"
+if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
+  DELIVERY="dry-run"
+fi
+echo "[$(date -Iseconds)] brief ${DELIVERY} (${CHAR_COUNT} chars, split=${SPLIT})" >> "$LOG"

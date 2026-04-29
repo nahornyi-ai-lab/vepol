@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""kb-task — append a task to a project's backlog, optionally create a Calendar event.
+
+Phase 1b: this script is now a thin wrapper around `kb-backlog append`. All
+mutations go through the atomic prepared/committed protocol with audit journal,
+so concurrent kb-task / kb-orchestrator-cycle / kb-execute-next writers are race-safe.
+
+Usage:
+  kb-task "task text"                                           # appends to HUB backlog
+  kb-task "task text" --project <slug>                          # appends to project's backlog
+  kb-task "task text" --due "2026-04-20T14:00"                  # also stamps due:<when> in line
+  kb-task "task text" --by hub|user|self                        # who set the task (default: self)
+  kb-task "task text" --context "<1-line context>"              # optional context suffix
+  kb-task "task text" --due "..." --calendar                    # also creates Google Calendar event
+
+Calendar creation uses `claude -p` with the Google Calendar MCP. Requires:
+  - claude CLI available
+  - Google Calendar MCP authenticated
+
+Task line format (rendered by kb-backlog append):
+  - [ ] <text> — opened YYYY-MM-DD by <who> [— due: <when>] [— context: <ctx>]
+"""
+import argparse
+import os
+import pathlib
+import subprocess
+import sys
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+KB_BACKLOG = HUB / "bin" / "kb-backlog"
+
+
+def create_calendar_event(task: str, when: str) -> None:
+    """Invoke `claude -p` with the Google Calendar MCP. Non-blocking for user context."""
+    prompt = (
+        f"Create a Google Calendar event on the primary calendar:\n"
+        f"- title: {task!r}\n"
+        f"- start: {when}\n"
+        f"- duration: 30 minutes\n"
+        f"- reminder: popup 30 minutes before\n\n"
+        f"Use mcp__claude_ai_Google_Calendar__create_event. "
+        f"On success, reply with just the event URL. On failure, print the error."
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            print(f"📅 Calendar: {result.stdout.strip()[:200]}")
+        else:
+            print(f"⚠ Calendar call failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("⚠ Calendar call timed out after 60s — event may or may not have been created.", file=sys.stderr)
+    except FileNotFoundError:
+        print("⚠ `claude` CLI not found in PATH — skipped Calendar event.", file=sys.stderr)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Append a task to a project's backlog (via kb-backlog append).")
+    p.add_argument("text", help="Task description (one line)")
+    p.add_argument("--project", help="Project slug (omit to target hub-level backlog)")
+    p.add_argument("--due", help="Due date/time (any string; 'YYYY-MM-DDTHH:MM' recommended)")
+    p.add_argument("--by", default="self", choices=["hub", "user", "self"],
+                   help="Who set the task (default: self)")
+    p.add_argument("--context", help="Optional one-line context")
+    p.add_argument("--calendar", action="store_true",
+                   help="Also create a Google Calendar event (requires --due)")
+    args = p.parse_args()
+
+    slug = args.project if args.project else "hub"
+
+    cmd = [str(KB_BACKLOG), "append", slug, args.text, "--by", args.by]
+    if args.due:
+        cmd += ["--due", args.due]
+    if args.context:
+        cmd += ["--context", args.context]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        sys.exit(result.returncode)
+
+    target = f"project '{args.project}'" if args.project else "hub"
+    print(f"✓ Added to {target} backlog (via kb-backlog append)")
+    print(result.stdout.rstrip())
+
+    if args.calendar:
+        if not args.due:
+            print("⚠ --calendar requires --due; skipped.", file=sys.stderr)
+        else:
+            create_calendar_event(args.text, args.due)
+
+
+if __name__ == "__main__":
+    main()

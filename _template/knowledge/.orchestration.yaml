@@ -1,0 +1,34 @@
+# Orchestration meta — read by kb-orchestrator-cycle (Phase 3+).
+# Knowledge metadata (slug/parent/category/description) lives in README.md
+# frontmatter, not here — that's the canonical "metadata next to content"
+# split per Karpathy invariant.
+#
+# `cycle_enabled: false` is the safety toggle. New projects start opted-OUT
+# of the daily orchestration cycle; flip to true once the project has the
+# minimum coordination triad (backlog/log/state/escalations/incidents) and
+# `kb-doctor migration-readiness <slug>` returns ready.
+
+version: 1
+
+# When true, this project participates in evening retro + morning plan
+# decomposition. Default false — explicit opt-in per project.
+cycle_enabled: false
+
+# Per-node SLA for the broker spawn that generates this project's report.
+# If exceeded, the orchestrator writes a `status: timeout` terminal report
+# and the parent treats this child as unavailable for roll-up.
+sla_report_timeout_sec: 300
+
+# Who owns this project (for escalation routing). Use the same string as
+# the user's identity in CLAUDE.md / the hub registry.
+owner: <user>
+
+# How the parent should decompose its top-down plan into tasks for this
+# child. `subset` (default) — pass only the items addressed at this slug.
+# `full` — pass the entire parent plan and let this project filter.
+decompose_strategy: subset
+
+# Q3 flag: when true, kb-execute-next routes leaf execution through
+# kb-orchestrator-run broker (Claude↔Codex failover). When false, it
+# spawns claude directly. Override with env KB_EXEC_BROKER=1 globally.
+exec_broker: false

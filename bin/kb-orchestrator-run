@@ -1,0 +1,768 @@
+#!/usr/bin/env python3
+"""kb-orchestrator-run — failure-aware non-interactive broker for Codex and Claude.
+
+Scheduled jobs and router-style prompt execution must not die just because one
+provider hit a temporary usage limit, lost auth, or had a flaky network. This
+wrapper keeps a small local state file with:
+  - provider cooldowns after classified failures (rate_limit/auth/network)
+  - optional per-task resume sessions
+
+Default provider order: codex,claude. Codex is primary for routine text work
+(briefings, retros, routing), Claude is the fallback + dev-agent. Override via
+KB_ORCHESTRATOR_BACKENDS env or --backend.
+
+Usage:
+  kb-orchestrator-run "prompt text"
+  kb-orchestrator-run --backend auto --cwd /path/to/project --resume-key project:<slug> "..."
+  printf 'prompt' | kb-orchestrator-run -
+
+Spec: ~/knowledge/concepts/orchestrator-failover.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import random
+import re
+import subprocess
+import sys
+import tempfile
+import uuid
+from dataclasses import dataclass
+from zoneinfo import ZoneInfo
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+STATE_DIR = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_STATE_DIR", HUB / ".orchestrator"))
+STATE_FILE = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_STATE_FILE", STATE_DIR / "state.json"))
+LOG_FILE = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_LOG_FILE", HUB / "logs" / "orchestrator-run.log"))
+
+DEFAULT_BACKENDS = [
+    part.strip()
+    for part in os.environ.get("KB_ORCHESTRATOR_BACKENDS", "codex,claude").split(",")
+    if part.strip()
+]
+DEFAULT_CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
+DEFAULT_CODEX_MODEL = os.environ.get("CODEX_MODEL", "")
+DEFAULT_TIMEOUT = int(os.environ.get("KB_ORCHESTRATOR_TIMEOUT", "600"))
+
+
+# --- Failure classification ------------------------------------------------
+#
+# Every match is case-insensitive against the provider's stderr only. stdout
+# (and Codex's `-o` answer file) must NEVER be scanned — we do not want the
+# model quoting "rate limit" in its answer to trigger a cooldown.
+
+CLAUDE_AUTH_PATTERNS = (
+    "your organization does not have access",
+    "please login again",
+    "401 unauthorized",
+    "403 forbidden",
+    "invalid api key",
+    "authentication failed",
+)
+
+CODEX_AUTH_PATTERNS = (
+    "auth error:",
+    "server returned 401",
+    "server returned 403",
+    "401 unauthorized",
+    "403 forbidden",
+    "you've hit your usage limit",  # Codex phrasing for account-level caps
+)
+
+CLAUDE_NETWORK_PATTERNS = (
+    "connection refused",
+    "connection reset",
+    "name or service not known",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "read timed out",
+    "request timed out",
+)
+
+CODEX_NETWORK_PATTERNS = (
+    "network error:",
+    "request timed out:",
+    "operation timed out after",
+    "failed to (dns) resolve",
+)
+
+RATE_LIMIT_PATTERNS = (
+    "you've hit your limit",      # Claude session/token cap
+    "session limit",
+    "rate limit",
+    "quota exceeded",
+    "too many requests",
+    "429 too many requests",
+)
+
+
+@dataclass
+class RunResult:
+    provider: str
+    returncode: int
+    output: str
+    stderr: str
+    session_id: str | None = None
+    category: str | None = None            # None when successful
+    cooldown_until: dt.datetime | None = None
+    snippet: str | None = None             # first line of stderr, ≤240 chars
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and self.category is None
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def iso_z(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_iso(value: str | None) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {"providers": {}, "sessions": {}}
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"providers": {}, "sessions": {}}
+    if not isinstance(data, dict):
+        return {"providers": {}, "sessions": {}}
+    data.setdefault("providers", {})
+    data.setdefault("sessions", {})
+    return data
+
+
+def update_state(mutator) -> None:
+    """Atomically read-modify-write state.json (CR6-B2 — namespace-aware).
+
+    `mutator(state) -> None` is invoked WITH THE LOCK HELD on a fresh load
+    of state.json (not the caller's stale snapshot). This eliminates the
+    classic load-then-save TOCTOU: parallel brokers each apply their
+    independent mutations to a fresh-from-disk state and write back, with
+    no possibility of losing nested updates under `providers.<name>` or
+    `sessions.<key>`.
+
+    Per-process unique tmp filename avoids cross-process rename races
+    (CR5-B2). Lock is `state.lock` (flock, exclusive).
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_FILE.with_suffix(".lock")
+    lock_fh = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        # Fresh load inside the lock — caller never sees a stale snapshot.
+        state: dict = {"providers": {}, "sessions": {}}
+        if STATE_FILE.is_file():
+            try:
+                disk = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                if isinstance(disk, dict):
+                    state = disk
+                    state.setdefault("providers", {})
+                    state.setdefault("sessions", {})
+            except (json.JSONDecodeError, OSError):
+                pass
+        mutator(state)
+        tmp = STATE_FILE.with_name(f".state.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(str(tmp), str(STATE_FILE))
+    finally:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_fh.close()
+
+
+def save_state(state: dict) -> None:
+    """Compatibility wrapper — replaces top-level keys, but does NOT protect
+    against parallel updates. New code should use `update_state(mutator)`
+    so that read-modify-write is atomic under the lock.
+
+    Kept for callers that don't yet thread through a mutator (e.g. external
+    scripts that pickle their own state). For broker-internal mutations,
+    we use update_state directly.
+    """
+    def _replace(disk_state: dict) -> None:
+        # Caller's state wins on every top-level key it sets; preserve
+        # disk-only keys (forward-compat).
+        for k, v in state.items():
+            disk_state[k] = v
+    update_state(_replace)
+
+
+def log(message: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+    with LOG_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{stamp}] {message}\n")
+
+
+def first_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:240]
+    return "(empty)"
+
+
+def stable_claude_session_id(key: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"kb-orchestrator-run.claude.{key}"))
+
+
+def parse_reset_timestamp(text: str) -> dt.datetime | None:
+    epoch_match = re.search(r"resets?_at[^0-9]{0,8}(\d{10})", text, flags=re.IGNORECASE)
+    if epoch_match:
+        return dt.datetime.fromtimestamp(int(epoch_match.group(1)), tz=dt.timezone.utc)
+
+    retry_match = re.search(
+        r"(?:retry(?:[- ]after)?|resets?\s+in)\s+(\d+)\s*(seconds?|minutes?|hours?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if retry_match:
+        amount = int(retry_match.group(1))
+        unit = retry_match.group(2).lower()
+        delta = dt.timedelta(seconds=amount)
+        if unit.startswith("minute"):
+            delta = dt.timedelta(minutes=amount)
+        elif unit.startswith("hour"):
+            delta = dt.timedelta(hours=amount)
+        return utc_now() + delta
+
+    clock_match = re.search(
+        r"resets?\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm))\s*\(([^)]+)\)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if clock_match:
+        clock = re.sub(r"\s+", "", clock_match.group(1).lower())
+        tz_name = clock_match.group(2).strip()
+        try:
+            zone = ZoneInfo(tz_name)
+        except Exception:
+            zone = dt.datetime.now().astimezone().tzinfo or dt.timezone.utc
+        parsed = None
+        for fmt in ("%I%p", "%I:%M%p"):
+            try:
+                parsed = dt.datetime.strptime(clock, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is not None:
+            now_local = utc_now().astimezone(zone)
+            candidate = now_local.replace(
+                hour=parsed.hour,
+                minute=parsed.minute,
+                second=0,
+                microsecond=0,
+            )
+            if candidate <= now_local:
+                candidate += dt.timedelta(days=1)
+            return candidate.astimezone(dt.timezone.utc)
+
+    return None
+
+
+CODE_ERROR_PATTERNS = (
+    "traceback (most recent call last)",
+    "internal error",
+    "internalerror",
+    "panic:",
+    "uncaught exception",
+    "unhandled exception",
+    "fatal error",
+    "assertion failed",
+)
+
+
+def classify_stderr(provider: str, stderr: str, returncode: int = 0) -> str:
+    """Return one of 8 categories: 'ok' | 'rate_limit' | 'auth' | 'network' |
+    'timeout' | 'code_error' | 'crash' | 'other'.
+
+    Phase 1a contract (CR2-B5): plan circuit-breaker зависит от per-category.
+    Caller для timeout-cases должен передавать category напрямую (`timeout` не
+    detect'ится из stderr — он ловится при `subprocess.TimeoutExpired`).
+    `crash` определяется через returncode < 0 (signal-killed на Unix).
+    """
+    if returncode == 0:
+        return "ok"
+
+    if returncode < 0:  # killed by signal
+        return "crash"
+
+    text = stderr.lower()
+
+    auth_patterns = CLAUDE_AUTH_PATTERNS if provider == "claude" else CODEX_AUTH_PATTERNS
+    for pat in auth_patterns:
+        if pat in text:
+            return "auth"
+
+    net_patterns = CLAUDE_NETWORK_PATTERNS if provider == "claude" else CODEX_NETWORK_PATTERNS
+    for pat in net_patterns:
+        if pat in text:
+            return "network"
+
+    for pat in RATE_LIMIT_PATTERNS:
+        if pat in text:
+            return "rate_limit"
+    if re.search(r"\b429\b", text):
+        return "rate_limit"
+
+    for pat in CODE_ERROR_PATTERNS:
+        if pat in text:
+            return "code_error"
+
+    return "other"
+
+
+def compute_cooldown(category: str, stderr: str) -> dt.datetime | None:
+    """Return when the provider is allowed again, or None for no cooldown."""
+    now = utc_now()
+    if category == "rate_limit":
+        return parse_reset_timestamp(stderr) or (now + dt.timedelta(minutes=30))
+    if category == "auth":
+        return now + dt.timedelta(minutes=60)
+    if category == "network":
+        jitter_seconds = random.randint(-120, 120)
+        return now + dt.timedelta(minutes=10, seconds=jitter_seconds)
+    if category == "timeout":
+        return now + dt.timedelta(minutes=15)
+    if category == "code_error":
+        return now + dt.timedelta(minutes=20)
+    if category == "crash":
+        return now + dt.timedelta(minutes=30)
+    return None  # "other" — no cooldown, but still failover
+
+
+def make_session_record(state: dict, resume_key: str | None, fresh: bool) -> dict:
+    if not resume_key:
+        return {}
+    sessions = state.setdefault("sessions", {})
+    if fresh:
+        sessions.pop(resume_key, None)
+    record = sessions.setdefault(resume_key, {})
+    return record
+
+
+def ordered_backends(preferred: str | None, requested: str) -> list[str]:
+    if requested != "auto":
+        return [requested]
+    order = [item for item in DEFAULT_BACKENDS if item in {"claude", "codex"}]
+    if preferred in order:
+        order.remove(preferred)
+        order.insert(0, preferred)
+    return order
+
+
+def is_blocked(state: dict, provider: str) -> dt.datetime | None:
+    blocked = parse_iso(state.get("providers", {}).get(provider, {}).get("blocked_until"))
+    if blocked and blocked > utc_now():
+        return blocked
+    return None
+
+
+def clear_expired_blocks(state: dict) -> None:
+    providers = state.setdefault("providers", {})
+    now = utc_now()
+    for record in providers.values():
+        blocked_until = parse_iso(record.get("blocked_until"))
+        if blocked_until and blocked_until <= now:
+            record.pop("blocked_until", None)
+
+
+def verbose(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message, file=sys.stderr)
+
+
+def build_claude_command(
+    prompt: str,
+    add_dirs: list[str],
+    session: dict,
+    resume_key: str | None,
+) -> list[str]:
+    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions", "--model", DEFAULT_CLAUDE_MODEL]
+    for path in add_dirs:
+        cmd.extend(["--add-dir", path])
+    if resume_key:
+        sid = session.get("claude_session_id") or stable_claude_session_id(resume_key)
+        session["claude_session_id"] = sid
+        if session.get("claude_resume_ready"):
+            cmd.extend(["--resume", sid])
+        else:
+            cmd.extend(["--session-id", sid])
+    return cmd
+
+
+def run_claude(
+    prompt: str,
+    cwd: pathlib.Path,
+    add_dirs: list[str],
+    session: dict,
+    resume_key: str | None,
+    timeout: int,
+) -> RunResult:
+    cmd = build_claude_command(prompt, add_dirs, session, resume_key)
+    try:
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        snippet = f"claude timed out after {timeout}s"
+        return RunResult(
+            provider="claude",
+            returncode=124,
+            output="",
+            stderr=snippet,
+            category="timeout",
+            cooldown_until=compute_cooldown("timeout", snippet),
+            snippet=snippet,
+        )
+
+    stderr = proc.stderr or ""
+    if proc.returncode == 0:
+        if resume_key:
+            session["claude_resume_ready"] = True
+        return RunResult(
+            provider="claude",
+            returncode=0,
+            output=proc.stdout,
+            stderr=stderr,
+            session_id=session.get("claude_session_id"),
+        )
+
+    category = classify_stderr("claude", stderr, proc.returncode)
+    return RunResult(
+        provider="claude",
+        returncode=proc.returncode,
+        output=proc.stdout,
+        stderr=stderr,
+        session_id=session.get("claude_session_id"),
+        category=category,
+        cooldown_until=compute_cooldown(category, stderr),
+        snippet=first_line(stderr) if stderr.strip() else None,
+    )
+
+
+def build_codex_command(
+    prompt: str,
+    cwd: pathlib.Path,
+    add_dirs: list[str],
+    session: dict,
+    timeout_file: pathlib.Path,
+    resume_key: str | None,
+) -> list[str]:
+    base = ["codex", "exec"]
+    if resume_key and session.get("codex_session_id"):
+        base = ["codex", "exec", "resume", session["codex_session_id"]]
+    cmd = base + [
+        prompt,
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-C",
+        str(cwd),
+        "-o",
+        str(timeout_file),
+    ]
+    if DEFAULT_CODEX_MODEL:
+        cmd.extend(["-m", DEFAULT_CODEX_MODEL])
+    for path in add_dirs:
+        cmd.extend(["--add-dir", path])
+    return cmd
+
+
+def run_codex(
+    prompt: str,
+    cwd: pathlib.Path,
+    add_dirs: list[str],
+    session: dict,
+    resume_key: str | None,
+    timeout: int,
+) -> RunResult:
+    with tempfile.NamedTemporaryFile(prefix="kb-orchestrator-run-", suffix=".txt", delete=False) as tmp:
+        output_path = pathlib.Path(tmp.name)
+
+    try:
+        cmd = build_codex_command(prompt, cwd, add_dirs, session, output_path, resume_key)
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            snippet = f"codex timed out after {timeout}s"
+            return RunResult(
+                provider="codex",
+                returncode=124,
+                output="",
+                stderr=snippet,
+                category="timeout",
+                cooldown_until=compute_cooldown("timeout", snippet),
+                snippet=snippet,
+            )
+
+        output = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        stderr = proc.stderr or ""
+        session_match = re.search(r"session id:\s*([0-9a-f-]{36})", stderr, flags=re.IGNORECASE)
+        if session_match:
+            session["codex_session_id"] = session_match.group(1)
+
+        if proc.returncode == 0:
+            return RunResult(
+                provider="codex",
+                returncode=0,
+                output=output or proc.stdout,
+                stderr=stderr,
+                session_id=session.get("codex_session_id"),
+            )
+
+        category = classify_stderr("codex", stderr, proc.returncode)
+        return RunResult(
+            provider="codex",
+            returncode=proc.returncode,
+            output=output or proc.stdout,
+            stderr=stderr,
+            session_id=session.get("codex_session_id"),
+            category=category,
+            cooldown_until=compute_cooldown(category, stderr),
+            snippet=first_line(stderr) if stderr.strip() else None,
+        )
+    finally:
+        try:
+            output_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def read_prompt(raw_prompt: str | None) -> str:
+    if raw_prompt and raw_prompt != "-":
+        return raw_prompt
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return ""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a prompt through Codex/Claude with failure-aware failover.")
+    parser.add_argument("prompt", nargs="?", help="Prompt text, or '-' to read from stdin")
+    parser.add_argument("--backend", choices=["auto", "claude", "codex"], default="auto")
+    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for the run")
+    parser.add_argument("--add-dir", action="append", default=[], help="Additional trusted/writable directory")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-provider timeout in seconds")
+    parser.add_argument("--resume-key", help="Stable logical session key for repeated runs")
+    parser.add_argument("--fresh", action="store_true", help="Drop stored session mapping for --resume-key")
+    parser.add_argument("--verbose", action="store_true", help="Print provider decisions to stderr")
+    parser.add_argument(
+        "--json-status",
+        action="store_true",
+        help="Write structured run result to ~/knowledge/.orchestrator/runs/<run_id>.json (8-category contract)",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Caller-supplied run_id (UUID). When provided, --json-status writes to "
+             "<run_id>.json so the caller can read the result deterministically. "
+             "Without this flag, broker generates its own UUID.",
+    )
+    return parser.parse_args()
+
+
+def preflight(args: argparse.Namespace, prompt: str) -> tuple[pathlib.Path, list[str]] | None:
+    """Validate caller inputs. Return (cwd, add_dirs) on success, or None (caller returns 2)."""
+    if not prompt.strip():
+        print("prompt is empty: pass it as an argument or via stdin", file=sys.stderr)
+        return None
+
+    cwd = pathlib.Path(args.cwd).expanduser().resolve()
+    if not cwd.exists() or not cwd.is_dir():
+        print(f"--cwd does not exist or is not a directory: {cwd}", file=sys.stderr)
+        return None
+
+    add_dirs: list[str] = []
+    for path in args.add_dir:
+        resolved = pathlib.Path(path).expanduser().resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            print(f"--add-dir does not exist or is not a directory: {resolved}", file=sys.stderr)
+            return None
+        add_dirs.append(str(resolved))
+
+    return cwd, add_dirs
+
+
+def record_success(state: dict, provider: str, session_id: str | None) -> None:
+    record = state.setdefault("providers", {}).setdefault(provider, {})
+    record["last_success_at"] = iso_z(utc_now())
+    record.pop("last_category", None)
+    record.pop("last_stderr_snippet", None)
+    if session_id:
+        record["last_session_id"] = session_id
+
+
+def record_failure(state: dict, result: RunResult) -> None:
+    record = state.setdefault("providers", {}).setdefault(result.provider, {})
+    record["last_category"] = result.category
+    record["last_stderr_snippet"] = result.snippet or ""
+    record["last_seen_at"] = iso_z(utc_now())
+    if result.cooldown_until is not None:
+        record["blocked_until"] = iso_z(result.cooldown_until)
+
+
+def write_run_result_file(
+    run_id: str,
+    started_at: dt.datetime,
+    ended_at: dt.datetime,
+    final_exit: int,
+    final_category: str,
+    detail: str,
+    final_provider: str | None,
+    fallback_used: bool,
+    attempts: list[dict],
+) -> None:
+    # CR5-N2: respect KB_HUB so sandbox/test environments don't leak into
+    # ~/knowledge. STATE_DIR already follows this convention (line 41).
+    runs_dir = STATE_DIR / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": run_id,
+        "exit_code": final_exit,
+        "category": final_category,
+        "detail": detail[:500],
+        "started_at": iso_z(started_at),
+        "ended_at": iso_z(ended_at),
+        "provider": final_provider,
+        "fallback_used": fallback_used,
+        "attempts": attempts,
+    }
+    target = runs_dir / f"{run_id}.json"
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(target)
+
+
+def main() -> int:
+    args = parse_args()
+    prompt = read_prompt(args.prompt)
+
+    pre = preflight(args, prompt)
+    if pre is None:
+        return 2
+    cwd, add_dirs = pre
+    prompt = prompt.strip()
+
+    state = load_state()
+    clear_expired_blocks(state)
+    session = make_session_record(state, args.resume_key, args.fresh)
+
+    preferred = session.get("preferred_backend") if args.resume_key else None
+    providers = ordered_backends(preferred, args.backend)
+
+    failure_reasons: list[str] = []
+    run_id = args.run_id or str(uuid.uuid4())
+    started_at = utc_now()
+    attempts: list[dict] = []
+
+    for provider in providers:
+        blocked_until = is_blocked(state, provider)
+        if blocked_until is not None:
+            reason = f"{provider}: blocked until {iso_z(blocked_until)}"
+            failure_reasons.append(reason)
+            attempts.append({
+                "provider": provider,
+                "category": "blocked",
+                "detail": reason,
+            })
+            verbose(args.verbose, f"[kb-orchestrator-run] skip {reason}")
+            continue
+
+        verbose(args.verbose, f"[kb-orchestrator-run] try {provider} (cwd={cwd})")
+        if provider == "claude":
+            result = run_claude(prompt, cwd, add_dirs, session, args.resume_key, args.timeout)
+        elif provider == "codex":
+            result = run_codex(prompt, cwd, add_dirs, session, args.resume_key, args.timeout)
+        else:
+            continue
+
+        attempts.append({
+            "provider": provider,
+            "category": "ok" if result.ok else (result.category or "other"),
+            "returncode": result.returncode,
+            "snippet": result.snippet,
+        })
+
+        if result.ok:
+            if args.resume_key:
+                session["preferred_backend"] = provider
+            # CR6-B2 fix: atomic update under lock — preserves concurrent
+            # nested updates by sibling brokers. The mutator runs on a fresh
+            # disk-load, not our in-memory snapshot.
+            _resume_key = args.resume_key
+            _provider = provider
+            _session_id = result.session_id
+            _session_record = dict(session)
+            def _apply_success(disk: dict) -> None:
+                clear_expired_blocks(disk)
+                if _resume_key:
+                    sess_records = disk.setdefault("sessions", {})
+                    sess_records[_resume_key] = _session_record
+                record_success(disk, _provider, _session_id)
+            update_state(_apply_success)
+            log(
+                f"provider={provider} outcome=ok cwd={cwd} resume_key={args.resume_key or '-'} "
+                f"session_id={result.session_id or '-'} run_id={run_id}"
+            )
+            sys.stdout.write(result.output)
+            if args.json_status:
+                fallback_used = len([a for a in attempts if a["category"] != "blocked"]) > 1
+                write_run_result_file(
+                    run_id, started_at, utc_now(), 0, "ok",
+                    detail="success", final_provider=provider,
+                    fallback_used=fallback_used, attempts=attempts,
+                )
+            return 0
+
+        # CR6-B2 fix: same atomic-update pattern for failure path.
+        _provider_f = provider
+        _result_f = result
+        def _apply_failure(disk: dict) -> None:
+            clear_expired_blocks(disk)
+            record_failure(disk, _result_f)
+        update_state(_apply_failure)
+        reason = f"{provider}: {result.category} — {result.snippet or '(no stderr)'}"
+        failure_reasons.append(reason)
+        log(
+            f"provider={provider} outcome={result.category} rc={result.returncode} cwd={cwd} "
+            f"reason={json.dumps(result.snippet or '', ensure_ascii=False)} run_id={run_id}"
+        )
+        verbose(args.verbose, f"[kb-orchestrator-run] {reason}")
+
+    message = "all providers exhausted: " + " | ".join(failure_reasons or ["no providers configured"])
+    log(f"outcome=exhausted cwd={cwd} detail={json.dumps(message, ensure_ascii=False)} run_id={run_id}")
+    print(message, file=sys.stderr)
+    if args.json_status:
+        # Final category — last attempted real failure (skip 'blocked' attempts).
+        real_attempts = [a for a in attempts if a["category"] != "blocked"]
+        final_category = real_attempts[-1]["category"] if real_attempts else "other"
+        final_provider = real_attempts[-1]["provider"] if real_attempts else None
+        write_run_result_file(
+            run_id, started_at, utc_now(), 75, final_category,
+            detail=message, final_provider=final_provider,
+            fallback_used=len(real_attempts) > 1, attempts=attempts,
+        )
+    return 75
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,105 @@
+diff --git a/scripts/flush.py b/scripts/flush.py
+index 3cb25c4..22539ae 100644
+--- a/scripts/flush.py
++++ b/scripts/flush.py
+@@ -54,7 +54,62 @@ def save_flush_state(state: dict) -> None:
+ 
+ 
+ def append_to_daily_log(content: str, section: str = "Session") -> None:
+-    """Append content to today's daily log."""
++    """Append content to today's daily log.
++
++    PATCHED for per-project integration:
++    - If CLAUDE_KB_DAILY_DIR is set, writes to that dir instead of module-default DAILY_DIR.
++    - If CLAUDE_KB_LOG_FILE is set, also appends a one-line cross-reference to user's curated log.md.
++    """
++    target_daily_env = os.environ.get("CLAUDE_KB_DAILY_DIR")
++    target_log_env = os.environ.get("CLAUDE_KB_LOG_FILE")
++
++    if target_daily_env:
++        now = datetime.now(timezone.utc).astimezone()
++        date_str = now.strftime("%Y-%m-%d")
++        time_str = now.strftime("%H:%M")
++
++        daily_dir = Path(target_daily_env)
++        daily_dir.mkdir(parents=True, exist_ok=True)
++        log_path = daily_dir / f"{date_str}.md"
++        if not log_path.exists():
++            log_path.write_text(
++                f"# Daily Log: {date_str}\n\n## Sessions\n\n",
++                encoding="utf-8",
++            )
++        entry = f"### {section} ({time_str})\n\n{content}\n\n"
++        with open(log_path, "a", encoding="utf-8") as f:
++            f.write(entry)
++
++        if target_log_env:
++            import re as _re
++            log_file = Path(target_log_env)
++            first = ""
++            for line in content.strip().splitlines():
++                stripped = line.strip()
++                if not stripped or stripped.startswith("#"):
++                    continue
++                # Strip "**Context:**" and similar bold labels, then remaining asterisks
++                stripped = _re.sub(r'\*+\s*Context\s*:\s*\*+\s*', '', stripped, flags=_re.IGNORECASE)
++                stripped = stripped.strip("*").strip()
++                if stripped:
++                    first = stripped
++                    break
++            if len(first) > 100:
++                first = first[:100] + "..."
++            if not first:
++                first = "(session captured)"
++            entry_line = (
++                f"\n## [{date_str} {time_str}] session | {first}\n"
++                f"Details: [[daily/{date_str}]]\n"
++            )
++            try:
++                with open(log_file, "a", encoding="utf-8") as f:
++                    f.write(entry_line)
++            except Exception as e:
++                logging.error("Failed to cross-ref to log.md: %s", e)
++        return
++
++    # Original upstream behavior (unchanged)
+     today = datetime.now(timezone.utc).astimezone()
+     log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+ 
+@@ -144,6 +199,10 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
+ 
+ def maybe_trigger_compilation() -> None:
+     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
++    # PATCH: per-project integration disables compile via env var
++    if os.environ.get("CLAUDE_KB_NO_COMPILE"):
++        return
++
+     import subprocess as _sp
+ 
+     now = datetime.now(timezone.utc).astimezone()
+@@ -225,15 +284,20 @@ def main():
+     # Run the LLM extraction
+     response = asyncio.run(run_flush(context))
+ 
+-    # Append to daily log
++    # Append to daily log.
++    # PATCH: in per-project mode (CLAUDE_KB_DAILY_DIR set), skip FLUSH_OK/FLUSH_ERROR
++    # to avoid noise in user's curated log.md cross-reference.
++    per_project_mode = bool(os.environ.get("CLAUDE_KB_DAILY_DIR"))
+     if "FLUSH_OK" in response:
+         logging.info("Result: FLUSH_OK")
+-        append_to_daily_log(
+-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+-        )
++        if not per_project_mode:
++            append_to_daily_log(
++                "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
++            )
+     elif "FLUSH_ERROR" in response:
+         logging.error("Result: %s", response)
+-        append_to_daily_log(response, "Memory Flush")
++        if not per_project_mode:
++            append_to_daily_log(response, "Memory Flush")
+     else:
+         logging.info("Result: saved to daily log (%d chars)", len(response))
+         append_to_daily_log(response, "Session")

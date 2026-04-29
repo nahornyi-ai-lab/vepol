@@ -35,8 +35,12 @@ telegram/access.json
 auth.json
 credentials*.json
 
-# User overlay (must NEVER appear in this repo — that's the whole point)
-knowledge/
+# User overlay (must NEVER appear in this repo — that's the whole point).
+# Exception: the master schema file `knowledge/CLAUDE.md`, which install.sh
+# copies to ~/knowledge/CLAUDE.md on the user's machine. The schema itself
+# is documentation; only the user's runtime KB content stays out.
+knowledge/*
+!knowledge/CLAUDE.md
 .kb-ignore
 
 # Maintainer-only: runtime blocklist generated locally for the staging mirror

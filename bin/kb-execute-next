@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""kb-execute-next — auto-trigger executor (Phase 1b).
+
+Спека: ~/knowledge/concepts/auto-trigger-executor.md
+План: ~/.claude/plans/rustling-marinating-sketch.md (Phase 1b — claim-token,
+      hash-chain replay detector, agent OUTCOME contract, optional broker routing)
+
+Берёт первую `- [ ] ... auto: true` строку из `## Open` секции проектного
+backlog.md и спавнит агента в проектной cwd. Контракт исполнения:
+
+1. Pick: `kb-backlog claim <slug> --line N` под per-backlog lock; CLI
+   возвращает claim_id (16-hex token).
+2. Pre-spawn snapshot: file_hash_before_spawn + (segment_id, offset_before)
+   зарегистрированы в spawns-active.json под spawns.lock.
+3. Spawn agent: либо через `kb-orchestrator-run` (broker, если KB_EXEC_BROKER=1
+   или `.orchestration.yaml: exec_broker: true`), либо direct claude.
+   Lock не держится во время spawn.
+4. Parse agent stdout per OUTCOME contract — exactly one
+   `OUTCOME: closed|escalated|failed: <reason>` as last non-empty stdout line.
+   Otherwise → revert + escalation.
+5. Post-spawn: full hash-chain replay over audit journal entries within
+   spawn window — detects durable raw writes by agent. Chain mismatch →
+   revert + escalation.
+6. Close: `kb-backlog close <slug> --line N --claim-id <token> --outcome <enum>`
+   under lock; CLI rechecks claim-id drift before applying.
+
+Idempotency lives in `kb-backlog append`, not here. Cycle-meta fields
+(cycle_source_id, plan_item_id) are info-only and surfaced in log.md.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+DEFAULT_LOCK = HUB / ".executor.lock"
+DEFAULT_LOG = HUB / "logs" / "executor.log"
+DEFAULT_TIMEOUT = 900
+KB_BACKLOG = HUB / "bin" / "kb-backlog"
+KB_ORCHESTRATOR_RUN = HUB / "bin" / "kb-orchestrator-run"
+SPAWNS_ACTIVE_PATH = HUB / ".orchestrator" / "spawns-active.json"
+
+sys.path.insert(0, str(HUB / "bin"))
+from _kb_backlog import journal, locks, spawns  # noqa: E402
+
+OUTCOME_RE = re.compile(r"^OUTCOME:\s*(?P<enum>closed|escalated|failed)\s*:\s*(?P<reason>.+)$")
+
+
+def _err(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def resolve_project(slug, project_path_override):
+    if project_path_override:
+        p = pathlib.Path(project_path_override).resolve()
+        if not p.is_dir():
+            _err(f"error: --project-path does not exist or is not a dir: {p}")
+        return p
+    link = HUB / "projects" / slug
+    if link.exists():
+        return link.resolve().parent
+    _err(f"error: cannot resolve slug '{slug}' (no symlink at {link}, no --project-path)")
+
+
+def parse_backlog(backlog_path):
+    """Return all `- [ ]` task dicts from `## Open` section."""
+    if not backlog_path.exists():
+        _err(f"error: no backlog.md at {backlog_path}")
+    text = backlog_path.read_text(encoding="utf-8")
+    in_open = False
+    in_comment = False
+    tasks = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        scan = line
+        while scan:
+            if not in_comment:
+                open_idx = scan.find("<!--")
+                if open_idx == -1:
+                    break
+                scan = scan[open_idx + 4:]
+                in_comment = True
+            else:
+                close_idx = scan.find("-->")
+                if close_idx == -1:
+                    scan = ""
+                    break
+                scan = scan[close_idx + 3:]
+                in_comment = False
+        if in_comment:
+            continue
+        if re.match(r"^##\s+Open\b", line):
+            in_open = True
+            continue
+        if in_open and re.match(r"^##\s+\S", line):
+            break
+        if not in_open:
+            continue
+        m = re.match(r"^\s*-\s*\[\s*\]\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        body = m.group(1)
+        if "<" in body and "YYYY-MM-DD" in body:
+            continue
+        auto = bool(re.search(r"\bauto\s*:\s*true\b", body, re.IGNORECASE))
+        pm = re.search(r"\bprompt\s*:\s*(.+?)(?=\s+—|\s+--|$)", body)
+        prompt = pm.group(1).strip() if pm else None
+        tasks.append({"body": body, "auto": auto, "prompt": prompt, "lineno": lineno})
+    return tasks
+
+
+def task_title(body):
+    return body.split(" —", 1)[0].strip()
+
+
+def build_prompt(task, slug):
+    """Build the agent prompt. The agent contract requires exactly one OUTCOME
+    line as the last non-empty stdout line. Spawn-side parser enforces it.
+    """
+    if task["prompt"]:
+        base = task["prompt"]
+    else:
+        clean = re.sub(
+            r"\s+—\s+auto\s*:\s*(true|false)\b",
+            "",
+            task["body"],
+            flags=re.IGNORECASE,
+        )
+        base = (
+            f"Ты в проекте {slug}. В твоём backlog.md тебе назначена задача:\n\n"
+            f"{clean}\n\n"
+            "Выполни задачу. По завершении:\n"
+            "- успех — обнови state/log/нужные файлы; **не правь backlog.md напрямую** — executor закроет строку.\n"
+            "- нужен человек / доступ / недостающая информация → допиши запись в "
+            "`knowledge/escalations.md` (секция `## Open`).\n"
+            "- технический сбой (rate-limit, MCP-недоступен) → запись в "
+            "`knowledge/incidents.md`.\n\n"
+            "Не выходи за скоуп задачи. Не бери смежные open-пункты."
+        )
+    contract = (
+        "\n\n"
+        "## OUTCOME contract (обязательно)\n"
+        "Перед выходом emit ровно одну строку формата как ПОСЛЕДНЮЮ непустую stdout-строку:\n"
+        "    OUTCOME: closed: <one-line summary>           — задача выполнена успешно\n"
+        "    OUTCOME: escalated: <reason>                  — поднял вверх в escalations.md\n"
+        "    OUTCOME: failed: <reason>                     — техническая проблема\n"
+        "Никаких дополнительных stdout строк после OUTCOME. **Не правь backlog.md** — "
+        "executor закроет строку через atomic API."
+    )
+    return base + contract
+
+
+def project_is_registered(slug):
+    return (HUB / "projects" / slug).exists()
+
+
+def use_broker_for(slug, project) -> bool:
+    if os.environ.get("KB_EXEC_BROKER", "0") == "1":
+        return True
+    orch = project / "knowledge" / ".orchestration.yaml"
+    if orch.is_file():
+        try:
+            text = orch.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                m = re.match(r"\s*exec_broker\s*:\s*(true|false)\b", line, re.IGNORECASE)
+                if m:
+                    return m.group(1).lower() == "true"
+        except Exception:
+            pass
+    return False
+
+
+def executor_log_path():
+    return pathlib.Path(os.environ.get("KB_EXECUTOR_LOG_FILE", DEFAULT_LOG))
+
+
+def log_executor(line):
+    path = executor_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line.rstrip() + "\n")
+
+
+def kb_backlog_call(*args):
+    """Call kb-backlog CLI, return (returncode, parsed_json or stdout_text)."""
+    full = [str(KB_BACKLOG), *args, "--json"] if "--json" not in args else [str(KB_BACKLOG), *args]
+    if "--json" not in full:
+        full.append("--json")
+    proc = subprocess.run(full, capture_output=True, text=True)
+    try:
+        return proc.returncode, json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        return proc.returncode, proc.stdout
+
+
+def append_escalation(slug, project, message):
+    """Best-effort: write a manual line to escalations.md. We use direct write
+    since escalations.md is not under audit-journal protocol — it's a plain
+    log destination, not a coordination surface."""
+    esc = project / "knowledge" / "escalations.md"
+    today = dt.date.today().isoformat()
+    line = f"- [ ] [executor {today}] {message}"
+    if esc.is_file():
+        text = esc.read_text(encoding="utf-8")
+    else:
+        text = "# Escalations\n\n## Open\n\n"
+    if "## Open" not in text:
+        text += "\n\n## Open\n\n"
+    text = text.rstrip() + "\n" + line + "\n"
+    esc.parent.mkdir(parents=True, exist_ok=True)
+    esc.write_text(text, encoding="utf-8")
+
+
+def parse_outcome(stdout: str) -> tuple[str, str, str]:
+    """Return (status, enum_or_empty, reason_or_diagnostic).
+
+    status ∈ {ok, missing, multiple, trailing, invalid}
+    """
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return "missing", "", "no stdout produced"
+    matches = [(i, OUTCOME_RE.match(ln)) for i, ln in enumerate(lines)]
+    matches = [(i, m) for i, m in matches if m]
+    if not matches:
+        return "missing", "", "no OUTCOME line found in stdout"
+    if len(matches) > 1:
+        return "multiple", "", f"agent emitted {len(matches)} OUTCOME lines"
+    last_idx, m = matches[0]
+    if last_idx != len(lines) - 1:
+        return "trailing", "", "OUTCOME present but not last non-empty line"
+    return "ok", m.group("enum"), m.group("reason").strip()
+
+
+def replay_chain(slug, file_hash_before, file_hash_after,
+                 segment_id_before, offset_before):
+    """Full hash-chain replay (CR7-B1) with terminal-count corruption refusal
+    (CR1-B3).
+
+    Walks audit journal entries in [(seg_before, offs_before), now], collapses
+    by tx_id, replays only committed/committed-recovered terminals:
+      assert tx.before_hash == rolling; rolling = tx.after_hash
+    Final assert: rolling == file_hash_after.
+
+    If any tx_id in the window has terminal_count > 1, refuses (returns
+    False, "duplicate-terminal: ..."). Caller must escalate.
+
+    Returns (ok: bool, diagnostic: str). ok=False indicates either:
+    - durable raw write (chain break), or
+    - pre-existing journal corruption (duplicate terminals).
+    """
+    cur_seg = journal._read_current_segment_id(slug)
+    if cur_seg is None:
+        return file_hash_before == file_hash_after, "no audit segment"
+    cur_size = journal.segment_size(slug, cur_seg)
+
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+    for rec in journal.iter_records_window(slug, segment_id_before,
+                                            offset_before, cur_seg, cur_size):
+        tid = rec.get("tx_id")
+        if not tid:
+            continue
+        phase = rec.get("phase")
+        if phase == "prepared":
+            entry = grouped.setdefault(tid, {"prepared": None, "terminals": []})
+            entry["prepared"] = rec
+            if tid not in order:
+                order.append(tid)
+        elif phase in ("committed", "committed-recovered", "aborted", "escalated-orphan"):
+            entry = grouped.setdefault(tid, {"prepared": None, "terminals": []})
+            entry["terminals"].append(rec)
+
+    # CR1-B3: refuse duplicate terminals in window — pre-existing corruption.
+    for tid, st in grouped.items():
+        if len(st["terminals"]) > 1:
+            phases = [t.get("phase", "?") for t in st["terminals"]]
+            return False, (f"duplicate-terminal: tx {tid[:8]} has terminals {phases}; "
+                           f"manual resolve required")
+
+    rolling = file_hash_before
+    for tid in order:
+        st = grouped[tid]
+        prepared = st.get("prepared")
+        terminals = st.get("terminals", [])
+        terminal = terminals[0] if terminals else None
+        if not (prepared and terminal):
+            # In-window prepared without terminal — concurrent op still in flight
+            # at our window edge. Skip.
+            continue
+        if terminal["phase"] not in ("committed", "committed-recovered"):
+            continue  # aborted / escalated-orphan don't change file
+        before = prepared.get("before_hash")
+        after = prepared.get("after_hash")
+        if before != rolling:
+            return False, (f"chain break at tx {tid[:8]}: expected before {rolling[:8]}, "
+                           f"got {before[:8]}")
+        rolling = after
+
+    if rolling != file_hash_after:
+        return False, (f"final chain mismatch: rolling {rolling[:8]} != "
+                       f"file_after {file_hash_after[:8]}")
+    return True, "chain valid"
+
+
+def acquire_executor_lock(lock_path):
+    """Outer executor singleton-lock (existing semantics)."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _err("busy: lock held by another executor", code=2)
+    return fh
+
+
+def run_live(slug, project, backlog_path, task, prompt, timeout):
+    """Live execution path with claim-token + chain-replay detector + agent OUTCOME."""
+    started = dt.date.today().isoformat()
+    preview = task_title(task["body"])[:80]
+    log_executor(f"[{started}] started | slug={slug} | task={preview}")
+
+    # Step 1: claim
+    rc, claim_res = kb_backlog_call("claim", slug, "--line", str(task["lineno"]))
+    if rc != 0 or claim_res.get("status") not in ("claimed", "noop"):
+        log_executor(f"[{started}] claim-failed | slug={slug} | task={preview} | result={claim_res}")
+        print(f"claim failed: {claim_res}", file=sys.stderr)
+        sys.exit(1)
+    claim_id = claim_res["claim_id"]
+    print(f"picked: {preview}")
+    print(f"claim_id: {claim_id}")
+
+    # Step 2: pre-spawn snapshot — atomic under <slug>.lock + spawns.lock
+    # (CR1-B2). Both locks held while we read file_hash, journal cursor, and
+    # register the spawn — concurrent legit writers cannot interleave.
+    spawn_id = str(uuid.uuid4())
+    with locks.acquire([locks.LockId.slug(slug), locks.LockId.spawns()],
+                       timeout_s=30.0):
+        file_hash_before = journal.sha256_text(backlog_path.read_text(encoding="utf-8"))
+        seg_before = journal.ensure_current_segment(slug)
+        offset_before = journal.segment_size(slug, seg_before)
+        started_at = journal.now_iso()
+        spawns.register(
+            spawn_id=spawn_id, pid=os.getpid(), slug=slug,
+            segment_id=seg_before, offset=offset_before, started_at=started_at,
+        )
+
+    # Step 3: spawn agent
+    if use_broker_for(slug, project):
+        spawn_cmd = [str(KB_ORCHESTRATOR_RUN), prompt,
+                     "--cwd", str(project), "--timeout", str(timeout)]
+        subprocess_timeout = timeout + 30
+    elif project_is_registered(slug):
+        spawn_cmd = [str(HUB / "bin" / "kb-spawn-project"), slug, prompt,
+                     "--timeout", str(timeout)]
+        subprocess_timeout = timeout + 30
+    else:
+        spawn_cmd = ["claude", "-p", "--add-dir", str(project),
+                     "--dangerously-skip-permissions", prompt]
+        subprocess_timeout = timeout
+
+    child_env = os.environ.copy()
+    child_env["KB_EXECUTOR_DEPTH"] = str(int(child_env.get("KB_EXECUTOR_DEPTH", "0")) + 1)
+
+    t0 = time.time()
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            spawn_cmd, env=child_env, cwd=str(project),
+            capture_output=True, text=True, timeout=subprocess_timeout,
+        )
+        elapsed = int(time.time() - t0)
+        agent_stdout = proc.stdout or ""
+        agent_returncode = proc.returncode
+    except subprocess.TimeoutExpired:
+        elapsed = int(time.time() - t0)
+        timed_out = True
+        agent_stdout = ""
+        agent_returncode = -1
+
+    # Step 4: post-spawn analysis under <slug>.lock + spawns.lock (CR1-B2).
+    # We hold both locks while:
+    #   (a) running preflight (refuses on duplicate-terminal corruption)
+    #   (b) running per-slug recovery (idempotent; finalizes any dangling
+    #       prepared from concurrent kb-backlog crashes)
+    #   (c) reading file_hash_after
+    #   (d) running hash-chain replay
+    #   (e) unregistering the spawn
+    # This blocks concurrent writers during the analysis but allows them
+    # immediately after — they would conflict with the close/revert call
+    # below anyway.
+    file_hash_after: str = ""
+    chain_ok: bool = True
+    chain_diag: str = ""
+    preflight_failed: bool = False
+    preflight_diag: str = ""
+    with locks.acquire([locks.LockId.slug(slug), locks.LockId.spawns()],
+                       timeout_s=30.0):
+        # Preflight (CR1-B3): if another writer / pre-existing corruption
+        # added duplicate terminals, refuse and revert.
+        from _kb_backlog import preflight as _preflight
+        report = _preflight.preflight_for_slug(slug)
+        if report.has_corruption:
+            preflight_failed = True
+            preflight_diag = (
+                f"slug_corruption={len(report.slug_corruption)} "
+                f"xfer_corruption={len(report.xfer_corruption)}"
+            )
+        else:
+            # Recovery: finalize any dangling prepared transactions.
+            # Idempotent — re-runs are no-ops once terminal is written.
+            current_text_for_recovery = backlog_path.read_text(encoding="utf-8")
+            journal.recover_pending(slug, current_text_for_recovery)
+            # Read file_hash + replay AFTER recovery (so we don't false-positive
+            # on transactions that recovery just terminalized).
+            file_hash_after = journal.sha256_text(
+                backlog_path.read_text(encoding="utf-8")
+            )
+            chain_ok, chain_diag = replay_chain(
+                slug, file_hash_before, file_hash_after, seg_before, offset_before,
+            )
+        spawns.unregister(spawn_id)
+
+    # Step 5a: timeout → revert + escalation
+    if timed_out:
+        log_executor(f"[{dt.date.today().isoformat()}] result: timeout | slug={slug} | "
+                     f"duration={elapsed}s | task={preview}")
+        kb_backlog_call("revert", slug, "--line", str(task["lineno"]),
+                        "--claim-id", claim_id, "--reason", "timeout")
+        append_escalation(slug, project, f"timeout after {elapsed}s on '{preview}'")
+        print(f"result: timeout (after {elapsed}s)")
+        sys.exit(0)
+
+    # Step 5b: spawn error
+    if agent_returncode != 0:
+        log_executor(f"[{dt.date.today().isoformat()}] result: spawn-error | "
+                     f"slug={slug} | duration={elapsed}s | rc={agent_returncode}")
+        kb_backlog_call("revert", slug, "--line", str(task["lineno"]),
+                        "--claim-id", claim_id, "--reason", f"spawn-rc-{agent_returncode}")
+        append_escalation(slug, project,
+                          f"spawn exit {agent_returncode} on '{preview}' (see executor.log)")
+        print(f"result: spawn-error (rc={agent_returncode})")
+        sys.exit(1)
+
+    # Step 5c: preflight refused — pre-existing corruption (CR1-B3)
+    if preflight_failed:
+        log_executor(f"[{dt.date.today().isoformat()}] result: preflight-corruption | "
+                     f"slug={slug} | task={preview} | {preflight_diag}")
+        kb_backlog_call("revert", slug, "--line", str(task["lineno"]),
+                        "--claim-id", claim_id, "--reason", "preflight-corruption")
+        append_escalation(slug, project,
+                          f"preflight corruption detected post-spawn: {preflight_diag}")
+        print(f"result: preflight-corruption ({preflight_diag})")
+        sys.exit(1)
+
+    # Step 6: parse OUTCOME contract
+    outcome_status, enum, reason = parse_outcome(agent_stdout)
+    if outcome_status != "ok":
+        log_executor(f"[{dt.date.today().isoformat()}] result: outcome-{outcome_status} | "
+                     f"slug={slug} | task={preview}")
+        kb_backlog_call("revert", slug, "--line", str(task["lineno"]),
+                        "--claim-id", claim_id, "--reason", f"outcome-{outcome_status}")
+        append_escalation(slug, project,
+                          f"agent OUTCOME contract violated ({outcome_status}): {reason}")
+        print(f"result: outcome-{outcome_status} ({reason})")
+        sys.exit(1)
+
+    # Step 7: hash-chain replay verdict (computed under lock above)
+    diagnostic = chain_diag
+    if not chain_ok:
+        log_executor(f"[{dt.date.today().isoformat()}] result: chain-broken | "
+                     f"slug={slug} | task={preview} | {diagnostic}")
+        kb_backlog_call("revert", slug, "--line", str(task["lineno"]),
+                        "--claim-id", claim_id, "--reason", "raw-write-detected")
+        append_escalation(slug, project,
+                          f"agent bypassed backlog API: {diagnostic}")
+        print(f"result: chain-broken ({diagnostic})")
+        sys.exit(1)
+
+    # Step 8: legitimate close via kb-backlog
+    rc, close_res = kb_backlog_call(
+        "close", slug, "--line", str(task["lineno"]),
+        "--claim-id", claim_id, "--outcome", enum,
+        "--reason", reason,
+    )
+    if rc != 0 or close_res.get("status") not in ("closed", "noop"):
+        log_executor(f"[{dt.date.today().isoformat()}] result: close-failed | "
+                     f"slug={slug} | rc={rc} | {close_res}")
+        # Don't escalate here — agent did its job; the close failure is a
+        # surface-level race (e.g. drift). The line is still claimed; manual review.
+        print(f"result: close-failed (rc={rc}, {close_res})", file=sys.stderr)
+        sys.exit(1)
+
+    log_executor(f"[{dt.date.today().isoformat()}] result: {enum} | slug={slug} | "
+                 f"duration={elapsed}s | task={preview} | reason={reason[:80]}")
+    print(f"result: {enum}")
+    print(f"reason: {reason}")
+    print(f"duration: {elapsed}s")
+    sys.exit(0)
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Auto-trigger executor (Phase 1b) — claim-token + chain-replay + OUTCOME.",
+    )
+    p.add_argument("slug", help="project slug or use --project-path")
+    p.add_argument("--dry-run", action="store_true",
+                   help="parse + prepare prompt, do not spawn agent or modify files")
+    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                   help=f"max runtime seconds (default {DEFAULT_TIMEOUT})")
+    p.add_argument("--project-path", help="override project path (testing)")
+    args = p.parse_args()
+
+    depth = int(os.environ.get("KB_EXECUTOR_DEPTH", "0"))
+    if depth >= 3:
+        _err(f"error: depth limit reached (KB_EXECUTOR_DEPTH={depth} >= 3)")
+
+    project = resolve_project(args.slug, args.project_path)
+    backlog_path = project / "knowledge" / "backlog.md"
+
+    # CR-Phase5-CR5 fix: run kb-backlog recover BEFORE parsing the backlog.
+    # Without this, a dangling X2-X3 xfer crash leaves an open auto:true
+    # row in `[~]` tombstoned state — parse_backlog would treat it as
+    # tombstoned and return no-task, even though the row is recoverable.
+    # Recovery resolves the dangling xfer (state-safe rollback restores
+    # the open row) so the parse sees true post-recovery state.
+    recover_proc = subprocess.run(
+        [str(KB_BACKLOG), "recover", args.slug, "--json"],
+        capture_output=True, text=True,
+    )
+    if recover_proc.returncode == 3:
+        # Preflight refused — journal corruption, manual resolve required.
+        _err(f"recover {args.slug} refused: journal corruption — manual resolve required", code=3)
+    if recover_proc.returncode != 0:
+        # Transient (lock-busy, retry-exhausted) — log and continue with
+        # parse; if recovery would have changed the backlog, the
+        # subsequent kb-backlog claim will fail safely.
+        log_executor(f"warn: recover {args.slug} returned rc={recover_proc.returncode} "
+                     f"(continuing with parse; claim will safety-check)")
+
+    tasks = parse_backlog(backlog_path)
+    auto_tasks = [t for t in tasks if t["auto"]]
+    if not auto_tasks:
+        print("no-task")
+        sys.exit(0)
+
+    task = auto_tasks[0]
+    prompt = build_prompt(task, args.slug)
+
+    lock_path = pathlib.Path(os.environ.get("KB_EXECUTOR_LOCK_FILE", DEFAULT_LOCK))
+    _lock_fh = acquire_executor_lock(lock_path)
+
+    if args.dry_run:
+        if task["prompt"]:
+            print("picked: (prompt-override)")
+        else:
+            print(f"picked: {task_title(task['body'])}")
+        print("prompt:")
+        print(prompt)
+        print("\n--- contract ---")
+        print("(broker routing:", "yes" if use_broker_for(args.slug, project) else "no", ")")
+        sys.exit(0)
+
+    run_live(args.slug, project, backlog_path, task, prompt, args.timeout)
+
+
+if __name__ == "__main__":
+    main()

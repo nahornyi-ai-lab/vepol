@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# kb-spawn-project — spawn a project session through the hub's broker.
+#
+# Purpose: hub-as-router pattern. The hub never edits another project's files
+# directly. Instead it spawns a subagent in that project's cwd, which reads
+# its own CLAUDE.md + knowledge/ triad, does the work, and returns a result
+# string the hub can relay back to the user (e.g. via Telegram).
+#
+# Usage:
+#   kb-spawn-project <slug> "<prompt>" [--timeout <sec>] [--fresh] [--stream]
+#                                      [--add-dir <path>]... [--json]
+#                                      [--backend auto|claude|codex]
+#
+# Arguments:
+#   <slug>     Project slug from ~/knowledge/registry.md (e.g. "<slug-a>", "<slug-b>").
+#   <prompt>   Prompt to pass to the spawned session. Quote it.
+#
+# Options:
+#   --timeout <sec>   Hard timeout in seconds (default: 600). Requires `gtimeout`
+#                     (from coreutils) or falls back to `perl` wrapper.
+#   --fresh           Ignore cached session id; start a new pinned session and
+#                     overwrite the cached id. Use when a session got into a
+#                     bad state.
+#   --backend <name>  Backend for text mode: auto (default), claude, or codex.
+#                     JSON/stream modes stay Claude-only.
+#   --stream          Use --output-format=stream-json for realtime output.
+#                     Default is plain text (final assistant message only).
+#   --json            Use --output-format=json (single structured result).
+#   --add-dir <path>  Additional trusted directory. May be repeated. Always
+#                     includes the project root automatically.
+#   -h, --help        Show this help.
+#
+# Session pinning:
+#   Text mode delegates to kb-orchestrator-run with a stable resume-key
+#   `project:<slug>`, so provider-specific sessions persist across hub calls and
+#   can fail over between Claude and Codex. JSON/stream legacy mode keeps the
+#   previous Claude-only pinned-session behavior.
+#
+# Output:
+#   Writes the spawned session's stdout to this script's stdout unchanged.
+#   Exits with the spawn's exit code (or 124 on timeout).
+#
+# Examples:
+#   kb-spawn-project <slug> "Что в backlog на эту неделю?"
+#   kb-spawn-project <slug> "Открой последний sources/*.md и дай summary" --stream
+#   kb-spawn-project <slug> "..." --fresh --timeout 300
+
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+REGISTRY="$HUB/registry.md"
+SESSION_DIR="$HUB/.spawn-sessions"
+
+print_help() {
+  sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
+}
+
+SLUG=""
+PROMPT=""
+TIMEOUT=600
+FRESH=0
+OUTPUT_FORMAT="text"
+BACKEND="auto"
+EXTRA_DIRS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) print_help; exit 0 ;;
+    --timeout) TIMEOUT="$2"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
+    --backend) BACKEND="$2"; shift 2 ;;
+    --stream) OUTPUT_FORMAT="stream-json"; shift ;;
+    --json) OUTPUT_FORMAT="json"; shift ;;
+    --add-dir) EXTRA_DIRS+=("$2"); shift 2 ;;
+    --) shift; break ;;
+    -*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *)
+      if [[ -z "$SLUG" ]]; then SLUG="$1"
+      elif [[ -z "$PROMPT" ]]; then PROMPT="$1"
+      else echo "unexpected positional: $1" >&2; exit 2
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$SLUG" || -z "$PROMPT" ]]; then
+  echo "usage: kb-spawn-project <slug> \"<prompt>\" [--timeout N] [--fresh] [--stream|--json] [--backend auto|claude|codex] [--add-dir P]..." >&2
+  exit 2
+fi
+
+# Resolve slug → absolute path via registry.md. Registry rows look like:
+#   | slug | status | `~/path` | description |
+# Tilde expansion: $HOME prefix.
+resolve_path() {
+  local slug="$1"
+  python3 - "$REGISTRY" "$slug" <<'PY'
+import os, re, sys
+reg, slug = sys.argv[1], sys.argv[2]
+home = os.path.expanduser("~")
+with open(reg, encoding="utf-8") as f:
+    for line in f:
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        if cells[0] == slug:
+            raw = cells[2].strip("`")
+            if raw.startswith("~"):
+                raw = home + raw[1:]
+            print(raw)
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+PROJECT_DIR="$(resolve_path "$SLUG" || true)"
+if [[ -z "$PROJECT_DIR" ]]; then
+  echo "⨯ slug '$SLUG' not found in $REGISTRY" >&2
+  exit 3
+fi
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  echo "⨯ resolved path does not exist: $PROJECT_DIR" >&2
+  exit 3
+fi
+
+mkdir -p "$SESSION_DIR"
+SID_FILE="$SESSION_DIR/$SLUG.sid"
+
+# UUIDv5 from slug so the same slug always maps to the same id across fresh
+# cache wipes — but we still persist it so --resume can find it.
+gen_sid() {
+  python3 -c 'import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_DNS, "kb-spawn-project."+sys.argv[1]))' "$SLUG"
+}
+
+SID=""
+RESUME_FLAG=""
+if [[ $FRESH -eq 1 || ! -f "$SID_FILE" ]]; then
+  SID="$(gen_sid)"
+  echo "$SID" > "$SID_FILE"
+  # First run for this slug (or --fresh): pin the session id.
+  # On subsequent runs --resume <sid> picks it back up.
+  RESUME_FLAG="--session-id $SID"
+else
+  SID="$(cat "$SID_FILE")"
+  RESUME_FLAG="--resume $SID"
+fi
+
+# Timeout wrapper: prefer gtimeout (GNU coreutils), fall back to perl alarm.
+timeout_cmd=()
+if command -v gtimeout >/dev/null 2>&1; then
+  timeout_cmd=(gtimeout "$TIMEOUT")
+elif command -v timeout >/dev/null 2>&1; then
+  timeout_cmd=(timeout "$TIMEOUT")
+else
+  timeout_cmd=(perl -e '
+    my $t=shift; my $pid=fork;
+    if ($pid==0){exec @ARGV; exit 127}
+    local $SIG{ALRM}=sub{kill "TERM",$pid; sleep 2; kill "KILL",$pid; exit 124};
+    alarm $t; waitpid $pid,0; exit $?>>8;
+  ' -- "$TIMEOUT")
+fi
+
+ADD_DIR_ARGS=(--add-dir "$PROJECT_DIR")
+for d in "${EXTRA_DIRS[@]:-}"; do
+  [[ -n "$d" ]] && ADD_DIR_ARGS+=(--add-dir "$d")
+done
+
+# Text mode goes through the limit-aware broker so scheduled/router flows can
+# hop to Codex automatically when Claude is exhausted, and vice versa.
+if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+  cmd=(
+    "$HUB/bin/kb-orchestrator-run"
+    --backend "$BACKEND"
+    --cwd "$PROJECT_DIR"
+    --timeout "$TIMEOUT"
+    --resume-key "project:$SLUG"
+  )
+  [[ $FRESH -eq 1 ]] && cmd+=(--fresh)
+  for arg in "${ADD_DIR_ARGS[@]}"; do
+    cmd+=("$arg")
+  done
+  cmd+=("$PROMPT")
+
+  cd "$PROJECT_DIR"
+  if [[ -n "${KB_SPAWN_DEBUG:-}" ]]; then
+    printf '[kb-spawn-project] cwd=%s\n' "$PROJECT_DIR" >&2
+    printf '[kb-spawn-project] cmd='; printf ' %q' "${cmd[@]}"; printf '\n' >&2
+  fi
+  exec "${cmd[@]}"
+fi
+
+if [[ "$BACKEND" != "claude" ]]; then
+  echo "⨯ --backend=$BACKEND is only supported in text mode; use plain text or switch to --backend claude." >&2
+  exit 2
+fi
+
+# Invoke. `cd $PROJECT_DIR` so SessionStart hook sees cwd = project root and
+# picks up that project's knowledge/ triad + CLAUDE.md.
+# Note: $RESUME_FLAG is intentionally unquoted so it splits into two args.
+cd "$PROJECT_DIR"
+
+if [[ -n "${KB_SPAWN_DEBUG:-}" ]]; then
+  printf '[kb-spawn-project] cwd=%s\n' "$PROJECT_DIR" >&2
+  printf '[kb-spawn-project] cmd='; printf ' %q' "${timeout_cmd[@]}" claude -p $RESUME_FLAG --output-format "$OUTPUT_FORMAT" "${ADD_DIR_ARGS[@]}" --; printf ' <prompt omitted>\n' >&2
+fi
+
+exec "${timeout_cmd[@]}" claude -p \
+  $RESUME_FLAG \
+  --output-format "$OUTPUT_FORMAT" \
+  "${ADD_DIR_ARGS[@]}" \
+  -- "$PROMPT"

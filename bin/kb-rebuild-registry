@@ -1,0 +1,986 @@
+#!/usr/bin/env python3
+"""kb-rebuild-registry — derives registry.md and hierarchy.yaml from per-project metadata.
+
+Karpathy-инвариант: metadata живёт рядом с контентом. Hub-уровневые `registry.md` и
+`hierarchy.yaml` — оба derivable; единственный writable источник — frontmatter
+`<project>/knowledge/README.md` + `<project>/knowledge/.orchestration.yaml` (для
+orchestration_eligible) и `migration-<date>.yaml` (для hub-managed entries).
+
+Subcommands:
+  bootstrap <migration.yaml>  — generate migration table from filesystem + registry.md
+  check                       — regenerate derived block + hierarchy.yaml in-memory,
+                                fail с diff если расходится с committed
+  apply <migration.yaml>      — write README frontmatter + .orchestration.yaml для
+                                eligible проектов, regenerate registry.md derived/
+                                hub-managed blocks, write hierarchy.yaml.
+
+Spec: ~/knowledge/concepts/orchestrated-knowledge-base.md (root-concept) +
+      ~/.claude/plans/rustling-marinating-sketch.md Раздел 1.
+
+3-axis validity matrix (CR3-N1, CR4-B2):
+  derived ⇒ wiki=true & eligible=true
+  eligible=true ⇒ wiki=true & derived
+  hub-managed + wiki=true + eligible=false (pointer/archived)
+  hub-managed + wiki=false + eligible=false (no-wiki)
+  wiki=false & eligible=true                                       — hard-invalid
+  derived & eligible & broken-symlink-or-missing-README            — hard-invalid
+  hub-managed & eligible=true                                       — hard-invalid
+
+Parent referential integrity (CR4-B2):
+  Каждый non-root eligible проект имеет parent во frontmatter.
+  parent ∈ migration-table eligible slugs ∪ {hub}.
+  parent ≠ self.
+  frontmatter.parent == migration.parent (consistency).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+MIGRATION_FILENAME = "migration-2026-04-25.yaml"
+DERIVED_BEGIN = "<!-- DERIVED-BEGIN -->"
+DERIVED_END = "<!-- DERIVED-END -->"
+HUB_MANAGED_BEGIN = "<!-- HUB-MANAGED-BEGIN -->"
+HUB_MANAGED_END = "<!-- HUB-MANAGED-END -->"
+
+ROOT_SLUG = "hub"
+ROOT_PATH = HUB
+ELIGIBLE_STATUSES = {"live", "seeded"}
+INELIGIBLE_WITH_WIKI_STATUSES = {"pointer", "archived"}
+
+
+# ---------------------------------------------------------------------------
+# data model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MigrationEntry:
+    slug: str
+    registry_source: str          # derived | hub-managed
+    wiki_backed: bool
+    orchestration_eligible: bool
+    status: str                   # live | seeded | pointer | archived | no-wiki
+    category: str                 # lab | order | pet | job | personal
+    parent: Optional[str] = None  # eligible slug | hub | None для hub-managed
+    knowledge_path: Optional[str] = None
+    expected_symlink: Optional[str] = None
+    project_path: Optional[str] = None
+    description: str = ""
+
+    def to_yaml_dict(self) -> dict:
+        d = {
+            "slug": self.slug,
+            "registry_source": self.registry_source,
+            "wiki_backed": self.wiki_backed,
+            "orchestration_eligible": self.orchestration_eligible,
+            "status": self.status,
+            "category": self.category,
+        }
+        if self.parent is not None:
+            d["parent"] = self.parent
+        if self.knowledge_path is not None:
+            d["knowledge_path"] = self.knowledge_path
+        if self.expected_symlink is not None:
+            d["expected_symlink"] = self.expected_symlink
+        if self.project_path is not None:
+            d["project_path"] = self.project_path
+        if self.description:
+            d["description"] = self.description
+        return d
+
+
+# ---------------------------------------------------------------------------
+# registry.md parser (existing structure)
+# ---------------------------------------------------------------------------
+
+
+REGISTRY_CATEGORY_HEADINGS = {
+    "## lab — <work>": "lab",
+    "## order — клиентские заказы": "order",
+    "## pet — PetProjects": "pet",
+    "## job — работа по найму": "job",
+    "## personal / прочее": "personal",
+}
+
+REGISTRY_ROW_RE = re.compile(
+    r"^\|\s*(?P<slug>[a-z0-9-]+)\s*\|\s*(?P<status>[a-z-]+)\s*\|\s*`(?P<path>[^`]+)`\s*\|\s*(?P<desc>[^|]*?)\s*\|\s*$"
+)
+
+
+def parse_registry_md() -> list[dict]:
+    """Parse existing registry.md to extract slug → status, category, path, description."""
+    text = (HUB / "registry.md").read_text(encoding="utf-8")
+    rows: list[dict] = []
+    current_category: Optional[str] = None
+    for line in text.splitlines():
+        # Match category heading (с tolerance к variations)
+        for prefix, cat in REGISTRY_CATEGORY_HEADINGS.items():
+            if line.startswith(prefix):
+                current_category = cat
+                break
+        else:
+            m = REGISTRY_ROW_RE.match(line)
+            if m and current_category:
+                slug = m.group("slug")
+                if slug == "slug":
+                    continue  # header row
+                rows.append(
+                    {
+                        "slug": slug,
+                        "status": m.group("status"),
+                        "path": m.group("path").replace("~", os.path.expanduser("~")),
+                        "description": m.group("desc"),
+                        "category": current_category,
+                    }
+                )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# symlink scan + parent derivation
+# ---------------------------------------------------------------------------
+
+
+def scan_symlinks() -> dict[str, pathlib.Path]:
+    """Return {slug: resolved knowledge_path} for all symlinks in ~/knowledge/projects/."""
+    projects_dir = HUB / "projects"
+    out: dict[str, pathlib.Path] = {}
+    if not projects_dir.is_dir():
+        return out
+    for entry in sorted(projects_dir.iterdir()):
+        if not entry.is_symlink():
+            continue
+        target = pathlib.Path(os.readlink(entry))
+        if not target.is_absolute():
+            target = (entry.parent / target).resolve()
+        out[entry.name] = target
+    return out
+
+
+def derive_parent(
+    knowledge_path: pathlib.Path,
+    eligible_paths_to_slug: dict[str, str],
+) -> str:
+    """parent = nearest ancestor directory with knowledge/ subdir that maps to an eligible slug.
+
+    Если ни один ancestor не eligible → parent = `hub`.
+    """
+    if not knowledge_path.parent or knowledge_path.name != "knowledge":
+        return ROOT_SLUG
+    project_root = knowledge_path.parent  # `<project>/`
+    cursor = project_root.parent
+    while True:
+        if cursor == cursor.parent:  # filesystem root
+            return ROOT_SLUG
+        candidate = cursor / "knowledge"
+        try:
+            resolved = candidate.resolve(strict=False)
+            key = str(resolved)
+        except OSError:
+            key = ""
+        if key and key in eligible_paths_to_slug:
+            return eligible_paths_to_slug[key]
+        cursor = cursor.parent
+
+
+# ---------------------------------------------------------------------------
+# bootstrap: generate migration-table from filesystem + registry.md
+# ---------------------------------------------------------------------------
+
+
+def bootstrap(out_path: pathlib.Path) -> int:
+    registry_rows = parse_registry_md()
+    symlinks = scan_symlinks()  # {slug: knowledge_path}
+
+    # Build eligible_paths_to_slug map (for parent derivation).
+    # Eligible criterion: has symlink AND status in {live, seeded}.
+    registry_by_slug = {r["slug"]: r for r in registry_rows}
+    eligible_paths: dict[str, str] = {}
+    for slug, kp in symlinks.items():
+        reg_row = registry_by_slug.get(slug, {})
+        status = reg_row.get("status", "no-wiki")
+        if status in ELIGIBLE_STATUSES:
+            eligible_paths[str(kp.resolve(strict=False))] = slug
+
+    entries: list[MigrationEntry] = []
+
+    # First pass: wiki-backed (через symlinks).
+    seen_slugs: set[str] = set()
+    for slug, kp in symlinks.items():
+        seen_slugs.add(slug)
+        reg_row = registry_by_slug.get(slug, {})
+        status = reg_row.get("status", "seeded")
+        category = reg_row.get("category", "personal")
+        description = reg_row.get("description", "")
+        if status in ELIGIBLE_STATUSES:
+            parent = derive_parent(kp, eligible_paths)
+            project_root = kp.parent
+            entries.append(
+                MigrationEntry(
+                    slug=slug,
+                    registry_source="derived",
+                    wiki_backed=True,
+                    orchestration_eligible=True,
+                    status=status,
+                    category=category,
+                    parent=parent,
+                    knowledge_path=str(kp),
+                    expected_symlink=str(HUB / "projects" / slug),
+                    project_path=str(project_root),
+                    description=description,
+                )
+            )
+        elif status in INELIGIBLE_WITH_WIKI_STATUSES:
+            entries.append(
+                MigrationEntry(
+                    slug=slug,
+                    registry_source="hub-managed",
+                    wiki_backed=True,
+                    orchestration_eligible=False,
+                    status=status,
+                    category=category,
+                    parent=None,
+                    knowledge_path=str(kp),
+                    expected_symlink=str(HUB / "projects" / slug),
+                    project_path=str(kp.parent),
+                    description=description,
+                )
+            )
+        else:
+            # symlink + неожиданный status — будем считать как hub-managed, но flag warning.
+            print(
+                f"WARN: slug {slug} имеет symlink + status {status} "
+                "(ожидалось live|seeded|pointer|archived), classified as hub-managed",
+                file=sys.stderr,
+            )
+            entries.append(
+                MigrationEntry(
+                    slug=slug,
+                    registry_source="hub-managed",
+                    wiki_backed=True,
+                    orchestration_eligible=False,
+                    status=status,
+                    category=category,
+                    parent=None,
+                    knowledge_path=str(kp),
+                    expected_symlink=str(HUB / "projects" / slug),
+                    project_path=str(kp.parent),
+                    description=description,
+                )
+            )
+
+    # Second pass: non-wiki entries (registry rows без symlink).
+    for row in registry_rows:
+        slug = row["slug"]
+        if slug in seen_slugs:
+            continue
+        entries.append(
+            MigrationEntry(
+                slug=slug,
+                registry_source="hub-managed",
+                wiki_backed=False,
+                orchestration_eligible=False,
+                status=row["status"],
+                category=row["category"],
+                parent=None,
+                knowledge_path=None,
+                expected_symlink=None,
+                project_path=row["path"],
+                description=row["description"],
+            )
+        )
+
+    # Sort: derived first (alphabetic), then hub-managed (alphabetic).
+    entries.sort(key=lambda e: (0 if e.registry_source == "derived" else 1, e.slug))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    body = render_yaml(entries)
+    write_atomic(out_path, body)
+    print(f"bootstrap: wrote {len(entries)} entries to {out_path}")
+    derived = sum(1 for e in entries if e.registry_source == "derived")
+    hub_managed = sum(1 for e in entries if e.registry_source == "hub-managed")
+    eligible = sum(1 for e in entries if e.orchestration_eligible)
+    print(
+        f"  derived (eligible): {derived} | hub-managed: {hub_managed} | "
+        f"orchestration_eligible: {eligible}"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# YAML render (ручной — без зависимости на pyyaml; deterministic)
+# ---------------------------------------------------------------------------
+
+
+def yaml_str(value: str) -> str:
+    """Quote string if нужны спец-символы."""
+    if value == "":
+        return '""'
+    if re.search(r"[#:\n\"']", value) or value.startswith(("- ", "[", "{")):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def render_yaml(entries: list[MigrationEntry]) -> str:
+    lines = [
+        "# migration-2026-04-25 — single source of truth для kb-rebuild-registry --apply.",
+        "# Derived from filesystem (~/knowledge/projects/ symlinks) + ~/knowledge/registry.md",
+        "# на момент 2026-04-25. После apply: registry.md.derived block + hierarchy.yaml",
+        "# регенерируются из этого файла + per-project frontmatter.",
+        "#",
+        "# 3-axis matrix:",
+        "#   derived       + wiki_backed=true  + orchestration_eligible=true   — active in cycle",
+        "#   hub-managed   + wiki_backed=true  + orchestration_eligible=false  — pointer/archived с symlink",
+        "#   hub-managed   + wiki_backed=false + orchestration_eligible=false  — no-wiki",
+        "#",
+        f"version: 1",
+        f"generated: 2026-04-25",
+        f"hub_root: {yaml_str(str(HUB))}",
+        "entries:",
+    ]
+    for entry in entries:
+        d = entry.to_yaml_dict()
+        lines.append(f"  - slug: {yaml_str(d['slug'])}")
+        for key in (
+            "registry_source",
+            "wiki_backed",
+            "orchestration_eligible",
+            "status",
+            "category",
+            "parent",
+            "knowledge_path",
+            "expected_symlink",
+            "project_path",
+            "description",
+        ):
+            if key not in d:
+                continue
+            value = d[key]
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            else:
+                rendered = yaml_str(str(value))
+            lines.append(f"    {key}: {rendered}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# atomic write
+# ---------------------------------------------------------------------------
+
+
+def write_atomic(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = pathlib.Path(tmp.name)
+    tmp_path.replace(path)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Derive registry.md derived block + hierarchy.yaml from per-project metadata."
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_bootstrap = sub.add_parser(
+        "bootstrap",
+        help="Generate initial migration-<date>.yaml from filesystem + registry.md",
+    )
+    p_bootstrap.add_argument(
+        "--out",
+        default=str(HUB / MIGRATION_FILENAME),
+        help=f"Output path (default: {HUB / MIGRATION_FILENAME})",
+    )
+
+    p_check = sub.add_parser(
+        "check",
+        help="Regenerate derived block + hierarchy.yaml in-memory, fail на drift",
+    )
+    p_check.add_argument(
+        "--migration",
+        default=str(HUB / MIGRATION_FILENAME),
+        help="Migration table path",
+    )
+
+    p_apply = sub.add_parser(
+        "apply",
+        help="Apply migration: write frontmatter + .orchestration.yaml + regenerate registry/hierarchy",
+    )
+    p_apply.add_argument(
+        "--migration",
+        default=str(HUB / MIGRATION_FILENAME),
+        help="Migration table path",
+    )
+    p_apply.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print intended changes без writes",
+    )
+
+    args = parser.parse_args()
+
+    if args.cmd == "bootstrap":
+        sys.exit(bootstrap(pathlib.Path(args.out)))
+    elif args.cmd == "check":
+        sys.exit(check_command(pathlib.Path(args.migration)))
+    elif args.cmd == "apply":
+        sys.exit(apply_command(pathlib.Path(args.migration), dry_run=args.dry_run))
+
+
+# ---------------------------------------------------------------------------
+# minimal YAML reader (без pyyaml) — для migration-table format only
+# ---------------------------------------------------------------------------
+
+
+def parse_migration_yaml(path: pathlib.Path) -> list[MigrationEntry]:
+    """Parser для migration-<date>.yaml формата, который мы сами пишем (deterministic)."""
+    text = path.read_text(encoding="utf-8")
+    entries: list[MigrationEntry] = []
+    in_entries = False
+    cur: dict = {}
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "entries:":
+            in_entries = True
+            continue
+        if not in_entries:
+            continue
+        # `  - slug: <value>` начинает новую запись.
+        m = re.match(r"^\s\s-\s(\w+):\s*(.*)$", line)
+        if m:
+            if cur:
+                entries.append(_dict_to_entry(cur))
+                cur = {}
+            cur[m.group(1)] = _yaml_value(m.group(2))
+            continue
+        m = re.match(r"^\s{4,}(\w+):\s*(.*)$", line)
+        if m:
+            cur[m.group(1)] = _yaml_value(m.group(2))
+    if cur:
+        entries.append(_dict_to_entry(cur))
+    return entries
+
+
+def _yaml_value(raw: str):
+    s = raw.strip()
+    if s == "":
+        return None
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return s
+
+
+def _dict_to_entry(d: dict) -> MigrationEntry:
+    return MigrationEntry(
+        slug=d["slug"],
+        registry_source=d["registry_source"],
+        wiki_backed=bool(d.get("wiki_backed")),
+        orchestration_eligible=bool(d.get("orchestration_eligible")),
+        status=d["status"],
+        category=d["category"],
+        parent=d.get("parent"),
+        knowledge_path=d.get("knowledge_path"),
+        expected_symlink=d.get("expected_symlink"),
+        project_path=d.get("project_path"),
+        description=d.get("description") or "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# validity matrix (CR3-N1, CR4-B2)
+# ---------------------------------------------------------------------------
+
+
+def validate_entry(entry: MigrationEntry, all_slugs: set[str], eligible_slugs: set[str]) -> list[str]:
+    errors: list[str] = []
+    # axis matrix
+    if entry.registry_source == "derived" and not (entry.wiki_backed and entry.orchestration_eligible):
+        errors.append("derived требует wiki_backed=true и orchestration_eligible=true")
+    if entry.orchestration_eligible and not entry.wiki_backed:
+        errors.append("orchestration_eligible=true требует wiki_backed=true")
+    if entry.orchestration_eligible and entry.registry_source != "derived":
+        errors.append("orchestration_eligible=true требует registry_source=derived")
+    # filesystem checks for derived eligible
+    if entry.orchestration_eligible:
+        if not entry.knowledge_path:
+            errors.append("orchestration_eligible=true требует knowledge_path")
+        elif not pathlib.Path(entry.knowledge_path).is_dir():
+            errors.append(f"knowledge_path не директория: {entry.knowledge_path}")
+        if not entry.expected_symlink:
+            errors.append("orchestration_eligible=true требует expected_symlink")
+        elif not pathlib.Path(entry.expected_symlink).is_symlink():
+            errors.append(f"expected_symlink не симлинк: {entry.expected_symlink}")
+    # parent referential integrity
+    if entry.orchestration_eligible:
+        if entry.slug == ROOT_SLUG:
+            if entry.parent is not None:
+                errors.append("hub root должен иметь parent=null")
+        else:
+            if entry.parent is None:
+                errors.append("orchestration_eligible non-root требует parent")
+            elif entry.parent == entry.slug:
+                errors.append("parent не может ссылаться на self")
+            elif entry.parent != ROOT_SLUG and entry.parent not in eligible_slugs:
+                errors.append(
+                    f"parent='{entry.parent}' не в множестве eligible slugs (или hub)"
+                )
+    # slug uniqueness — checked at top level by caller via duplicate detection
+    return errors
+
+
+def validate_migration(entries: list[MigrationEntry]) -> list[tuple[str, list[str]]]:
+    all_slugs = [e.slug for e in entries]
+    duplicates = [slug for slug in all_slugs if all_slugs.count(slug) > 1]
+    eligible_slugs = {e.slug for e in entries if e.orchestration_eligible}
+
+    out: list[tuple[str, list[str]]] = []
+    if duplicates:
+        out.append(("__migration_table__", [f"duplicate slugs: {sorted(set(duplicates))}"]))
+
+    for entry in entries:
+        errs = validate_entry(entry, set(all_slugs), eligible_slugs)
+        if errs:
+            out.append((entry.slug, errs))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# README frontmatter management
+# ---------------------------------------------------------------------------
+
+
+MANAGED_KEYS = ("slug", "parent", "category", "status", "description")
+FRONTMATTER_RE = re.compile(r"^---\n(.*?\n)---\n", re.DOTALL)
+MANAGED_BLOCK_BEGIN = "# managed by kb-rebuild-registry — do not edit fields below this line"
+
+
+def update_readme_frontmatter(entry: MigrationEntry, dry_run: bool) -> bool:
+    """Update or insert managed fields в frontmatter README.md. Returns True если файл изменён."""
+    if not entry.knowledge_path:
+        return False
+    readme_path = pathlib.Path(entry.knowledge_path) / "README.md"
+    if not readme_path.is_file():
+        # Создаём минимальный README с frontmatter
+        body = build_readme(entry, body="")
+        if dry_run:
+            print(f"  [dry-run] CREATE {readme_path}")
+            return True
+        write_atomic(readme_path, body)
+        return True
+
+    text = readme_path.read_text(encoding="utf-8")
+    m = FRONTMATTER_RE.match(text)
+    if m:
+        existing_fm = m.group(1)
+        body_text = text[m.end():]
+        new_fm = merge_frontmatter(existing_fm, entry)
+        new_text = f"---\n{new_fm}---\n{body_text}"
+    else:
+        # frontmatter отсутствует — добавить наверх
+        new_fm = managed_frontmatter_block(entry)
+        new_text = f"---\n{new_fm}---\n\n{text.lstrip()}"
+
+    if new_text == text:
+        return False
+    if dry_run:
+        print(f"  [dry-run] UPDATE {readme_path}")
+        return True
+    write_atomic(readme_path, new_text)
+    return True
+
+
+def build_readme(entry: MigrationEntry, body: str) -> str:
+    fm = managed_frontmatter_block(entry)
+    title = entry.slug
+    placeholder = body.strip() or f"# {title}\n\n{entry.description}\n"
+    return f"---\n{fm}---\n\n{placeholder}\n"
+
+
+def managed_frontmatter_block(entry: MigrationEntry) -> str:
+    lines = []
+    lines.append(f"slug: {yaml_str(entry.slug)}")
+    lines.append(f"parent: {yaml_str(entry.parent or 'hub')}")
+    lines.append(f"category: {yaml_str(entry.category)}")
+    lines.append(f"status: {yaml_str(entry.status)}")
+    if entry.description:
+        lines.append(f"description: {yaml_str(entry.description)}")
+    return "\n".join(lines) + "\n"
+
+
+def merge_frontmatter(existing_fm: str, entry: MigrationEntry) -> str:
+    """Replace MANAGED_KEYS, preserve everything else в order."""
+    managed = {
+        "slug": entry.slug,
+        "parent": entry.parent or "hub",
+        "category": entry.category,
+        "status": entry.status,
+    }
+    if entry.description:
+        managed["description"] = entry.description
+
+    out_lines: list[str] = []
+    seen_managed: set[str] = set()
+    for line in existing_fm.splitlines():
+        m = re.match(r"^(\w+):\s*(.*)$", line)
+        if m and m.group(1) in MANAGED_KEYS:
+            key = m.group(1)
+            if key in seen_managed:
+                continue  # skip duplicate
+            seen_managed.add(key)
+            out_lines.append(f"{key}: {yaml_str(str(managed[key]))}")
+        else:
+            out_lines.append(line)
+    # Append missing managed keys at end
+    for key in MANAGED_KEYS:
+        if key in seen_managed:
+            continue
+        if key in managed:
+            out_lines.append(f"{key}: {yaml_str(str(managed[key]))}")
+            seen_managed.add(key)
+    return "\n".join(out_lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# .orchestration.yaml management
+# ---------------------------------------------------------------------------
+
+
+ORCH_DEFAULTS = {
+    "version": 1,
+    "cycle_enabled": False,
+    "sla_report_timeout_sec": 300,
+    "owner": "<user>",
+    "decompose_strategy": "subset",
+    "exec_broker": False,
+}
+
+
+def ensure_orchestration_yaml(entry: MigrationEntry, dry_run: bool) -> bool:
+    if not entry.knowledge_path:
+        return False
+    if not entry.orchestration_eligible:
+        return False
+    target = pathlib.Path(entry.knowledge_path) / ".orchestration.yaml"
+    if target.is_file():
+        # Already exists — оставляем user values, не трогаем
+        return False
+    body_lines = [
+        "# kb-rebuild-registry seeded defaults — adjust in place; not regenerated.",
+        "# Reference: ~/knowledge/concepts/orchestrated-knowledge-base.md (root concept).",
+        "",
+    ]
+    for key, value in ORCH_DEFAULTS.items():
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, int):
+            rendered = str(value)
+        else:
+            rendered = yaml_str(str(value))
+        body_lines.append(f"{key}: {rendered}")
+    body = "\n".join(body_lines) + "\n"
+    if dry_run:
+        print(f"  [dry-run] CREATE {target}")
+        return True
+    write_atomic(target, body)
+    return True
+
+
+def read_orchestration_yaml(knowledge_path: str | None) -> dict:
+    """Read existing .orchestration.yaml or return defaults."""
+    if not knowledge_path:
+        return dict(ORCH_DEFAULTS)
+    target = pathlib.Path(knowledge_path) / ".orchestration.yaml"
+    if not target.is_file():
+        return dict(ORCH_DEFAULTS)
+    out = dict(ORCH_DEFAULTS)
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^(\w+):\s*(.*)$", line)
+        if not m:
+            continue
+        key = m.group(1)
+        raw = m.group(2)
+        if key not in ORCH_DEFAULTS:
+            continue
+        v = _yaml_value(raw)
+        if isinstance(ORCH_DEFAULTS[key], bool):
+            out[key] = bool(v)
+        elif isinstance(ORCH_DEFAULTS[key], int) and isinstance(v, str) and v.isdigit():
+            out[key] = int(v)
+        else:
+            out[key] = v
+    return out
+
+
+# ---------------------------------------------------------------------------
+# hierarchy.yaml writer
+# ---------------------------------------------------------------------------
+
+
+def render_hierarchy(entries: list[MigrationEntry]) -> str:
+    eligible = [e for e in entries if e.orchestration_eligible]
+    children_map: dict[str, list[str]] = {ROOT_SLUG: []}
+    for e in eligible:
+        children_map.setdefault(e.slug, [])
+    for e in eligible:
+        parent = e.parent or ROOT_SLUG
+        children_map.setdefault(parent, []).append(e.slug)
+    for parent, children in children_map.items():
+        children.sort()
+
+    lines = [
+        "# hierarchy.yaml — derivable from migration-2026-04-25.yaml + per-project .orchestration.yaml",
+        "# Regenerated by kb-rebuild-registry. Do not edit manually.",
+        "version: 1",
+        "generated: 2026-04-25",
+        f"root: {ROOT_SLUG}",
+        "nodes:",
+        f"  {ROOT_SLUG}:",
+        "    kind: root",
+        "    parent: null",
+        f"    knowledge_path: {yaml_str(str(HUB))}",
+        f"    children: [{', '.join(children_map.get(ROOT_SLUG, []))}]",
+    ]
+    for entry in sorted(eligible, key=lambda e: e.slug):
+        orch = read_orchestration_yaml(entry.knowledge_path)
+        children = children_map.get(entry.slug, [])
+        lines.append(f"  {entry.slug}:")
+        lines.append(f"    kind: project")
+        lines.append(f"    parent: {entry.parent or ROOT_SLUG}")
+        lines.append(f"    category: {yaml_str(entry.category)}")
+        lines.append(f"    status: {yaml_str(entry.status)}")
+        lines.append(f"    knowledge_path: {yaml_str(entry.knowledge_path or '')}")
+        lines.append(f"    children: [{', '.join(children)}]")
+        for key in ("cycle_enabled", "sla_report_timeout_sec", "owner", "decompose_strategy", "exec_broker"):
+            value = orch.get(key, ORCH_DEFAULTS[key])
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, int):
+                rendered = str(value)
+            else:
+                rendered = yaml_str(str(value))
+            lines.append(f"    {key}: {rendered}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# registry.md writer (derived + hub-managed blocks)
+# ---------------------------------------------------------------------------
+
+
+REGISTRY_HEADER = """# Реестр проектов
+
+Источник правды о том, какие проекты существуют, где они лежат, и в каком состоянии их вики.
+
+**Управление файлом:**
+- Блок между `<!-- DERIVED-BEGIN -->` и `<!-- DERIVED-END -->` — derived `kb-rebuild-registry`.
+  **Не редактировать вручную.** Источник: per-project `README.md` frontmatter +
+  `<knowledge_path>/.orchestration.yaml` через `migration-2026-04-25.yaml`.
+- Блок между `<!-- HUB-MANAGED-BEGIN -->` и `<!-- HUB-MANAGED-END -->` — manual entries
+  для `pointer | archived | no-wiki` проектов. Hub-managed.
+
+**Легенда статуса:**
+- `live` — вики активно ведётся
+- `seeded` — каркас создан, ещё без содержания
+- `no-wiki` — проект известен, вика не заведена
+- `archived` — проект заморожен
+- `pointer` — каталог сохранён только как pointer-shell на каноническую вику другого проекта
+
+**Категории:** `lab` (<work>), `order` (клиентские заказы), `pet` (личные эксперименты),
+`job` (работа по найму), `personal` (личные проекты).
+
+---
+
+"""
+
+
+def render_registry(entries: list[MigrationEntry]) -> str:
+    derived = sorted(
+        [e for e in entries if e.registry_source == "derived"],
+        key=lambda e: (e.category, e.slug),
+    )
+    hub_managed = [e for e in entries if e.registry_source == "hub-managed"]
+
+    out = [REGISTRY_HEADER.rstrip(), ""]
+    out.append("## Derived (orchestration_eligible)")
+    out.append("")
+    out.append(DERIVED_BEGIN)
+    out.append(f"<!-- generated 2026-04-25; {len(derived)} eligible projects -->")
+    out.append("")
+    out.append("| slug | статус | категория | parent | путь | описание |")
+    out.append("|---|---|---|---|---|---|")
+    for e in derived:
+        path_display = pretty_path(e.project_path or "")
+        desc = (e.description or "").replace("|", "\\|")
+        out.append(
+            f"| {e.slug} | {e.status} | {e.category} | {e.parent or 'hub'} | "
+            f"`{path_display}` | {desc} |"
+        )
+    out.append(DERIVED_END)
+    out.append("")
+    out.append("## Hub-managed (pointer / archived / no-wiki)")
+    out.append("")
+    out.append(HUB_MANAGED_BEGIN)
+    out.append(f"<!-- {len(hub_managed)} entries; manual edits allowed -->")
+    out.append("")
+    by_cat: dict[str, list[MigrationEntry]] = {}
+    for e in hub_managed:
+        by_cat.setdefault(e.category, []).append(e)
+    for cat in ("lab", "order", "pet", "job", "personal"):
+        cat_rows = sorted(by_cat.get(cat, []), key=lambda e: e.slug)
+        if not cat_rows:
+            continue
+        out.append(f"### {cat}")
+        out.append("")
+        out.append("| slug | статус | путь | описание |")
+        out.append("|---|---|---|---|")
+        for e in cat_rows:
+            path_display = pretty_path(e.project_path or "")
+            desc = (e.description or "").replace("|", "\\|")
+            out.append(f"| {e.slug} | {e.status} | `{path_display}` | {desc} |")
+        out.append("")
+    out.append(HUB_MANAGED_END)
+    out.append("")
+    return "\n".join(out) + "\n"
+
+
+def pretty_path(absolute: str) -> str:
+    home = os.path.expanduser("~")
+    if absolute.startswith(home + "/"):
+        return "~" + absolute[len(home):]
+    return absolute
+
+
+# ---------------------------------------------------------------------------
+# check / apply commands
+# ---------------------------------------------------------------------------
+
+
+def load_validated(migration_path: pathlib.Path) -> list[MigrationEntry]:
+    if not migration_path.is_file():
+        print(f"ERROR: migration table missing: {migration_path}", file=sys.stderr)
+        sys.exit(2)
+    entries = parse_migration_yaml(migration_path)
+    errors = validate_migration(entries)
+    if errors:
+        print("ERROR: migration table validation failed:", file=sys.stderr)
+        for slug, errs in errors:
+            for err in errs:
+                print(f"  {slug}: {err}", file=sys.stderr)
+        sys.exit(2)
+    return entries
+
+
+def check_command(migration_path: pathlib.Path) -> int:
+    entries = load_validated(migration_path)
+    cur_registry = (HUB / "registry.md").read_text(encoding="utf-8") if (HUB / "registry.md").is_file() else ""
+    cur_hierarchy = (HUB / "hierarchy.yaml").read_text(encoding="utf-8") if (HUB / "hierarchy.yaml").is_file() else ""
+    manual_tail = preserve_manual_tail(cur_registry)
+    new_registry_managed = render_registry(entries)
+    new_registry = new_registry_managed
+    if manual_tail:
+        new_registry = new_registry.rstrip("\n") + "\n\n" + manual_tail
+        if not new_registry.endswith("\n"):
+            new_registry += "\n"
+    new_hierarchy = render_hierarchy(entries)
+    drift = []
+    if new_registry != cur_registry:
+        drift.append(("registry.md", new_registry, cur_registry))
+    if new_hierarchy != cur_hierarchy:
+        drift.append(("hierarchy.yaml", new_hierarchy, cur_hierarchy))
+    if not drift:
+        print("check: clean — derived files match migration table.")
+        return 0
+    print("check: DRIFT detected:")
+    for name, new, cur in drift:
+        print(f"  {name}: regenerated differs from committed (run `kb-rebuild-registry apply`)")
+    return 1
+
+
+def preserve_manual_tail(existing: str) -> str:
+    """Return текст после **последнего** HUB-MANAGED-END marker (manual sections preserved).
+
+    Important: используем rfind, потому что header description тоже содержит mention
+    `<!-- HUB-MANAGED-END -->` как inline reference (это ловится первой find()).
+    """
+    idx = existing.rfind(HUB_MANAGED_END)
+    if idx == -1:
+        return ""
+    tail = existing[idx + len(HUB_MANAGED_END):]
+    return tail.lstrip("\n")
+
+
+def apply_command(migration_path: pathlib.Path, dry_run: bool = False) -> int:
+    entries = load_validated(migration_path)
+
+    print(f"apply: {len(entries)} entries (14 eligible expected)" + (" [dry-run]" if dry_run else ""))
+    changed = 0
+    for entry in entries:
+        if entry.orchestration_eligible:
+            if update_readme_frontmatter(entry, dry_run):
+                changed += 1
+            if ensure_orchestration_yaml(entry, dry_run):
+                changed += 1
+
+    new_registry_managed = render_registry(entries)
+    registry_path = HUB / "registry.md"
+    existing_registry = registry_path.read_text(encoding="utf-8") if registry_path.is_file() else ""
+    manual_tail = preserve_manual_tail(existing_registry)
+    new_registry = new_registry_managed
+    if manual_tail:
+        new_registry = new_registry.rstrip("\n") + "\n\n" + manual_tail
+        if not new_registry.endswith("\n"):
+            new_registry += "\n"
+    new_hierarchy = render_hierarchy(entries)
+    hierarchy_path = HUB / "hierarchy.yaml"
+
+    if dry_run:
+        print(f"  [dry-run] WRITE {registry_path}")
+        print(f"  [dry-run] WRITE {hierarchy_path}")
+    else:
+        if not registry_path.is_file() or registry_path.read_text(encoding="utf-8") != new_registry:
+            write_atomic(registry_path, new_registry)
+            changed += 1
+        if not hierarchy_path.is_file() or hierarchy_path.read_text(encoding="utf-8") != new_hierarchy:
+            write_atomic(hierarchy_path, new_hierarchy)
+            changed += 1
+
+    print(f"apply: {changed} file(s) {'would-change' if dry_run else 'changed'}.")
+    return 0
+
+
+if __name__ == "__main__":
+    main()

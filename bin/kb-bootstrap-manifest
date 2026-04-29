@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""kb-bootstrap-manifest — write ~/knowledge/.orchestrator/install-manifest.json.
+
+Cycle A foundation for kb-update (Cycle B). Walks the seed tree + the live
+install layout, computes SHA-256 of each tracked artifact, and writes an
+atomic manifest with three categories:
+
+    managed            — re-syncable from seed
+    user-templated     — installed once, never re-synced
+    managed-templated  — re-rendered from template (e.g. {{HOME}} substitution)
+
+Spec: ~/knowledge/concepts/release-readiness-cycle-a.md (A5/A6).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import fcntl
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+
+HOME = pathlib.Path(os.environ.get("HOME", os.path.expanduser("~")))
+HUB = pathlib.Path(os.environ.get("KB_HUB", HOME / "knowledge"))
+SEED = pathlib.Path(os.environ.get(
+    "KB_BOOTSTRAP_SEED_PATH",
+    HUB / "orchestrator-seed",
+))
+MANIFEST_PATH = HUB / ".orchestrator" / "install-manifest.json"
+LOCK_PATH = HUB / ".orchestrator" / "install-manifest.lock"
+SCHEMA_VERSION = 1
+
+
+def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
+    """Enumerate every artifact tracked in the install manifest.
+
+    Driven by:
+      - seed/knowledge/bin/kb-* — managed scripts (excluding .retired and hidden)
+      - seed/knowledge/_template/** — managed templates
+      - seed/knowledge/CLAUDE.md — user-templated hub schema
+      - seed/claude/CLAUDE.md — user-templated global Claude config
+      - seed/claude/skills/*/SKILL.md — managed skills
+      - seed/launchd/com.knowledge.*.plist.template — managed-templated LaunchAgents
+    """
+    items: list[dict] = []
+    bin_dir = seed / "knowledge" / "bin"
+    if bin_dir.is_dir():
+        for child in sorted(bin_dir.iterdir()):
+            if not child.is_file():
+                continue
+            if child.name.startswith(".") or child.name.endswith(".retired"):
+                continue
+            if not child.name.startswith("kb-"):
+                continue
+            items.append({
+                "artifact_id": child.name,
+                "category": "managed",
+                "source_path": f"knowledge/bin/{child.name}",
+                "install_path": str(home / "knowledge" / "bin" / child.name),
+            })
+
+    template_root = seed / "knowledge" / "_template"
+    if template_root.is_dir():
+        for src in sorted(template_root.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(template_root).as_posix()
+            items.append({
+                "artifact_id": "tpl/" + rel,
+                "category": "managed",
+                "source_path": f"knowledge/_template/{rel}",
+                "install_path": str(home / "knowledge" / "_template" / rel),
+            })
+
+    if (seed / "knowledge" / "CLAUDE.md").is_file():
+        items.append({
+            "artifact_id": "hub-claude-md",
+            "category": "user-templated",
+            "source_path": "knowledge/CLAUDE.md",
+            "install_path": str(home / "knowledge" / "CLAUDE.md"),
+        })
+    if (seed / "claude" / "CLAUDE.md").is_file():
+        items.append({
+            "artifact_id": "global-claude-md",
+            "category": "user-templated",
+            "source_path": "claude/CLAUDE.md",
+            "install_path": str(home / ".claude" / "CLAUDE.md"),
+        })
+
+    hub_seed_files = [
+        ("hub-registry-md", "knowledge/registry.md.template", home / "knowledge" / "registry.md"),
+        ("hub-index-md", "knowledge/index.md.template", home / "knowledge" / "index.md"),
+        ("hub-log-md", "knowledge/log.md.template", home / "knowledge" / "log.md"),
+        ("obsidian-app-config", "knowledge/.obsidian/app.json", home / "knowledge" / ".obsidian" / "app.json"),
+    ]
+    for art_id, src, dst in hub_seed_files:
+        if (seed / src).is_file():
+            items.append({
+                "artifact_id": art_id,
+                "category": "user-templated",
+                "source_path": src,
+                "install_path": str(dst),
+            })
+
+    if (seed / "claude" / "statusline-command.sh").is_file():
+        items.append({
+            "artifact_id": "claude-statusline",
+            "category": "managed",
+            "source_path": "claude/statusline-command.sh",
+            "install_path": str(home / ".claude" / "statusline-command.sh"),
+        })
+
+    skills_dir = seed / "claude" / "skills"
+    if skills_dir.is_dir():
+        for skill_dir in sorted(skills_dir.iterdir()):
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            items.append({
+                "artifact_id": f"skill-{skill_dir.name}",
+                "category": "managed",
+                "source_path": f"claude/skills/{skill_dir.name}/SKILL.md",
+                "install_path": str(home / ".claude" / "skills" / skill_dir.name / "SKILL.md"),
+            })
+
+    launchd_dir = seed / "launchd"
+    if launchd_dir.is_dir():
+        for tmpl in sorted(launchd_dir.glob("com.knowledge.*.plist.template")):
+            base = tmpl.name.replace(".template", "")
+            short = base.replace("com.knowledge.", "").replace(".plist", "")
+            items.append({
+                "artifact_id": f"launchd-{short}",
+                "category": "managed-templated",
+                "source_path": f"launchd/{tmpl.name}",
+                "install_path": str(home / "Library" / "LaunchAgents" / base),
+            })
+
+    return items
+
+
+# Module-level INVENTORY constant — required by parity tests via importlib.
+INVENTORY = _build_inventory(SEED, HOME)
+
+
+def _sha256_file(path: pathlib.Path) -> str | None:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _git_output(seed: pathlib.Path, args: list[str]) -> str | None:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(seed), *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if res.returncode != 0:
+        return None
+    return (res.stdout or "").strip()
+
+
+def _read_version(seed: pathlib.Path) -> str | None:
+    vfile = seed / "VERSION"
+    if not vfile.is_file():
+        return None
+    return vfile.read_text(encoding="utf-8").strip() or None
+
+
+def build_manifest(seed: pathlib.Path, home: pathlib.Path) -> dict:
+    inventory = _build_inventory(seed, home)
+    files: dict[str, dict] = {}
+    for entry in inventory:
+        source_path = seed / entry["source_path"]
+        install_path = pathlib.Path(entry["install_path"])
+        files[entry["artifact_id"]] = {
+            "category": entry["category"],
+            "source_path": entry["source_path"],
+            "install_path": str(install_path),
+            "source_hash": _sha256_file(source_path),
+            "installed_hash": _sha256_file(install_path),
+        }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "installed_version": _read_version(seed) or "unknown",
+        "installed_at": _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "seed_remote": _git_output(seed, ["remote", "get-url", "origin"]) or "",
+        "seed_commit": _git_output(seed, ["rev-parse", "HEAD"]) or "",
+        "files": files,
+    }
+
+
+def _atomic_write(target: pathlib.Path, payload: str) -> None:
+    """flush + fsync(file) + os.replace + fsync(parent_dir) for crash durability."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", delete=False,
+        dir=str(target.parent),
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    ) as tmp:
+        tmp.write(payload)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = pathlib.Path(tmp.name)
+    os.replace(tmp_path, target)
+    dir_fd = os.open(str(target.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def write_manifest(manifest_path: pathlib.Path, manifest: dict, lock_path: pathlib.Path) -> None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    with lock_path.open("a+") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            _atomic_write(manifest_path, payload)
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Bootstrap install-manifest.json from current seed + live state.")
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing manifest")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print manifest JSON to stdout without writing the file")
+    parser.add_argument("--seed-path", help="Override seed path (default: $KB_BOOTSTRAP_SEED_PATH or ~/knowledge/orchestrator-seed)")
+    args = parser.parse_args()
+
+    seed = pathlib.Path(args.seed_path) if args.seed_path else SEED
+    if not seed.is_dir():
+        print(f"ERROR: seed path not found: {seed}", file=sys.stderr)
+        raise SystemExit(2)
+
+    manifest = build_manifest(seed, HOME)
+
+    if args.dry_run:
+        print(json.dumps(manifest, indent=2, ensure_ascii=False))
+        return
+
+    if MANIFEST_PATH.is_file() and not args.force:
+        print(
+            f"ERROR: {MANIFEST_PATH} already exists; pass --force to overwrite",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    write_manifest(MANIFEST_PATH, manifest, LOCK_PATH)
+    print(f"wrote manifest: {MANIFEST_PATH}")
+
+
+if __name__ == "__main__":
+    main()
