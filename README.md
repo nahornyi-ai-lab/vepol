@@ -119,6 +119,23 @@ that you can read, edit, override, or `grep` six months later.
 
 ## Quickstart
 
+You don't install Vepol by hand — your AI agent does. Open Claude
+Code, or Codex on a machine where the Claude CLI is available, and
+tell it:
+
+> *"Install Vepol from github.com/nahornyi-ai-lab/vepol on this
+> machine. Read AGENTS.md first; before modifying ~/knowledge or
+> ~/.claude, show me detected conflicts and ask."*
+
+The agent reads [`AGENTS.md`](AGENTS.md) (this repo's setup manual
+written for AI agents), checks prerequisites, clones the repo,
+runs the installer, troubleshoots any issues, and walks you through
+the first-run aha sequence. From there, the agent stays with you —
+adding skills, tracking projects, and evolving Vepol to your
+specific workflow over time.
+
+If you'd rather drive the install yourself:
+
 ```bash
 git clone https://github.com/nahornyi-ai-lab/vepol ~/vepol
 cd ~/vepol
@@ -127,9 +144,15 @@ cd ~/vepol
 
 The installer detects what you have (Claude Code, Node, Bun, optionally
 Codex), reports what's missing with exact install commands, and sets up
-the rest. The Claude Code and Codex macOS apps install their CLI
-binaries automatically, so either flow works. The installer does **not**
-auto-install package managers — that decision stays with you.
+the rest. It does **not** auto-install package managers — that decision
+stays with you.
+
+> **Heads up if you already have `~/knowledge/` or `~/.claude/`
+> from another system:** the installer will not overwrite your
+> data, but you should review what's there first. The agent path
+> (above) handles this conflict-check automatically; if you're
+> running `install.sh` manually, back up `~/knowledge/` first or
+> set `VEPOL_HUB=~/path/to/new` to install into a different hub.
 
 After install, your first 5 minutes:
 
@@ -137,7 +160,8 @@ After install, your first 5 minutes:
 kb-doctor              # verify install is healthy
 kb-task "first task"   # write your first item
 kb-search "first"      # confirm retrieval works
-kb-brief               # see what a synthesized brief looks like
+kb-demo brief          # see what a synthesized brief looks like
+                       # (uses the demo wiki — your real one is empty at first)
 ```
 
 That's the value loop. Methodology comes after, when you want it.
