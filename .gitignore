@@ -1,0 +1,43 @@
+# macOS noise
+.DS_Store
+._*
+
+# Editor backups
+*~
+*.bak
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Build artifacts (none yet for v0.1)
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Installer log (per-user)
+install.log
+
+# Rendered (non-template) launchd plists — only .template versions in repo
+launchd/com.vepol.*.plist
+launchd/com.knowledge.*.plist
+
+# Telegram local config (user provides their own bot token)
+telegram/.env
+telegram/access.json
+
+# Anything resembling secrets
+*.secret
+*.secrets
+.env
+.env.*
+auth.json
+credentials*.json
+
+# User overlay (must NEVER appear in this repo — that's the whole point)
+knowledge/
+.kb-ignore
+
+# Maintainer-only: runtime blocklist generated locally for the staging mirror
+.runtime-blocklist.txt

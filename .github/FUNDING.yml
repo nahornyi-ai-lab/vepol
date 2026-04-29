@@ -1,0 +1,11 @@
+# GitHub Sponsors funding configuration
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+github: nahornyi-ai-lab
+
+# Other channels to add later if launched:
+# patreon:
+# open_collective:
+# ko_fi:
+# liberapay:
+# custom: ['https://nahornyi.ai/sponsor']
