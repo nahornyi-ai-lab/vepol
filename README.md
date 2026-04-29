@@ -1,5 +1,7 @@
 # Vepol
 
+![Vepol — Your second inner voice](docs/visuals/vepol-cover.png)
+
 **Your AI partner that grows with you.** Plans your day, runs your routine, studies you, takes on more of your work each day — while you stay in control of every step.
 
 [![License: FSL-1.1-MIT](https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg)](LICENSE)

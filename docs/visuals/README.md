@@ -12,7 +12,22 @@ the bottom of this file.
 
 ---
 
-## 1. Autonomy growth — how the partnership compounds over time ⭐
+## 0. README cover — the one-frame summary ⭐
+
+The hero image used at the top of the main README. Combines everything
+on one canvas: substance-field architecture (human + AI agents +
+markdown field), the autonomy journey (Day 1 → Month 6), the
+visible-discipline differentiator (audit trail, cross-agent review,
+coordination triad, self-updating strategy), and the FSL license
+model.
+
+![Vepol cover](vepol-cover.png)
+
+**File:** `vepol-cover.png` · landscape · professional style · ~4.5 MB
+
+---
+
+## 1. Autonomy growth — how the partnership compounds over time
 
 The core product story in one image: how Vepol's autonomy increases day by
 day, week by week. Day 1 (assisted drafting), Week 2 (intelligent filter),
