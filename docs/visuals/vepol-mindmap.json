@@ -1,0 +1,136 @@
+{
+  "name": "Vepol AI Operating Environment",
+  "children": [
+    {
+      "name": "Core Concept",
+      "children": [
+        {
+          "name": "Substance-field model (TRIZ)"
+        },
+        {
+          "name": "User + AI Agents + Knowledge Field"
+        },
+        {
+          "name": "Karpathy-style LLM Wiki"
+        },
+        {
+          "name": "Single source of truth"
+        }
+      ]
+    },
+    {
+      "name": "Architecture & Components",
+      "children": [
+        {
+          "name": "Universal Core (scripts/schema)"
+        },
+        {
+          "name": "User Overlay (~/knowledge/)"
+        },
+        {
+          "name": "Claude Code (Primary Orchestrator)"
+        },
+        {
+          "name": "Codex (Secondary Orchestrator)"
+        },
+        {
+          "name": "Knowledge-base Hub"
+        }
+      ]
+    },
+    {
+      "name": "Knowledge Structure",
+      "children": [
+        {
+          "name": "Local project wiki (<project>/knowledge/)"
+        },
+        {
+          "name": "Global hub categories (~/knowledge/)"
+        },
+        {
+          "name": "Coordination Triad (backlog, escalations, incidents)"
+        },
+        {
+          "name": "Strategy & State (strategies.md, state.md)"
+        },
+        {
+          "name": "Daily logs & Session captures"
+        }
+      ]
+    },
+    {
+      "name": "Workflow Principles",
+      "children": [
+        {
+          "name": "Spec-driven development"
+        },
+        {
+          "name": "TRIZ-grounded design"
+        },
+        {
+          "name": "Cross-agent plan review"
+        },
+        {
+          "name": "Knowledge-gap delegation"
+        },
+        {
+          "name": "Zero split-brain discipline"
+        }
+      ]
+    },
+    {
+      "name": "Operating Rules",
+      "children": [
+        {
+          "name": "Immutable raw sources"
+        },
+        {
+          "name": "No direct editing of other projects"
+        },
+        {
+          "name": "Mandatory incident recording"
+        },
+        {
+          "name": "Privacy-aware sync (Seed as IaC)"
+        },
+        {
+          "name": "Russian content / English metadata"
+        }
+      ]
+    },
+    {
+      "name": "Licensing (FSL-1.1-MIT)",
+      "children": [
+        {
+          "name": "Free for personal/internal use"
+        },
+        {
+          "name": "Allowed for professional services"
+        },
+        {
+          "name": "Restricted for competing SaaS"
+        },
+        {
+          "name": "Automatic MIT conversion after 2 years"
+        }
+      ]
+    },
+    {
+      "name": "Technical Stack",
+      "children": [
+        {
+          "name": "macOS 13+ environment"
+        },
+        {
+          "name": "Node.js & Bun runtimes"
+        },
+        {
+          "name": "Ripgrep & Git integration"
+        },
+        {
+          "name": "Obsidian for visual navigation"
+        }
+      ]
+    }
+  ]
+}
