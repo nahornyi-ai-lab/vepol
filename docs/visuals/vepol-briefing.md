@@ -1,94 +1,108 @@
-# Vepol: Personal AI Operating Environment
+# Vepol: The Autonomous AI Operating Environment
 
 ## Executive Summary
-Vepol is a personal operating environment designed to transform local markdown files into a persistent, actionable knowledge base for AI agents. Based on the Russian TRIZ "substance-field" model (*Веполь*), it coordinates multiple agents—specifically Claude Code and Codex CLI—to operate against a single source of truth rather than fragmented, session-specific memory. By combining a structured knowledge schema (~/knowledge/) with an active orchestration layer, Vepol provides developers with a durable environment for long-term project management, cross-agent review, and automated session capture. It is currently in alpha (v0.1.x) and is tailored for macOS power users who require their AI agents to maintain state and context across complex, multi-project workflows.
 
-## Core Concepts and Architecture
+Vepol is an opinionated, local-first personal operating environment designed to transform passive AI interactions into a proactive partnership. It is explicitly not a "memory tool"; rather, it utilizes a structured markdown knowledge base as infrastructure to support an autonomous agent that grows in agency over time. By layering active orchestrators—primarily Claude Code and Codex—over a unified source of truth, Vepol automates routine tasks, monitors user health and goals, and self-reflects on its own operational strategies.
 
-### The Substance-Field Model
-The name "Vepol" is derived from the TRIZ concept of a smallest functional unit. In this framework:
-*   **Two Substances:** The user and the AI agents (Claude, Codex).
-*   **The Field:** The markdown knowledge base that binds the agents and the user together.
-*   **The Result:** A system where knowledge is not just stored but actively transformed into action.
+The system is built on the TRIZ "substance-field" model (*Ve-pol*), where the user and the AI agents are interacting elements bound by a "field" of structured markdown. For developers, Vepol offers a "visible discipline" where every AI action leaves a textual trace, ensuring transparency, auditability, and a compounding level of autonomy that reduces operational overhead the longer the system is utilized.
 
-### Core vs. Overlay Separation
-Vepol maintains a strict mechanical boundary to ensure stability and privacy:
-*   **Core Repo:** Contains universal schemas, scripts, and methodology. This is managed via a `.managed.yaml` file, which tracks files belonging to the Vepol repository for seamless upgrades.
-*   **User Overlay:** Resides in `~/knowledge/`. This contains the user's private registry, logs, concepts, and project-specific data. Vepol is designed so that the overlay is never published or overwritten during core updates.
+## The Core Paradigm: Partnership and Agency
 
-### The Four-Layer Privacy Model
-The system incorporates four layers of privacy (currently tested in alpha). This includes a privacy-aware sync mechanism that allows developers to curate and publish specific portions of their knowledge base without leaking sensitive local data or session transcripts.
+Vepol shifts the AI assistant model from a reactive chatbot to a proactive partner. While standard tools focus on session persistence, Vepol focuses on **initiative** and **autonomy progression**.
 
-### Parallel Orchestration
-Vepol treats Claude Code and Codex as equal interfaces to the same "brain." This "zero split-brain" policy ensures:
-*   **Single Source of Truth:** All agents read from the same `README.md`, `state.md`, and `log.md`.
-*   **Shared Memory:** If one agent finds an answer, it must be recorded in the knowledge base so the second agent does not have to repeat the search.
-*   **Cross-Agent Review:** Non-trivial changes (e.g., architectural shifts) must be reviewed by the "other" agent before implementation.
+### The Growth of Autonomy
+Vepol is designed to take on an increasing share of the user's routine based on observed interactions and feedback. The progression of this autonomy is modeled over a six-month horizon:
 
-## The Knowledge-Base (KB) Schema
-Vepol mandates a standardized structure for every project to ensure agents can immediately orient themselves.
+| Timeline | Autonomy Level | Action |
+| :--- | :--- | :--- |
+| **Day 1** | Assisted Drafting | Vepol drafts routine outputs (e.g., emails); user proofreads and sends. |
+| **Week 2** | Classification | Vepol classifies routine inputs; the user only reviews exceptions. |
+| **Month 2** | Controlled Execution | Vepol answers typical inquiries in draft folders; user performs spot-checks. |
+| **Month 6** | Operational Routine | Half of the user’s operational routine runs autonomously; user focuses on high-level creative work. |
 
-| File | Purpose |
-| :--- | :--- |
-| `README.md` | High-level project status (1–2 sentences). |
-| `state.md` | Current project snapshot. |
-| `log.md` | Chronological event log (auto-updated by session captures). |
-| `backlog.md` | Tasks to be executed. |
-| `escalations.md` | Blockers or decisions requiring user/hub intervention. |
-| `incidents.md` | Root cause analysis and prevention rules for errors. |
-| `strategies.md` | Weekly-reviewed hypotheses and long-term project direction. |
+### Proactive Operations
+Unlike reactive bots that wait for prompts, Vepol initiates interaction through:
+*   **Daily Briefings:** Morning summaries of open tasks, deadlines, and prioritized goals based on the current knowledge state.
+*   **Evening Retros:** Summaries of the day's achievements and lessons learned.
+*   **Routine Execution:** Background execution of low-judgment tasks marked as `auto: true`.
+*   **Health Alignment:** Integration with health data (Garmin, Apple Health) to adjust workload intensity based on sleep quality or stress levels.
 
-## License Model: FSL-1.1-MIT
-Vepol uses the Functional Source License (FSL) with an automatic MIT conversion, ensuring the software is source-available now and fully open-source eventually.
+---
 
-*   **Phase 1 (First 2 Years):** The FSL allows almost all uses except for competing managed services. Users can freely use Vepol for personal projects, internal company tooling, and professional consulting.
-*   **Phase 2 (Automatic Conversion):** Two years after any specific release, that version's license automatically and irrevocably converts to MIT.
-*   **Competitive Restriction:** Users may not host Vepol as a SaaS that competes with the original product without a commercial license.
+## Visible Discipline: The Structured Knowledge Field
 
-### Commercial Licensing Tiers
-For enterprises requiring pre-conversion freedom or competing use, pricing is tiered by company size:
-*   **Startups:** $500–$2,000/year.
-*   **Mid-size:** $2,000–$10,000/year.
-*   **Large Enterprise:** Case-by-case.
+Vepol’s "Visible Discipline" ensures that AI operations are not black-box events. Every decision, lesson, and task is recorded in a human-readable, auditable markdown format.
 
-## Comparison to Alternatives
+### The Knowledge Base Schema
+The system utilizes a mandatory triad of coordination files in every project’s `knowledge/` directory:
 
-| Feature | Vepol (FSL-1.1-MIT) | Standard Open Source (MIT/Apache) | Restrictive (AGPL/BUSL) |
-| :--- | :--- | :--- | :--- |
-| **Personal/Internal Use** | Free | Free | Often Free (but AGPL has viral risks) |
-| **Consulting Services** | Explicitly Permitted | Permitted | Varies |
-| **SaaS Protection** | 2-year protection for creators | None | Permanent protection/restriction |
-| **Eventual Open Source** | Guaranteed (2-year lag) | Immediate | Often Never |
+| File | Primary Author | Purpose |
+| :--- | :--- | :--- |
+| `backlog.md` | Hub or User | Tasks to be executed; includes status (`open`, `in-progress`, `done`) and metadata. |
+| `escalations.md` | Project Agent | Items where the AI requires human judgment, resources, or cross-project coordination. |
+| `incidents.md` | Project Agent | Chronological log of errors, root causes, fixes, and newly implemented "Automated Guards." |
+| `strategies.md` | Project Agent | Active hypotheses about how the agent can improve; re-evaluated weekly or upon project pivots. |
+| `log.md` | Auto-compiler | A grep-friendly chronological log of every session and significant event. |
+| `state.md` | Project Agent | A current snapshot of the project’s status. |
 
-Vepol positions itself as more developer-friendly than AGPL because it lacks the "viral" requirement to release source code for network services, focusing only on preventing direct SaaS competition.
+### Self-Reflection and Strategy
+The `strategies.md` file is a critical differentiator. Vepol does not just store data; it interprets it. Once a week, the system re-reads its own logs, checks which assumptions held true, and rewrites its strategy file. This allows the AI to adjust its help based on identified patterns, such as recognizing when a user is more productive or when specific tasks tend to stall.
+
+---
+
+## Operational Frameworks and Quality Control
+
+Vepol embeds rigorous engineering methodologies into the AI’s workflow to ensure high-quality output and architectural integrity.
+
+### Parallel Orchestration and Cross-Agent Review
+Vepol treats Claude Code and Codex as interchangeable interfaces to the same knowledge base. To prevent "split-brain" scenarios, a strict protocol is enforced:
+*   **Single Source of Truth:** Both agents read and write to the same `~/knowledge/` hub and project-specific folders.
+*   **Cross-Agent Review:** Any non-trivial implementation (≥30 minutes or architectural changes) requires a plan review by the *other* agent. A plan written by Claude Code must be approved or critiqued by Codex before implementation begins.
+*   **Knowledge-Gap Delegation:** If one agent lacks specific knowledge (e.g., an external API), it must delegate the search to the other agent and require the result be written to the permanent knowledge base (`sources/` or `concepts/`) rather than just the chat history.
+
+### Spec-Driven and TRIZ-Grounded Design
+*   **Spec-Driven Workflow:** For non-trivial work, the agent must follow a cycle: Specification -> Tests-before-code (Red) -> Code implementation -> Test execution (Green) -> Revision.
+*   **TRIZ Optics:** Design solutions are filtered through the Theory of Inventive Problem Solving. Agents are instructed to formulate contradictions (e.g., "fast and reliable") and seek "Ideal Final Results" through separation in space, time, condition, or structure, rather than settling for compromises.
+
+---
+
+## Technical Architecture and Implementation
+
+### Environment and Dependencies
+Vepol is a local operating environment, currently optimized for macOS 13+.
+*   **Primary Orchestrator:** Claude Code CLI.
+*   **Secondary Orchestrator:** Codex CLI (recommended for cross-review).
+*   **Runtime:** Node 18+ and Bun 1.0+ for performance scripts.
+*   **Storage:** Plain markdown files, searchable via CLI (`kb-search`) or visualizable via Obsidian.
+
+### Session Auto-Capture
+Every Claude Code session is captured via the `claude-memory-compiler`. Upon session end:
+1.  **Transcript Parsing:** Decisions, lessons, action items, and context shifts are extracted.
+2.  **Daily Log:** The extraction is appended to `<project>/knowledge/daily/YYYY-MM-DD.md`.
+3.  **Project Log:** A one-line summary with a cross-reference link is added to `log.md`.
+4.  **Lifting:** Periodically, Vepol "lifts" raw data from daily logs into permanent categories like `concepts/`, `people/`, or `solutions/`.
+
+---
+
+## Important Quotes and Context
+
+> **"Memory is just infrastructure."**
+*Context: Defining the core philosophy that Vepol is an agentic partner, not a storage tool.*
+
+> **"If after your session the second orchestrator cannot understand what you did and what changed from the files, then the memory is updated insufficiently."**
+*Context: The practical rule for maintaining the "Zero Split-Brain" policy between Claude and Codex.*
+
+> **"Vepol's autonomy compounds over time... the progression is real because Vepol watches what you actually edited vs accepted."**
+*Context: Explaining how the AI monitors user behavior to adjust its own level of initiative for specific task types.*
+
+> **"Every meaningful action leaves a textual trace in your knowledge base that you can read, edit, override, or grep six months later."**
+*Context: Contrasting Vepol's transparent "Visible Discipline" with the black-box nature of standard AI assistants.*
+
+---
 
 ## Actionable Insights for Developers
 
-### Quickstart in 5 Commands
-To get Vepol running in a local environment:
-
-1.  **Install:** `curl -fsSL https://get.vepol.ai | bash` (Installer checks for Claude CLI, Node, Bun, and Git).
-2.  **Initialize KB:** `claude -p "run skill init-kb"` (Sets up the standard folder structure).
-3.  **Add Task:** `kb-task "Design new API endpoint" --project my-app` (Adds to the project backlog).
-4.  **Execute:** `claude` (The agent reads the backlog and starts working with full context).
-5.  **Review Status:** `kb-backlog --open` (View the unified "Jira-style" list of tasks across all projects).
-
-### Technical Requirements
-*   **OS:** macOS 13+ (Required for v0.1 due to `launchd` and path dependencies).
-*   **Primary Interface:** Claude Code CLI.
-*   **Runtime:** Node 18+ and Bun 1.0+.
-*   **Optional:** Codex CLI (for cross-agent review) and Telegram (for daily/evening briefings).
-
-## Important Quotes
-
-### On Persistence
-> "Vepol is a personal operating environment that turns your local markdown files into a living knowledge base... Both Claude Code and Codex CLI work against the same files — there is no separate 'Claude memory' and 'Codex memory.'"
-
-### On Methodology
-> "Any non-trivial change (≥ ~30 min implementation, any design decision, new infrastructure) passes a cycle: Specification → Tests-before-code → Code → Test run → Revisions."
-
-### On Problem Solving (TRIZ)
-> "Formulate the contradiction first. What prevents progress? Often it is 'need X and simultaneously not-X'... Seek resolution through separation, not through compromise."
-
-### On License Philosophy
-> "Most commercial-friendly licenses (BUSL, Elastic v2, SSPL) have no expiration — they stay restrictive forever. We picked FSL because... two years out, the community owns the code under MIT."
+*   **Auditability as Trust:** Adopting Vepol provides a "Paper Trail" for AI actions. In a professional setting, this allows developers to audit AI-generated architectural decisions months after they were made by checking the `log.md` and `strategies.md` files.
+*   **Context Loss Prevention:** Standard AI chatbots "start blank" every session. Vepol’s `SessionStart` hooks automatically feed the project’s `README.md`, `state.md`, and recent logs into the agent, eliminating the need for manual context re-provisioning.
+*   **Incremental Automation:** Use the `auto: true` flag in `backlog.md` for low-judgment tasks (e.g., summarizing meeting notes). This allows Vepol to prove its reliability on minor tasks before the user grants it more significant autonomy.
+*   **Licensing Awareness:** Vepol uses the FSL-1.1-MIT license. It is free for personal use, internal company use, and consulting. However, developers cannot use it to build a competing hosted SaaS until the 2-year MIT conversion period for each release has passed.
