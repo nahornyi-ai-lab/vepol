@@ -125,10 +125,11 @@ cd ~/vepol
 ./install.sh
 ```
 
-The installer detects what you have (Claude CLI, Node, Bun, optionally Codex
-CLI), reports what's missing with exact install commands, and sets up the
-rest. It does **not** auto-install package managers — that decision stays
-with you.
+The installer detects what you have (Claude Code, Node, Bun, optionally
+Codex), reports what's missing with exact install commands, and sets up
+the rest. The Claude Code and Codex macOS apps install their CLI
+binaries automatically, so either flow works. The installer does **not**
+auto-install package managers — that decision stays with you.
 
 After install, your first 5 minutes:
 
@@ -191,11 +192,11 @@ the tool.
 | Tool | Required | Why |
 |---|---|---|
 | macOS 13+ | Yes (v0.1) | launchd, paths, brew defaults |
-| [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) | Yes | Primary orchestrator |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | Primary orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
-| [Codex CLI](https://github.com/openai/codex) | Recommended | Cross-agent review |
+| [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review |
 | Telegram bot | Optional | Brief / retro channel |
 | [claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) | Optional | Auto-capture sessions |
 

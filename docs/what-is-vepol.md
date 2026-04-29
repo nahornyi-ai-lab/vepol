@@ -201,12 +201,14 @@ chronicle; you both refer to the same record.
 
 ## Who this is *not* for
 
-- People who want a polished GUI app — Vepol is CLI + markdown + Telegram
-- People who want a managed cloud service — by design, this is your local
-  environment
-- People who don't already use Claude Code — Vepol is built around it
-- People who prefer their AI to be reactive only — Vepol's whole point is
-  initiative
+- People who want a managed cloud service — by design, this is your
+  local environment
+- People who don't already use Claude Code or a similar AI agent —
+  Vepol works *through* the agent's interface (Claude Code's macOS
+  app, Codex's macOS app, or their respective CLIs); if you're not
+  in that flow yet, start there first
+- People who prefer their AI to be reactive only — Vepol's whole
+  point is initiative
 
 ## 60-second summary
 
