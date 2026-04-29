@@ -64,6 +64,8 @@ that infrastructure.
   The progression is real because Vepol watches what you actually edited
   vs accepted, and adjusts autonomy per task type.
 
+![Autonomy growth — Day 1 to Month 6](docs/visuals/vepol-autonomy-growth.png)
+
 ## What makes it different — visible discipline
 
 Most AI assistants are black boxes: model decides, output appears, you can't
@@ -71,6 +73,8 @@ audit, you can't roll back. Vepol works the opposite way.
 
 **Every meaningful action leaves a textual trace** in your knowledge base
 that you can read, edit, override, or `grep` six months later.
+
+![Visible discipline — five pillars](docs/visuals/vepol-visible-discipline.png)
 
 - **Memory updates itself, in the open.** After each session, decisions /
   lessons / action items get auto-extracted into `daily/YYYY-MM-DD.md` and
@@ -107,6 +111,10 @@ that you can read, edit, override, or `grep` six months later.
 
 ## How this differs from other AI assistants
 
+![Vepol vs typical AI chatbot — side by side](docs/visuals/vepol-comparison.png)
+
+The full breakdown:
+
 | | Typical AI chatbot | Vepol |
 |---|---|---|
 | **Memory** | hosted by vendor, opaque to you | your text files, you can edit |
@@ -120,6 +128,8 @@ that you can read, edit, override, or `grep` six months later.
 | **Health/goal alignment** | absent | present (devices feed in; pace adapts) |
 
 ## Quickstart
+
+![Quickstart workflow — from your request to a working Vepol in 5 minutes](docs/visuals/vepol-quickstart.png)
 
 You don't install Vepol by hand — your AI agent does. Open Claude
 Code, or Codex on a machine where the Claude CLI is available, and
@@ -194,21 +204,25 @@ feedback as design input.
    which files belong to the repo (overwriteable on upgrade) and which
    belong to you (never touched).
 
-For details, see [`docs/visuals/vepol-architecture.png`](docs/visuals/vepol-architecture.png) (visual) or
-the architecture sections in [`docs/what-is-vepol.md`](docs/what-is-vepol.md) (text).
+![Vepol architecture — substance-field model + three-tier repository strategy](docs/visuals/vepol-architecture.png)
+
+For the full architectural narrative, see
+[`docs/what-is-vepol.md`](docs/what-is-vepol.md).
 
 ## Methodology pages
 
 Vepol embeds a small set of opinions about how to work with AI agents.
-These live in [`docs/methodology/`](docs/methodology/) (added in a later release):
+These live in [`docs/methodology/`](docs/methodology/):
 
-- **Orchestrated knowledge base** — root concept (Karpathy LLM Wiki + 7 extensions)
-- **KB authoring discipline** — 8 rules to avoid false-canonical content
-- **KB freshness loop** — how reads stay current
-- **TRIZ for design** — contradiction → ideal-final-result → separation
-- **Spec-driven workflow** — spec → tests → code → tests → revisions
-- **Cross-agent review** — Claude ↔ Codex as a quality gate
-- **Parallel orchestrators** — single source of truth for many agents
+![Vepol methodology — five-step working principle](docs/visuals/vepol-methodology.png)
+
+- **[Orchestrated knowledge base](docs/methodology/orchestrated-knowledge-base.md)** — root concept (Karpathy LLM Wiki + 7 extensions)
+- **[KB authoring discipline](docs/methodology/kb-authoring-discipline.md)** — 8 rules to avoid false-canonical content
+- **[KB freshness loop](docs/methodology/kb-freshness-loop.md)** — how reads stay current
+- **[TRIZ for design](docs/methodology/triz-for-design.md)** — contradiction → ideal-final-result → separation
+- **[Spec-driven workflow](docs/methodology/spec-driven-workflow.md)** — spec → tests → code → tests → revisions
+- **[Cross-agent review](docs/methodology/cross-agent-review.md)** — independent agents as a quality gate
+- **[Parallel orchestrators](docs/methodology/parallel-orchestrators.md)** — single source of truth for many agents
 
 Read them in order if this is your first time. Skip if you just want
 the tool.
@@ -231,6 +245,8 @@ The installer checks all of these and tells you exactly what to install.
 ## License
 
 [FSL-1.1-MIT](LICENSE). Source-available now, MIT in 2 years.
+
+![FSL-1.1-MIT license model — source-available 2 years, then automatic MIT](docs/visuals/vepol-license.png)
 
 In plain English:
 

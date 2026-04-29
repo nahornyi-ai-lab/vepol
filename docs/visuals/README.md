@@ -35,6 +35,39 @@ contexts where the textbook density is useful.
 
 ---
 
+## 0a. Section visuals embedded in the README
+
+Three section-specific infographics, all generated via ChatGPT in the
+same editorial style as the cover. Each appears inline in its
+corresponding README section so the page reads as a visual story, not
+just text.
+
+### Quickstart workflow
+
+Used in the **Quickstart** section. Shows the four-stage agent-driven
+install: you ask → agent reads AGENTS.md → agent installs and verifies
+→ first-five-minutes commands.
+
+→ [`vepol-quickstart.png`](vepol-quickstart.png) · ~1.3 MB
+
+### Visible discipline — five pillars
+
+Used in the **What makes it different** section. Five pillars: memory
+self-updates, coordination triad, weekly strategy review, cross-agent
+review gate, every-event-logged.
+
+→ [`vepol-visible-discipline.png`](vepol-visible-discipline.png) · ~1.4 MB
+
+### Comparison vs typical AI chatbot
+
+Used in the **How this differs** section. Side-by-side: typical AI
+chatbot (faded, repeating-question cycle) vs Vepol (full color,
+substance-field structure).
+
+→ [`vepol-comparison.png`](vepol-comparison.png) · ~1.3 MB
+
+---
+
 ## 1. Autonomy growth — how the partnership compounds over time
 
 The core product story in one image: how Vepol's autonomy increases day by
