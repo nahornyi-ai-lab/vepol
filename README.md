@@ -15,6 +15,10 @@
 
 ---
 
+> 📊 **Want a quick visual overview?** See
+> **[docs/visuals/](docs/visuals/)** — architecture diagram, license
+> model, methodology infographic, mind map, and briefing doc.
+
 ## What this is
 
 Vepol is a **personal operating environment** that turns your local
