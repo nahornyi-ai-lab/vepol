@@ -7,11 +7,15 @@ privately, not through a public issue**.
 
 ### How to report
 
-Use GitHub's private vulnerability reporting:
-<https://github.com/nahornyi-ai-lab/vepol/security/advisories/new>
+Two options, either works:
 
-This routes the report directly to the maintainers without making it
-public. We will respond from there.
+1. **GitHub private vulnerability reporting** (preferred for technical
+   issues with reproducible code):
+   <https://github.com/nahornyi-ai-lab/vepol/security/advisories/new>
+2. **Email** the maintainers: vadym@nahornyi.ai
+
+Both go to the same people. GitHub gives you a structured advisory
+thread; email is faster for triage if you have an exploit in hand.
 
 Please include:
 

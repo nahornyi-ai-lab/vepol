@@ -84,12 +84,14 @@ people, not to be a legal trap.
 
 If your use case requires a commercial license (hosted competing
 service, brand resale, or pre-conversion access on terms different from
-FSL), email us:
+FSL), reach out:
 
-**Contact:** Open an issue in the public repository at
+**Email:** vadym@nahornyi.ai
+
+We will reply with a short scoping question. If you'd rather start
+with a public conversation, you can also open an issue at
 <https://github.com/nahornyi-ai-lab/vepol/issues> with the label
-`commercial-license-inquiry`. We will reply with a short scoping
-question or move to direct email.
+`commercial-license-inquiry`.
 
 Pricing varies by use case and company size:
 

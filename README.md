@@ -195,6 +195,7 @@ See `CONTRIBUTING.md` (when published) for the full process.
 
 - **Issues:** <https://github.com/nahornyi-ai-lab/vepol/issues>
 - **Discussions:** <https://github.com/nahornyi-ai-lab/vepol/discussions>
+- **Email:** vadym@nahornyi.ai
 - **Security:** see [SECURITY.md](SECURITY.md)
 - **Commercial license:** see [COMMERCIAL.md](COMMERCIAL.md)
 - **Org:** <https://github.com/nahornyi-ai-lab>
