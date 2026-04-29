@@ -35,6 +35,10 @@ telegram/access.json
 auth.json
 credentials*.json
 
+# Exception: the demo's empty .secrets placeholder (all values empty by design;
+# part of the demo wiki so first-run aha works without manual setup).
+!demo/knowledge/personal/.secrets
+
 # User overlay (must NEVER appear in this repo — that's the whole point).
 # Exception: the master schema file `knowledge/CLAUDE.md`, which install.sh
 # copies to ~/knowledge/CLAUDE.md on the user's machine. The schema itself
