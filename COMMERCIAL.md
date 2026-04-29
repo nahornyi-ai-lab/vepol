@@ -83,8 +83,53 @@ people, not to be a legal trap.
 ## Commercial license inquiries
 
 If your use case requires a commercial license (hosted competing
-service, brand resale, or pre-conversion access on terms different from
-FSL), reach out:
+service, brand resale, or pre-conversion access on terms different
+from FSL), there are two ways to start.
+
+### Buy directly
+
+For straightforward annual licenses, purchase online and you will
+receive a license certificate by email within 24 hours.
+
+| Tier | Annual price (net of VAT) | Buy |
+|---|---|---|
+| **Small** — startups and companies up to ~25 people | €1 500 / year | [Buy →](https://buy.stripe.com/bJe00jexJ6A83E2e4q1ck01) |
+| **Mid-size** — companies up to ~250 people | €5 000 / year | [Buy →](https://buy.stripe.com/cNi3cv9dpcYweiG5xU1ck02) |
+
+**Term and renewal.** Each link creates an annual subscription that
+auto-renews at the same price unless cancelled. Cancel any time via
+the customer portal link in your Stripe receipt or by email;
+cancellation takes effect at the end of the current 12-month term,
+no pro-rata refunds.
+
+**What you get.** A 12-month commercial license for the purchasing
+legal entity, covering uses that FSL would otherwise restrict —
+hosted services that compete with Vepol, brand resale, or
+pre-conversion access on terms different from FSL. Your team's FSL
+rights stay intact in addition. The license certificate emailed
+after purchase contains the full legal terms; if you want to review
+the template before buying, email us first.
+
+**Tax.** Issued by Nahornyi AI Lab SL (Valencia, Spain · VAT-ID
+ESB23820202) through our gestoría.
+
+- **EU B2B** — provide a valid VAT-ID at checkout. The follow-up
+  invoice shows 0% VAT under the reverse-charge mechanism (Art. 196,
+  EU VAT Directive); you self-account for VAT in your country.
+- **Non-EU** — 0% VAT (export of services).
+- **Spain (B2B and B2C) and EU B2C** — please email
+  vadym@nahornyi.ai before purchase. The Stripe link is set up for
+  net pricing; for jurisdictions where 21% Spanish VAT is owed by us
+  on top, we issue the invoice manually so the amount you pay
+  matches the VAT figures.
+
+If your jurisdiction or use case is unusual, prefer the email path
+below.
+
+### Talk first
+
+For large enterprises, custom scope, multi-year terms, or
+pre-conversion access on terms different from FSL:
 
 **Email:** vadym@nahornyi.ai
 
@@ -93,11 +138,9 @@ with a public conversation, you can also open an issue at
 <https://github.com/nahornyi-ai-lab/vepol/issues> with the label
 `commercial-license-inquiry`.
 
-Pricing varies by use case and company size:
-
-- Small companies / startups: typically $500-2000/year
-- Mid-size companies: typically $2000-10000/year
-- Large enterprises: case-by-case
+Default disposition: **try to find a way to say yes.** Discounts are
+available for early adopters, non-profits, and aligned open-source
+projects.
 
 We try to keep the pricing reasonable. Vepol is a tool, not a
 gatekeeper.
