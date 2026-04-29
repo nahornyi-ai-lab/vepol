@@ -2,13 +2,6 @@
 
 **Your AI partner that grows with you.** Plans your day, runs your routine, studies you, takes on more of your work each day — while you stay in control of every step.
 
-> *Architectural tagline:* **Two agents, one field.**
->
-> *Pronunciation:* Vepol [VEH-pol] — from Russian *Веполь*, the TRIZ
-> "substance-field" model: two interacting elements plus a field that
-> binds them. In Vepol, you are one element, your AI agents (Claude,
-> Codex) are the other, and your markdown knowledge base is the field.
-
 [![License: FSL-1.1-MIT](https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg)](LICENSE)
 [![Source-available](https://img.shields.io/badge/Source-available-orange.svg)](LICENSE-FUTURE.md)
 [![Status: alpha](https://img.shields.io/badge/Status-alpha-yellow.svg)](#status)
@@ -82,6 +75,14 @@ that you can read, edit, override, or `grep` six months later.
   one-line summaries go into `log.md`. Daily, important items get **lifted**
   into permanent categories (`concepts/`, `people/`, `companies/`,
   `solutions/`). You see every lift; you can object, edit, roll back.
+- **Knowledge cross-links and grows.** Pages reference each other through
+  markdown wiki-links (`[[concept]]`, `[[person]]`). As you ingest more
+  material, Vepol periodically re-reads the corpus, spots recurring
+  patterns, and proposes new connections — sometimes lifting a topic
+  that keeps coming up into its own page, sometimes noticing that two
+  pages you wrote separately are actually about the same thing. The
+  graph densifies as you work; you can see it visually in Obsidian or
+  any tool that reads markdown links.
 - **Tasks live in three files, each with one job.**
   - `backlog.md` — what needs doing (you and Vepol both add)
   - `escalations.md` — items Vepol can't proceed without you (Vepol writes,
@@ -95,9 +96,9 @@ that you can read, edit, override, or `grep` six months later.
   a week Vepol re-reads its own log, checks which assumptions held, updates
   the file. You see the diff.
 - **Plans go through cross-agent review.** Before any non-trivial
-  implementation, Vepol writes a spec, has a *second* AI (Claude and Codex
-  review each other) check it, and only proceeds after concerns are
-  addressed. You don't get one-shot answers for things that matter.
+  implementation, Vepol writes a spec, has another configured AI agent
+  check it, and only proceeds after concerns are addressed. You don't
+  get one-shot answers for things that matter.
 - **Every event → log entry.** Not "I did something" in a chat — a dated
   line in `log.md`. Six months later, `grep "decision"` returns every
   significant call you made, with context.
@@ -112,7 +113,7 @@ that you can read, edit, override, or `grep` six months later.
 | **Decisions and lessons** | dissolve in chat history | auto-extracted into the log |
 | **Autonomy** | reactive (answers prompts) | proactive (initiates work) |
 | **Transparency** | "magic" inside the model | every step is text on disk |
-| **Quality of plans** | one answer from one model | plan goes through cross-review by two AIs |
+| **Quality of plans** | one answer from one model | plan goes through cross-review by independent AI agents |
 | **Growth over time** | each chat starts blank | each day, takes on more of your routine |
 | **Health/goal alignment** | absent | present (devices feed in; pace adapts) |
 
@@ -150,11 +151,11 @@ That's the value loop. Methodology comes after, when you want it.
 - ✅ Privacy layers (4 of them) are in place and tested
 - ⚠️ macOS 13+ only — Linux support is a Phase 2 candidate
 - ⚠️ Pro-tier features (cloud-sync, advanced templates) not built yet
-- ⚠️ Documentation gaps exist; we plug them as people hit them
+- ⚠️ Documentation is still being filled in during active alpha use
 - ❌ Breaking changes in any 0.x → 0.(x+1) bump are possible
 
 If you adopt now, expect to participate in shaping the API. We treat your
-feedback as gold.
+feedback as design input.
 
 ## Architecture in three sentences
 
@@ -180,7 +181,7 @@ These live in [`docs/methodology/`](docs/methodology/) (added in a later release
 - **TRIZ for design** — contradiction → ideal-final-result → separation
 - **Spec-driven workflow** — spec → tests → code → tests → revisions
 - **Cross-agent review** — Claude ↔ Codex as a quality gate
-- **Parallel orchestrators** — single source of truth for two agents
+- **Parallel orchestrators** — single source of truth for many agents
 
 Read them in order if this is your first time. Skip if you just want
 the tool.
@@ -248,7 +249,7 @@ See `CONTRIBUTING.md` (when published) for the full process.
 - **Andrej Karpathy** for the [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) that gave us the initial pattern
 - **Genrich Altshuller** for TRIZ and the substance-field model that gives Vepol its name
 - **Sentry** for [FSL](https://fsl.software/) — a license model that's commercial-friendly without being permanently restrictive
-- **Anthropic** and **OpenAI** for Claude and Codex respectively, the two orchestrators Vepol coordinates
+- **Anthropic** and **OpenAI** for Claude and Codex respectively — two of the orchestrators Vepol can coordinate
 
 ## Reach out
 

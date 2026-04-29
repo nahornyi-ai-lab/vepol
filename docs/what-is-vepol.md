@@ -79,7 +79,7 @@ six months later.
 
 ### Memory updates itself, in the open
 
-After each Claude Code session, Vepol's session-capture pipeline:
+After each supported agent session, Vepol's session-capture pipeline:
 
 1. Reads the full session transcript
 2. Extracts decisions / lessons / action items / context shifts
@@ -90,6 +90,37 @@ Then once a day, Vepol re-reads recent dailies and decides what should be
 **lifted** from raw chronology into permanent categories (`concepts/`,
 `people/`, `companies/`, `solutions/`). You see the lifting happen — you
 can object, you can edit, you can roll back.
+
+### The knowledge graph is alive — pages cross-link and the network grows
+
+Vepol's knowledge base is not a flat collection of independent notes. Pages
+reference each other through markdown wiki-links: `[[concept]]`,
+`[[person]]`, `[[company]]`, `[[solution]]`. When you write about a
+project, the project page links to the people involved; people pages
+link back to the projects they touched; concepts link to the source
+documents that introduced them.
+
+This network grows itself, in two ways:
+
+- **Lifting from chronology.** Daily session captures are scanned for
+  recurring entities and ideas. When something appears across multiple
+  days — a recurring problem, a person you keep mentioning, a tool that
+  came up four times in two weeks — Vepol proposes promoting it from raw
+  daily notes into a dedicated page in the appropriate category.
+- **Synthesis between existing pages.** Periodically Vepol re-reads
+  the corpus and proposes new cross-links: "this concept page and this
+  solution page seem to be about the same thing — should they merge?",
+  "this person works at this company; the link is missing."
+
+You see every proposal. You accept, edit, or reject. Over time the graph
+densifies — a knowledge base that started as a flat set of notes becomes
+a richly interconnected network. You can browse it in Obsidian (where the
+graph view is built in) or any other tool that reads markdown wiki-links.
+
+This matters for the partnership: when Vepol plans your day or drafts a
+response, it doesn't just look at the file you're writing — it traverses
+the graph from there, picking up context from connected pages. The
+denser the graph, the better its judgments.
 
 ### Tasks live in three files, each with one job
 
@@ -117,11 +148,10 @@ diff. You can revert.
 
 ### Plans go through cross-agent review
 
-Before any non-trivial implementation, Vepol writes a specification, has a
-**second AI** (Claude and Codex review each other) check it, and only
-proceeds after concerns are addressed. You never get a one-shot answer for
-something that matters — you get something that survived independent
-scrutiny.
+Before any non-trivial implementation, Vepol writes a specification, has
+**an independent configured AI agent** check it, and only proceeds after
+concerns are addressed. You never get a one-shot answer for something that
+matters — you get something that survived independent scrutiny.
 
 ### Every meaningful event → log entry
 
@@ -140,7 +170,7 @@ chronicle; you both refer to the same record.
 | **Decisions and lessons** | dissolve in chat history | auto-extracted into the log |
 | **Autonomy** | reactive (answers your prompts) | proactive (initiates work) |
 | **Transparency** | "magic" inside the model | every step is text on disk |
-| **Quality of plans** | one answer from one model | plan goes through cross-review by two AIs |
+| **Quality of plans** | one answer from one model | plan goes through cross-review by independent AI agents |
 | **Growth over time** | each chat starts blank | each day, takes on more of your routine |
 | **Health/goal alignment** | absent | present (devices feed in; pace adapts) |
 
@@ -184,6 +214,6 @@ Vepol is your second inner voice — an AI partner that plans your day, runs
 your routine, studies you, self-reflects, monitors your health, and **takes
 on more of your work each day**. Its memory and decisions live as plain
 markdown files on your machine, so you can audit, edit, or roll back
-anything. Two AIs (Claude and Codex) review each other's plans before any
-significant change. Free for personal and internal use under FSL-1.1-MIT;
+anything. Configured AI agents review each other's plans before any significant
+change. Free for personal and internal use under FSL-1.1-MIT;
 auto-converts to MIT in 2 years.

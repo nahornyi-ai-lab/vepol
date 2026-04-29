@@ -64,7 +64,7 @@ ask() {
 cat <<HEADER
 ${C_INFO}┌──────────────────────────────────────────┐
 │  Vepol installer · v${VEPOL_VERSION}
-│  Two agents, one field.
+│  Many agents, one field.
 └──────────────────────────────────────────┘${C_OFF}
 
   VEPOL_DIR: $VEPOL_DIR
