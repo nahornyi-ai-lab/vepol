@@ -71,6 +71,40 @@ def _claim_token_for_line(line_text: str, ts: float) -> str:
     return h.hexdigest()[:16]
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _stamp_body_hash(parsed: parsing.BacklogLine) -> str:
+    """Hash of the line's body excluding any per-claim and stamp fields.
+
+    Used by `op_stamp`'s drift check: caller computes this hash from the
+    parsed line at collect-time; under the slug lock we recompute it on
+    the same lineno; mismatch == another writer modified the line.
+
+    Excluded fields: `claim_id`, `picked`, `claim_content_hash`, `plan_item_id`.
+    The first three are irrelevant to stamping (claim/release lifecycle);
+    plan_item_id is excluded so a no-op re-stamp doesn't trip drift.
+    """
+    excluded = {"claim_id", "picked", "claim_content_hash", "plan_item_id"}
+    parts = [parsed.title.rstrip()]
+    for k, v in parsed.fields:
+        if k in excluded:
+            continue
+        parts.append(f"{k}: {v}")
+    canonical = " — ".join(parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+# Public helper so callers (kb-orchestrator-cycle) can compute the hash
+# during their no-lock collection pass and pass it back via op_stamp's
+# `expected_body_hash` parameter. Equality contract: same backlog line
+# under no concurrent writes → same hash, both sides.
+kb_backlog_line_body_hash = _stamp_body_hash
+
+
 def _claim_content_hash(parsed: parsing.BacklogLine) -> str:
     """Compute a content hash for a claimed line, EXCLUDING per-claim fields.
 
@@ -378,6 +412,133 @@ def op_update(
             "slug": slug,
             "tx_id": result.tx_id,
             "lineno": target_lineno,
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# stamp — attach plan_item_id to an existing open line by line number
+# ──────────────────────────────────────────────────────────────────────────
+
+def op_stamp(
+    slug: str,
+    *,
+    line: int,
+    plan_item_id: str,
+    by: str = "hub",
+    expected_body_hash: Optional[str] = None,
+    lock_timeout: float = 30.0,
+) -> dict:
+    """Stamp `plan_item_id: <pid>` onto an existing open line by line number.
+
+    Used by the daily-plan generator to enrich pre-existing open rows so
+    morning dispatch can reconcile them as carried items rather than
+    appending duplicates.
+
+    `expected_body_hash` (optional) — sha256 of the line's title + non-claim
+    fields (excluding the per-claim/per-stamp fields) computed at the time
+    the caller observed the line. If provided and the line under the lock
+    has drifted (other writer modified content), the op refuses with status
+    `drift`. Use `kb_backlog_line_body_hash()` (exposed below) to compute
+    the hash consistently with what the lock-side computes.
+
+    Returns dict with status:
+      - stamped              — line was open + had no plan_item_id, now has one.
+      - already-stamped      — line is open + already has plan_item_id (no-op).
+                               Returned 'plan_item_id' is the EXISTING value.
+      - no-such-line         — lineno out of range or not a backlog line.
+      - not-open             — line exists but is not [ ] open.
+      - drift                — expected_body_hash mismatch (line content
+                               changed under us between collect and lock).
+      - duplicate-cross-slug — pid already lives in another slug's open row.
+                               Refuses to stamp; caller must pick a different pid.
+      - duplicate-same-slug  — pid already lives in another open/in_progress
+                               row in this same backlog. Refuses to stamp.
+    """
+    # Validate UUID format up front — defense in depth.
+    if not _UUID_RE.match(plan_item_id):
+        return {
+            "status": "invalid-uuid",
+            "slug": slug,
+            "line": line,
+            "plan_item_id": plan_item_id,
+        }
+    with _open_op(slug, lock_timeout=lock_timeout) as ctx:
+        text = ctx.current_text()
+        parsed = parsing.find_line(text, line)
+        if parsed is None:
+            return {"status": "no-such-line", "slug": slug, "line": line}
+        if parsed.status != "open":
+            return {
+                "status": "not-open",
+                "slug": slug,
+                "line": line,
+                "current_status": parsed.status,
+            }
+        # Drift check (CR-Codex-Layer2-B3): if caller observed a specific
+        # body and another writer modified the line under us, refuse.
+        if expected_body_hash is not None:
+            current_hash = _stamp_body_hash(parsed)
+            if current_hash != expected_body_hash:
+                return {
+                    "status": "drift",
+                    "slug": slug,
+                    "line": line,
+                    "expected_body_hash": expected_body_hash,
+                    "current_body_hash": current_hash,
+                }
+        existing_pid = parsed.get("plan_item_id")
+        if existing_pid:
+            return {
+                "status": "already-stamped",
+                "slug": slug,
+                "line": line,
+                "plan_item_id": existing_pid,
+            }
+        # Same-slug duplicate guard — pid must not already attach to another
+        # open or in_progress row in this slug.
+        for other_ln, other_parsed in parsing.find_by_field(text, "plan_item_id", plan_item_id):
+            if other_ln == line:
+                continue
+            if other_parsed.status in ("open", "in_progress"):
+                return {
+                    "status": "duplicate-same-slug",
+                    "slug": slug,
+                    "line": line,
+                    "plan_item_id": plan_item_id,
+                    "other_line": other_ln,
+                }
+        # Cross-slug duplicate guard. The generator filters duplicates upstream,
+        # but this is defense-in-depth: an integrity gate at the mutation layer.
+        dup = _check_for_duplicate_across(slug, "plan_item_id", plan_item_id)
+        if dup:
+            return {
+                "status": "duplicate-cross-slug",
+                "slug": slug,
+                "line": line,
+                "plan_item_id": plan_item_id,
+                "other_locations": dup,
+            }
+        parsed.set_field("plan_item_id", plan_item_id)
+        new_line = parsed.render()
+
+        def transform(current: str) -> tuple[str, Optional[int], dict]:
+            new = parsing.replace_line(current, line, new_line)
+            return new, line, {"plan_item_id": plan_item_id}
+
+        result = mutation.apply_mutation(
+            slug=slug,
+            backlog_path=ctx.path,
+            op="stamp",
+            actor=by,
+            transform=transform,
+            held_locks=ctx.held,
+        )
+        return {
+            "status": "stamped" if not result.no_op else "noop",
+            "slug": slug,
+            "line": line,
+            "plan_item_id": plan_item_id,
+            "tx_id": result.tx_id,
         }
 
 

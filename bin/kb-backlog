@@ -53,9 +53,12 @@ def _emit(result: dict, json_out: bool) -> int:
     code_map = {
         "appended": 0, "updated": 0, "tombstoned": 0, "claimed": 0,
         "closed": 0, "reverted": 0, "xferred": 0, "noop": 0, "ok": 0,
+        "stamped": 0, "already-stamped": 0,
         "skipped": 5,
         "drift": 23,
         "duplicate": 6,
+        "duplicate-same-slug": 6,
+        "duplicate-cross-slug": 6,
         "ambiguous": 6,
         "not-found": 1,
         "no-such-line": 1,
@@ -64,6 +67,7 @@ def _emit(result: dict, json_out: bool) -> int:
         "bad-outcome": 1,
         "bad-args": 1,
         "parse-failed": 1,
+        "invalid-uuid": 1,
     }
     return code_map.get(status, 0)
 
@@ -111,6 +115,19 @@ def main() -> int:
     pu.add_argument("--by", default="hub")
     pu.add_argument("--lock-timeout", type=float, default=30.0)
     pu.add_argument("--json", action="store_true", dest="json_out")
+
+    # stamp
+    pst = sub.add_parser("stamp", help="Stamp plan_item_id onto an existing open line by line number")
+    pst.add_argument("slug")
+    pst.add_argument("--line", type=int, required=True)
+    pst.add_argument("--plan-item-id", dest="plan_item_id", required=True)
+    pst.add_argument("--expected-body-hash", dest="expected_body_hash",
+                     help="Drift-detect: hash of the line body computed at collect-time. "
+                          "Op refuses with status=drift if line changed under lock. "
+                          "Compute via _kb_backlog.ops.kb_backlog_line_body_hash().")
+    pst.add_argument("--by", default="hub")
+    pst.add_argument("--lock-timeout", type=float, default=30.0)
+    pst.add_argument("--json", action="store_true", dest="json_out")
 
     # tombstone
     pt = sub.add_parser("tombstone", help="Mark line as tombstoned-by-<reason>")
@@ -210,6 +227,17 @@ def main() -> int:
                 args.slug,
                 plan_item_id=args.plan_item_id,
                 field_updates=updates,
+                by=args.by,
+                lock_timeout=args.lock_timeout,
+            )
+            return _emit(res, args.json_out)
+
+        if cmd == "stamp":
+            res = ops.op_stamp(
+                args.slug,
+                line=args.line,
+                plan_item_id=args.plan_item_id,
+                expected_body_hash=args.expected_body_hash,
                 by=args.by,
                 lock_timeout=args.lock_timeout,
             )

@@ -40,12 +40,26 @@ if [[ $hour_24 -lt 13 ]]; then
     log "no daily-plan/$today.md — skipping (kb-planner may run later)"
     exit 0
   fi
-  if ! grep -qE '^approved_at:\s*\S' "$plan_file"; then
-    log "approved_at not set in $plan_file — skipping (waiting for user)"
-    exit 0
-  fi
+  # Extract approved_at value robustly: first `approved_at:` line, take
+  # everything after the FIRST colon-space, strip optional `# comment`,
+  # strip surrounding ASCII quotes, then strip leading/trailing whitespace.
+  # Compare to known "not approved" sentinels.
+  approved_raw=$(sed -n 's/^approved_at:[[:space:]]*//p' "$plan_file" | head -1)
+  approved_clean=$(printf '%s' "$approved_raw" | sed -E 's/[[:space:]]*#.*$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/; s/^[[:space:]]+//; s/[[:space:]]+$//')
+  case "$approved_clean" in
+    ""|null|"~")
+      log "approved_at not set in $plan_file (got '$approved_raw') — skipping (waiting for user)"
+      exit 0
+      ;;
+  esac
   "$KB_HUB/bin/kb-orchestrator-cycle" plan --approved-plan "$plan_file"
   rc=$?
+  # cmd_plan rc=5 = no approved_at; treat as clean skip (per launcher
+  # contract: "no plan, exit 0 so LaunchAgent doesn't keep retrying").
+  if [[ $rc -eq 5 ]]; then
+    log "plan completed rc=5 (approved_at unset on dispatch) — clean skip"
+    exit 0
+  fi
   log "plan completed rc=$rc"
   exit "$rc"
 else

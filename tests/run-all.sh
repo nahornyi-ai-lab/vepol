@@ -64,6 +64,10 @@ echo "=== Phase 5 carried-item plan dispatch (F1-F4) ==="
 python3 cycle-plan/fixtures.py > /dev/null && pass "cycle-plan/fixtures.py" || { fail "cycle-plan"; exit 1; }
 
 echo
+echo "=== Daily-plan generator v0.1 (E2E-1..E2E-15) ==="
+python3 daily-plan-gen/fixtures.py > /dev/null && pass "daily-plan-gen/fixtures.py" || { fail "daily-plan-gen"; exit 1; }
+
+echo
 echo "=== Phase 6 bootstrap acceptance (synthetic 3-project end-to-end) ==="
 python3 bootstrap/synthetic.py > /dev/null && pass "bootstrap/synthetic.py" || { fail "bootstrap"; exit 1; }
 

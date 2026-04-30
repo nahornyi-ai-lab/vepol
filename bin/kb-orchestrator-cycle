@@ -50,6 +50,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -697,6 +698,16 @@ def cmd_retro(args) -> int:
             fh.write("\n" + summary_section + "\n")
         say(f"appended cycle summary to {daily_path}")
 
+    # Generate tomorrow's draft plan (v0.1, mechanical only).
+    # Spec: concepts/daily-plan-generator-v0_1.md.
+    # Failures here log a warning but never fail the retro — degraded
+    # outcome is "no plan tomorrow", same as the pre-fix baseline.
+    if not args.dry_run and not args.skip_plan_gen:
+        try:
+            _generate_tomorrow_plan(date)
+        except Exception as exc:
+            warn(f"daily-plan generation failed (non-fatal): {exc!r}")
+
     # Post-cycle cleanup hook (incident-2026-04-25 lesson):
     # each parallel codex spawn loads its own copy of the telegram channel
     # MCP plugin and doesn't always release it on exit. Across 14 spawns
@@ -731,6 +742,364 @@ def _format_cycle_summary(summary: dict) -> str:
         if slugs:
             lines.append(f"- **{status}** ({len(slugs)}): {', '.join(sorted(slugs))}")
     return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Daily-plan generator v0.1
+# Spec: concepts/daily-plan-generator-v0_1.md
+# ──────────────────────────────────────────────────────────────────────────
+
+DAILY_PLAN_DIR = HUB / "daily-plan"
+DAILY_PLAN_DEFAULT_LIMIT = 15
+_PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
+_PLACEHOLDER_BODY_RE = re.compile(
+    r"^\s*(пример|example|todo|tbd|placeholder|пусто|sample)\b",
+    re.IGNORECASE,
+)
+
+
+def _collect_open_backlog_items() -> list[dict]:
+    """Walk hub + projects/* backlogs. Return list of dicts:
+        {slug, lineno, body, priority, opened, plan_item_id, body_hash}
+    Only [ ] open items, placeholders filtered out.
+
+    `body_hash` is the collect-time hash, passed to `kb-backlog stamp` for
+    drift detection (CR-Codex-Layer2-B3).
+    """
+    sys.path.insert(0, str(_BIN_DIR))
+    from _kb_backlog import parsing as _parsing  # noqa: E402
+    from _kb_backlog import ops as _ops  # noqa: E402
+
+    items: list[dict] = []
+    today = dt.date.today()
+
+    def _add_from(slug: str, path: pathlib.Path) -> None:
+        if not path.is_file():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            warn(f"read failed {path}: {exc!r}")
+            return
+        for ln, parsed in _parsing.parse_lines(text):
+            if parsed is None:
+                continue
+            if parsed.status != "open":
+                continue
+            # `parsed.title` includes any segments that don't match `key:`
+            # syntax (e.g. `— opened 2026-04-30 by self`). Extract the
+            # leading user-authored description: everything before the
+            # FIRST `— opened ` (or `— context: ` if older format) marker.
+            full_title = parsed.title.strip()
+            split_m = re.search(r"\s+—\s+(opened\s+\d|context:|due:)", full_title)
+            description = full_title[:split_m.start()].strip() if split_m else full_title
+            # Placeholder filter on the clean description
+            if len(description) < 4:
+                continue
+            if _PLACEHOLDER_BODY_RE.match(description):
+                continue
+            # Pull opened-date from the dedicated `opened` field if present,
+            # else parse it out of the trailing `— opened YYYY-MM-DD …` text.
+            opened_date = today
+            opened_field = parsed.get("opened")
+            if opened_field:
+                m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})", opened_field)
+                if m:
+                    try:
+                        opened_date = dt.date.fromisoformat(m.group(1))
+                    except ValueError:
+                        pass
+            else:
+                m = re.search(r"opened\s+(\d{4}-\d{2}-\d{2})", full_title)
+                if m:
+                    try:
+                        opened_date = dt.date.fromisoformat(m.group(1))
+                    except ValueError:
+                        pass
+            priority = (parsed.get("priority") or "").strip().upper() or None
+            items.append({
+                "slug": slug,
+                "lineno": ln,
+                "body": description,
+                "priority": priority,
+                "priority_rank": _PRIORITY_RANK.get(priority, 2),
+                "opened": opened_date,
+                "plan_item_id": parsed.get("plan_item_id"),
+                "body_hash": _ops.kb_backlog_line_body_hash(parsed),
+            })
+
+    _add_from("hub", HUB / "backlog.md")
+    proj_dir = HUB / "projects"
+    if proj_dir.exists():
+        for link in sorted(proj_dir.iterdir()):
+            slug = link.name
+            target = link.resolve() if link.is_symlink() else link
+            _add_from(slug, target / "backlog.md")
+    return items
+
+
+def _stamp_missing_plan_item_ids(items: list[dict],
+                                  *, dry_run: bool = False,
+                                  lock_timeout: float = 30.0) -> list[dict]:
+    """For each item without plan_item_id, generate a UUID and stamp via
+    `kb-backlog stamp`. Mutates each dict in-place to set plan_item_id.
+
+    Items that fail to stamp (lock-busy, line drift, cross-slug dup) are
+    EXCLUDED from the returned list. The original input list is left intact.
+
+    dry_run=True → assigns UUIDs in memory, does NOT call kb-backlog.
+    """
+    out: list[dict] = []
+    for item in items:
+        if item.get("plan_item_id"):
+            out.append(item)
+            continue
+        new_pid = str(uuid.uuid4())
+        if dry_run:
+            item["plan_item_id"] = new_pid
+            out.append(item)
+            continue
+        cmd_args = [str(KB_BACKLOG), "stamp", item["slug"],
+                    "--line", str(item["lineno"]),
+                    "--plan-item-id", new_pid,
+                    "--by", "hub",
+                    "--lock-timeout", str(lock_timeout),
+                    "--json"]
+        if item.get("body_hash"):
+            cmd_args.extend(["--expected-body-hash", item["body_hash"]])
+        proc = subprocess.run(
+            cmd_args, capture_output=True, text=True,
+            env={**os.environ, "KB_HUB": str(HUB)},
+        )
+        # Parse JSON FIRST: many refusal statuses (drift=23, duplicate=6,
+        # invalid-uuid=1) are non-zero exits but still emit valid JSON we
+        # need to interpret. Generic-rc handling only catches the truly
+        # broken cases (subprocess crash, kb-backlog hang).
+        res: Optional[dict] = None
+        if proc.stdout.strip():
+            try:
+                res = json.loads(proc.stdout)
+            except Exception:
+                pass
+        if res is None:
+            warn(f"stamp slug={item['slug']} line={item['lineno']} returned no JSON "
+                 f"(rc={proc.returncode}, stderr={proc.stderr.strip()[:200]})")
+            continue
+        status = res.get("status")
+        if status == "stamped":
+            item["plan_item_id"] = new_pid
+            out.append(item)
+        elif status == "already-stamped":
+            # Lost a race or scan was stale; preserve the existing pid.
+            item["plan_item_id"] = res.get("plan_item_id") or new_pid
+            out.append(item)
+        elif status == "drift":
+            # Another writer modified the line between collect and lock.
+            # Expected outcome — exclude from this plan; next retro will see
+            # the new content and either stamp it or skip per filters.
+            warn(f"stamp drift slug={item['slug']} line={item['lineno']} — "
+                 "line content changed between collect and lock; excluding from plan")
+        elif status in ("duplicate-same-slug", "duplicate-cross-slug"):
+            warn(f"stamp pid-collision slug={item['slug']} line={item['lineno']} "
+                 f"({status}); excluding from plan")
+        elif status in ("not-open", "no-such-line", "invalid-uuid"):
+            warn(f"stamp refused slug={item['slug']} line={item['lineno']} "
+                 f"status={status}; excluding from plan")
+        else:
+            warn(f"stamp slug={item['slug']} line={item['lineno']} "
+                 f"unexpected status={status} (rc={proc.returncode}); excluding from plan")
+    return out
+
+
+def _detect_cross_slug_duplicate_pids(items: list[dict]) -> set[str]:
+    """Return the set of plan_item_ids that appear in MORE THAN ONE slug
+    among `items`. Such items are excluded from the plan to keep dispatch
+    deterministic (cmd_plan F4 would otherwise abort).
+    """
+    by_pid: dict[str, set[str]] = {}
+    for it in items:
+        pid = it.get("plan_item_id")
+        if not pid:
+            continue
+        by_pid.setdefault(pid, set()).add(it["slug"])
+    return {pid for pid, slugs in by_pid.items() if len(slugs) > 1}
+
+
+def _render_plan(target_date: dt.date, items: list[dict],
+                 *, low_confidence: bool, generated_at_iso: str) -> str:
+    """Render the daily-plan/<date>.md file body.
+
+    The output includes a `generated_content_hash:` placeholder that is
+    filled in at the end so the file can self-detect later edits. Caller
+    workflow is: render → compute hash on canonical form → splice hash
+    in. We do that here so the returned string is the final file content.
+    """
+    body_lines = [
+        f"# Daily plan — {target_date.isoformat()}",
+        "",
+        "generated_by: kb-orchestrator-cycle retro",
+        f"generated_at: {generated_at_iso}",
+        f"{_PLAN_CONTENT_HASH_FIELD}: __PLACEHOLDER__",
+        "approved_at: null",
+        "",
+        "<!-- Set approved_at to ISO datetime (e.g. 2026-04-30T07:32:00) to enable 07:30 dispatch. -->",
+        "<!-- Items pre-populated from open backlog by priority + age. Edit/reorder freely. -->",
+        "<!-- generated_content_hash above tracks the un-edited generated state; if you edit, retro will backup before regenerating. -->",
+    ]
+    if low_confidence:
+        body_lines.append(
+            "<!-- WARN: most items lack explicit `priority:` field; "
+            "treat as P2-by-default candidates, not high-confidence focus. -->"
+        )
+    body_lines.append("")
+    if not items:
+        body_lines.append("<!-- No open backlog items at retro time. -->")
+        body_lines.append("")
+    else:
+        for it in items:
+            body = it["body"]
+            # Trim very long bodies for plan readability — full text remains
+            # in the source backlog row, plan_item_id joins them.
+            if len(body) > 240:
+                body = body[:237].rstrip() + "…"
+            body_lines.append(
+                f"- [ ] ({it['slug']}) {body} — plan_item_id: {it['plan_item_id']}"
+            )
+    rendered = "\n".join(body_lines) + "\n"
+    # Compute the real hash on the canonical form (placeholder line excluded
+    # already by _plan_canonical_for_hashing) and splice it in.
+    real_hash = _plan_content_hash(rendered)
+    rendered = rendered.replace(
+        f"{_PLAN_CONTENT_HASH_FIELD}: __PLACEHOLDER__",
+        f"{_PLAN_CONTENT_HASH_FIELD}: {real_hash}",
+        1,
+    )
+    return rendered
+
+
+_PLAN_CONTENT_HASH_FIELD = "generated_content_hash"
+
+
+def _plan_canonical_for_hashing(text: str) -> str:
+    """Return canonical text of a plan file for content-equality comparison.
+
+    Excludes the volatile `generated_at:` line and the
+    `generated_content_hash:` line itself (chicken-and-egg).
+    """
+    out_lines = []
+    for line in text.splitlines():
+        if re.match(r"^generated_at:\s*", line):
+            continue
+        if re.match(rf"^{_PLAN_CONTENT_HASH_FIELD}:\s*", line):
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _plan_content_hash(text: str) -> str:
+    canonical = _plan_canonical_for_hashing(text)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _existing_plan_status(plan_path: pathlib.Path) -> tuple[str, str, str]:
+    """Inspect existing plan file. Returns (kind, approved_at_value, observed_hash).
+
+    kind ∈ {missing, generated-unapproved-clean, approved, user-edited}.
+
+    'generated-unapproved-clean' = file we wrote, no edits since (its
+    embedded `generated_content_hash:` matches a fresh recompute).
+    'user-edited' = either we never wrote it, OR our hash field is missing,
+    OR the embedded hash no longer matches the actual content.
+    """
+    if not plan_path.is_file():
+        return ("missing", "", "")
+    text = plan_path.read_text(encoding="utf-8")
+    m_appr = re.search(r"^approved_at:\s*([^\n]+)$", text, re.M)
+    approved = m_appr.group(1).strip() if m_appr else ""
+    if approved and approved not in ("null", "~", "", '""', "''"):
+        return ("approved", approved, "")
+    # Detect user-edits via embedded content hash.
+    m_hash = re.search(rf"^{_PLAN_CONTENT_HASH_FIELD}:\s*([0-9a-f]+)\s*$", text, re.M)
+    if not m_hash:
+        # No hash → either user-authored or pre-hash version. Treat as user-edited
+        # to be safe.
+        return ("user-edited", approved, "")
+    embedded_hash = m_hash.group(1).strip()
+    actual_hash = _plan_content_hash(text)
+    if embedded_hash != actual_hash:
+        return ("user-edited", approved, embedded_hash)
+    return ("generated-unapproved-clean", approved, embedded_hash)
+
+
+def _generate_tomorrow_plan(date_str_today: str, *, dry_run: bool = False) -> Optional[pathlib.Path]:
+    """Generate ~/knowledge/daily-plan/<tomorrow>.md from current open backlog.
+
+    Returns the plan path, or None if generation skipped (already approved).
+
+    Idempotent on stamping (re-running re-uses pre-stamped pids).
+    """
+    today = dt.date.fromisoformat(date_str_today)
+    tomorrow = today + dt.timedelta(days=1)
+    DAILY_PLAN_DIR.mkdir(parents=True, exist_ok=True)
+    plan_path = DAILY_PLAN_DIR / f"{tomorrow.isoformat()}.md"
+
+    # Pre-write guards
+    kind, approved_val, _existing_hash = _existing_plan_status(plan_path)
+    if kind == "approved":
+        warn(f"daily-plan {plan_path} already approved (approved_at={approved_val!r}); refusing to overwrite")
+        return None
+    if kind == "user-edited" and not dry_run:
+        ts = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+        backup = plan_path.with_suffix(f".md.user-draft.{ts}")
+        try:
+            backup.write_text(plan_path.read_text(encoding="utf-8"), encoding="utf-8")
+            say(f"backed up user-edited plan → {backup}")
+        except Exception as exc:
+            # CR-Codex-Layer2-B2: backup failure must abort generation.
+            # Otherwise we'd overwrite the user's edits silently.
+            warn(f"backup of user-edited plan FAILED → aborting generation to preserve user work: {exc!r}")
+            return None
+
+    # Walk → filter → stamp → de-dup → sort → cap → render → write
+    raw_items = _collect_open_backlog_items()
+    stamped = _stamp_missing_plan_item_ids(raw_items, dry_run=dry_run)
+
+    # Cross-slug duplicate filter
+    dup_pids = _detect_cross_slug_duplicate_pids(stamped)
+    if dup_pids:
+        warn(f"daily-plan: {len(dup_pids)} pid(s) appear in multiple slugs; excluding from plan: "
+             f"{', '.join(sorted(dup_pids))[:200]}")
+    deduped = [it for it in stamped if it["plan_item_id"] not in dup_pids]
+
+    # Sort: priority_rank ASC, opened_date ASC, then slug for stability
+    deduped.sort(key=lambda it: (it["priority_rank"], it["opened"], it["slug"], it["lineno"]))
+
+    limit_env = os.environ.get("KB_DAILY_PLAN_LIMIT")
+    try:
+        limit = int(limit_env) if limit_env else DAILY_PLAN_DEFAULT_LIMIT
+    except ValueError:
+        warn(f"KB_DAILY_PLAN_LIMIT={limit_env!r} not int; using default {DAILY_PLAN_DEFAULT_LIMIT}")
+        limit = DAILY_PLAN_DEFAULT_LIMIT
+    capped = deduped[:max(0, limit)]
+
+    # Confidence label: <30% with explicit priority?
+    explicit = sum(1 for it in capped if it.get("priority"))
+    low_confidence = (len(capped) > 0) and (explicit / len(capped) < 0.30)
+
+    text = _render_plan(
+        tomorrow, capped,
+        low_confidence=low_confidence,
+        generated_at_iso=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    )
+
+    if dry_run:
+        say(f"daily-plan dry-run: would write {plan_path} ({len(capped)} items)")
+        return plan_path
+
+    plan_path.write_text(text, encoding="utf-8")
+    say(f"daily-plan generated: {plan_path} ({len(capped)} items, "
+        f"{explicit} with explicit priority{', LOW-CONFIDENCE' if low_confidence else ''})")
+    return plan_path
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1191,6 +1560,8 @@ def main() -> int:
                     help="Skip the inline kb-retro at hub level (testing)")
     pr.add_argument("--skip-post-cleanup", action="store_true",
                     help="Skip kb-codex-cleanup at end of cycle (testing)")
+    pr.add_argument("--skip-plan-gen", action="store_true",
+                    help="Skip generating daily-plan/<tomorrow>.md (testing)")
 
     pp = sub.add_parser("plan", help="Morning top-down decompose (Phase 5)")
     pp.add_argument("--approved-plan", required=True,
@@ -1199,11 +1570,17 @@ def main() -> int:
     pp.add_argument("--skip-registry-check", action="store_true",
                     help="Skip pre-flight kb-rebuild-registry check (testing)")
 
+    pg = sub.add_parser("gen-plan",
+                        help="Generate daily-plan/<tomorrow>.md from current backlog (no retro)")
+    pg.add_argument("--date", help="Treat this ISO date as 'today'; plan is written for tomorrow (default: real today)")
+    pg.add_argument("--dry-run", action="store_true",
+                    help="Compute the plan but do not stamp backlog or write the file")
+
     args = p.parse_args()
 
-    # Acquire global cycle lock for both retro and plan (single-writer
+    # Acquire global cycle lock for retro/plan/gen-plan (single-writer
     # invariant on the .orchestrator/ directory and per-slug backlog mutations).
-    if args.cmd in ("retro", "plan"):
+    if args.cmd in ("retro", "plan", "gen-plan"):
         CYCLE_LOCK.parent.mkdir(parents=True, exist_ok=True)
         cycle_lock_fh = open(CYCLE_LOCK, "w")
         try:
@@ -1213,7 +1590,12 @@ def main() -> int:
         try:
             if args.cmd == "retro":
                 return cmd_retro(args)
-            return cmd_plan(args)
+            if args.cmd == "plan":
+                return cmd_plan(args)
+            # gen-plan
+            today = args.date or dt.date.today().isoformat()
+            path = _generate_tomorrow_plan(today, dry_run=bool(args.dry_run))
+            return 0 if path is not None else 5
         finally:
             fcntl.flock(cycle_lock_fh, fcntl.LOCK_UN)
             cycle_lock_fh.close()
