@@ -245,3 +245,149 @@ def search(query: str) -> list[dict]:
                     "draft": post.get("draft", False),
                 })
     return results
+
+
+def list_drafts() -> list[dict]:
+    """Return all draft cards. Sorted: drafts WITH possible_duplicate_of
+    first (more important to review), then by last_seen ASC.
+    """
+    results = []
+    for path in sorted(PEOPLE_DIR.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        post = load(path)
+        if post is None or not post.get("draft", False):
+            continue
+        results.append({
+            "slug": post.get("slug", path.stem),
+            "name": post.get("name", ""),
+            "email": post.get("email", ""),
+            "possible_duplicate_of": post.get("possible_duplicate_of", ""),
+            "first_met": post.get("first_met", ""),
+            "last_seen": post.get("last_seen", ""),
+        })
+    # Drafts with a duplicate hint sort first; ties by last_seen.
+    results.sort(key=lambda r: (not bool(r["possible_duplicate_of"]), r["last_seen"]))
+    return results
+
+
+def promote_draft(slug: str) -> bool:
+    """Clear `draft: true` on a card. Returns False if card not found."""
+    post = load(slug)
+    if post is None:
+        return False
+    post["draft"] = False
+    if "possible_duplicate_of" in post.metadata:
+        del post.metadata["possible_duplicate_of"]
+    save(post, PEOPLE_DIR / f"{slug}.md")
+    return True
+
+
+def delete(slug: str) -> bool:
+    """Delete a card from disk + remove its index entry. Returns True on
+    success, False if not found.
+
+    Sightings on the card go away with the file. The matching index
+    entry (UUID → slug + email) is removed so search/lookup don't
+    return stale results.
+    """
+    path = PEOPLE_DIR / f"{slug}.md"
+    if not path.exists():
+        return False
+    post = load(slug)
+    if post is not None:
+        # Lazy-import index to avoid circular dependency.
+        from . import index as _idx
+        uid = post.get("id")
+        if uid:
+            _idx.remove(uid)
+    path.unlink()
+    return True
+
+
+def merge_into(src_slug: str, dst_slug: str) -> bool:
+    """Merge a draft (src) into an existing card (dst).
+
+    Strategy: do ALL dst mutations in-memory, save once at the end.
+    Do NOT call upsert_sighting on dst here — that would write to
+    disk before our final save(dst), which would then clobber the
+    appended rows on save.
+
+      1. Verify both cards exist; if dst missing, return False.
+      2. Parse src's interactions table; append (dedup-by-row) into
+         dst's in-memory body.
+      3. Carry forward scalar fields from src ONLY where dst is empty.
+      4. Add src.email to dst.aliases if dst.email differs.
+      5. Save dst once. Delete src (file + index entry).
+
+    Returns False if dst doesn't exist.
+    """
+    dst_path = PEOPLE_DIR / f"{dst_slug}.md"
+    if not dst_path.exists():
+        return False
+
+    src = load(src_slug)
+    dst = load(dst_slug)
+    if src is None or dst is None:
+        return False
+
+    # 1. Carry sightings src → dst (in-memory — no disk write yet)
+    src_body = src.content
+    new_rows: list[str] = []
+    if SIGHTINGS_BEGIN in src_body:
+        try:
+            block_start = src_body.index(SIGHTINGS_BEGIN) + len(SIGHTINGS_BEGIN)
+            block_end = src_body.index(SIGHTINGS_END)
+            block = src_body[block_start:block_end]
+        except ValueError:
+            block = ""
+        for line in block.splitlines():
+            line = line.strip()
+            if not line.startswith("|") or "Date" in line or "---" in line:
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 3:
+                safe_d = _escape_markdown_table_cell(cells[0])
+                safe_s = _escape_markdown_table_cell(cells[1])
+                safe_summ = _escape_markdown_table_cell(cells[2])
+                new_rows.append(f"| {safe_d} | {safe_s} | {safe_summ} |")
+
+    if new_rows:
+        dst_body = dst.content
+        # Dedup against rows already in dst.
+        unique = [r for r in new_rows if r not in dst_body]
+        if unique:
+            insertion = "\n".join(unique) + "\n"
+            if SIGHTINGS_BEGIN not in dst_body:
+                dst_body += (f"\n## Interactions\n{SIGHTINGS_BEGIN}\n"
+                             f"{SIGHTINGS_HEADER}\n{insertion}{SIGHTINGS_END}\n")
+            else:
+                dst_body = dst_body.replace(
+                    SIGHTINGS_END, f"{insertion}{SIGHTINGS_END}",
+                )
+            dst.content = dst_body
+            # last_seen → max of (existing, src.last_seen)
+            src_last = src.get("last_seen", "")
+            dst_last = dst.get("last_seen", "")
+            if src_last and src_last > dst_last:
+                dst["last_seen"] = src_last
+
+    # 2. Fill empty dst scalar fields from src
+    for k in ("company", "role", "phone", "telegram", "linkedin",
+              "first_met_context", "first_met"):
+        if not dst.get(k) and src.get(k):
+            dst[k] = src[k]
+
+    # 3. Alias merge — keep dst.email, append src.email to aliases
+    src_email = src.get("email", "")
+    if src_email and src_email != dst.get("email", ""):
+        aliases = dst.get("aliases", []) or []
+        if src_email not in aliases:
+            aliases.append(src_email)
+        dst["aliases"] = aliases
+
+    save(dst, dst_path)
+
+    # 4. Delete src (file + index entry)
+    delete(src_slug)
+    return True

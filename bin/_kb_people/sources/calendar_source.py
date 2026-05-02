@@ -39,6 +39,36 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # aren't people. Pattern lifted from the legacy implementation.
 _RESOURCE_CAL_RE = re.compile(r"resource\.calendar\.google\.com$")
 
+# Bot / system / role-based local parts that almost never represent
+# real people. Calendar attendees with these local parts (with or
+# without a digit suffix) are dropped during sanitize so they never
+# become contact cards. Matches local-part case-insensitively at the
+# start of the email address.
+#
+# Why this set: real-run audit on 2026-05-02 surfaced
+# meet1@zezman.com.ua, schedule@mint.greenhouse.io, assistant@zezman.ua,
+# and r@sapienta.cloud — all created as drafts; none represented a
+# human Vadim could ever follow up with. Filtering these at sanitize
+# is preferable to relying on dedup's draft flag, because drafts
+# accumulate and clutter `kb-contact due` / search.
+#
+# False-positive risk: someone whose email genuinely is e.g.
+# "info@person-domain.com" gets dropped. We accept this — corner-case
+# users can still be added manually via `kb-contact add`. The cost
+# of one false negative is low (one missing card to add by hand);
+# the cost of false positives accumulating is constant noise.
+_BOT_LOCAL_PART_RE = re.compile(
+    r"^(meet|schedule|scheduling|booking|appointments?|"
+    r"assistant|bot|robot|automation|automated|"
+    r"noreply|no-reply|donotreply|do-not-reply|"
+    r"notify|notifications?|alerts?|reminder|reminders|"
+    r"info|hello|hi|admin|support|help|contact|"
+    r"team|sales|billing|invoice|invoices|"
+    r"calendar|cal|notify-cal)"
+    r"[\d_-]*@",
+    re.IGNORECASE,
+)
+
 _NAME_CAP = 200
 _CONTEXT_CAP = 500
 
@@ -130,6 +160,8 @@ class CalendarSource(ContactSource):
                 continue
             if _RESOURCE_CAL_RE.search(email):
                 continue  # room booking, not a person
+            if _BOT_LOCAL_PART_RE.match(email):
+                continue  # role/bot/system mailbox, not a person
             date_raw = raw.get("date")
             if not isinstance(date_raw, str):
                 continue

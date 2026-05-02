@@ -3,8 +3,18 @@
 from . import index
 
 
-SCORE_AUTO_MERGE = 0.90
-SCORE_DRAFT_THRESHOLD = 0.50
+# Jaro-Winkler thresholds tuned 2026-05-02 against real first-import
+# data (25 calendar attendees). Old SCORE_DRAFT_THRESHOLD=0.50 produced
+# 21/25 false-positive drafts — names like "corina stefanescu" matched
+# "azingis" at ~0.5, which is meaningless at that distance. Raising
+# the floor to 0.85 keeps near-duplicates (e.g. "Alice" vs "Alice C")
+# while letting unrelated names pass to clean auto-create.
+SCORE_AUTO_MERGE = 0.92
+SCORE_DRAFT_THRESHOLD = 0.85
+# Skip fuzzy matching entirely when the name is too short to carry
+# meaningful signal — Jaro-Winkler treats 1-2 char names as similar
+# to almost anything.
+MIN_NAME_LEN_FOR_FUZZY = 4
 
 
 def find_existing(name: str, email: str = "", telegram: str = "") -> tuple[str | None, str]:
@@ -18,8 +28,9 @@ def find_existing(name: str, email: str = "", telegram: str = "") -> tuple[str |
         if uid:
             return uid, "email-match"
 
-    # 2. Jaro-Winkler name fuzzy
-    if name:
+    # 2. Jaro-Winkler name fuzzy — only when the name is long enough
+    # to give the metric meaningful signal.
+    if name and len(name.strip()) >= MIN_NAME_LEN_FOR_FUZZY:
         matches = index.lookup_by_name(name)
         if matches:
             top_uid, top_score = matches[0]

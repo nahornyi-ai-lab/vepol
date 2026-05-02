@@ -75,5 +75,15 @@ def get_slug(uid: str) -> str | None:
     return data.get(uid, {}).get("slug")
 
 
+def remove(uid: str) -> bool:
+    """Remove a UUID's entry from _index.yaml. Returns True if removed."""
+    data = _load()
+    if uid not in data:
+        return False
+    del data[uid]
+    _save(data)
+    return True
+
+
 def new_uuid() -> str:
     return str(uuid.uuid4())

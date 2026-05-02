@@ -202,5 +202,110 @@ def show(slug):
     click.echo(post.content)
 
 
+@cli.command(name="review-drafts")
+@click.option("--limit", default=0, show_default=False, help="Max drafts to review this run (0 = all)")
+@click.option("--auto-confirm-non-dup", is_flag=True,
+              help="Auto-promote drafts with NO possible_duplicate_of (batch mode).")
+def review_drafts(limit, auto_confirm_non_dup):
+    """Walk all draft cards and let you confirm / merge / delete each.
+
+    Default flow per draft (interactive):
+      [c]onfirm  — promote to non-draft (clear `draft: true`).
+      [m]erge    — merge into possible_duplicate_of (delete this card,
+                   keep the other; sightings on the deleted card are
+                   transferred to the merge target).
+      [d]elete   — drop the card (e.g. spam / wrong-source).
+      [s]kip     — leave as draft, decide later.
+      [q]uit     — stop reviewing now.
+
+    --auto-confirm-non-dup is non-interactive batch mode for the
+    common case where many drafts have no possible_duplicate_of (false
+    positives from over-eager fuzzy match). Use with care; review by
+    eye still recommended.
+    """
+    drafts = card.list_drafts()
+    if not drafts:
+        click.echo("No drafts to review. ✨")
+        return
+
+    if limit > 0:
+        drafts = drafts[:limit]
+
+    promoted = merged = deleted = skipped = 0
+
+    for i, draft in enumerate(drafts, 1):
+        slug = draft["slug"]
+        post = card.load(slug)
+        if post is None:
+            continue
+        fm = post.metadata
+        dup_of = fm.get("possible_duplicate_of", "")
+
+        if auto_confirm_non_dup and not dup_of:
+            card.promote_draft(slug)
+            promoted += 1
+            click.echo(f"  [{i}/{len(drafts)}] auto-confirmed: {fm.get('name', slug)}")
+            continue
+
+        click.echo(f"\n{'='*60}")
+        click.echo(f"  [{i}/{len(drafts)}] {fm.get('name', slug)}  ({slug})")
+        click.echo(f"{'='*60}")
+        if fm.get("email"):
+            click.echo(f"  email: {fm['email']}")
+        if fm.get("first_met_context"):
+            click.echo(f"  met:   {fm.get('first_met', '')} — {fm['first_met_context']}")
+        if fm.get("last_seen"):
+            click.echo(f"  seen:  {fm['last_seen']}")
+        if dup_of:
+            click.echo(f"  ⚠  possible duplicate of: {dup_of}")
+
+        prompt = "[c]onfirm / [m]erge / [d]elete / [s]kip / [q]uit" if dup_of \
+                 else "[c]onfirm / [d]elete / [s]kip / [q]uit"
+
+        while True:
+            choice = click.prompt(f"  {prompt}", default="s", show_default=False).strip().lower()[:1]
+            if choice == "c":
+                card.promote_draft(slug)
+                promoted += 1
+                click.echo("  → confirmed.")
+                break
+            if choice == "m":
+                if not dup_of:
+                    click.echo("  no possible_duplicate_of — can't merge")
+                    continue
+                if card.merge_into(slug, dup_of):
+                    merged += 1
+                    click.echo(f"  → merged into {dup_of}.")
+                else:
+                    click.echo(f"  ✗ merge target {dup_of!r} not found.")
+                break
+            if choice == "d":
+                card.delete(slug)
+                deleted += 1
+                click.echo("  → deleted.")
+                break
+            if choice == "s":
+                skipped += 1
+                click.echo("  → skipped.")
+                break
+            if choice == "q":
+                click.echo("\nStopped. Remaining drafts left untouched.")
+                _summary(promoted, merged, deleted, skipped, len(drafts) - i)
+                return
+            click.echo(f"  unknown choice {choice!r}")
+
+    _summary(promoted, merged, deleted, skipped, 0)
+
+
+def _summary(promoted, merged, deleted, skipped, remaining):
+    click.echo(f"\n{'='*60}")
+    parts = [f"{promoted} confirmed", f"{merged} merged",
+             f"{deleted} deleted", f"{skipped} skipped"]
+    if remaining:
+        parts.append(f"{remaining} not reached")
+    click.echo(f"Review session: {', '.join(parts)}")
+    click.echo(f"{'='*60}")
+
+
 if __name__ == "__main__":
     cli()

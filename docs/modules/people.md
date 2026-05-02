@@ -189,12 +189,14 @@ Identity is the hard problem. Vepol People resolves it through layers:
 - **Email-first deterministic match** — same email = same person.
 - **Name fuzzy match** (Jaro-Winkler distance) — cards without an
   email match are compared by name against existing cards using a
-  simple, inspectable string distance. A score above 0.90 is treated
-  as the same person; between 0.50 and 0.90 the new card is kept as
+  simple, inspectable string distance. A score ≥ 0.92 is treated
+  as the same person; between 0.85 and 0.92 the new card is kept as
   a draft with `possible_duplicate_of: <other>` so a human (or an
-  agent under explicit policy) can confirm the merge. Telegram and
-  other soft signals are stored on the card but not yet used as
-  match tiers; that's planned but not in v1.
+  agent under explicit policy) can confirm the merge. Names shorter
+  than 4 characters are skipped from fuzzy matching entirely — they
+  carry too little signal. Telegram and other soft signals are stored
+  on the card but not yet used as match tiers; that's planned but not
+  in v1.
 
 Dedup is conservative on purpose: a wrong merge is harder to undo
 than a duplicate.
