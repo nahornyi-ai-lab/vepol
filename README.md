@@ -66,6 +66,28 @@ that infrastructure.
 
 ![Autonomy growth — Day 1 to Month 6](docs/visuals/vepol-autonomy-growth.png)
 
+## What's shipped in v0.1.0
+
+The behaviour above is delivered through a small set of modules. Each
+ships a CLI, a markdown schema agents read natively, and at minimum
+unit tests. The list grows release by release; see
+[`CHANGELOG.md`](CHANGELOG.md) for per-release history.
+
+- **People** — durable markdown card per person Vepol encounters,
+  with `kb-contact` (add / log / remind / search / due / show /
+  review-drafts), Google Calendar attendee ingestion through your
+  configured MCP host, and daily follow-up reminders.
+  [`docs/modules/people.md`](docs/modules/people.md)
+- **Daily plan** — `kb-orchestrator-cycle gen-plan` writes a draft
+  plan for tomorrow from your open backlog at the end of evening
+  retro. You confirm overnight; the morning dispatch turns the
+  approved plan into per-project work.
+
+The methodology that holds these modules together (the markdown
+substrate, the orchestrator, the cross-agent review gate, the
+MCP-first source-ingestion principle) is documented under
+[`docs/methodology/`](docs/methodology/).
+
 ## What makes it different — visible discipline
 
 Most AI assistants are black boxes: model decides, output appears, you can't
