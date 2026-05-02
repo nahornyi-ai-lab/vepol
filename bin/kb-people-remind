@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""kb-people-remind — check next_touch_due and send reminders via Vepol channel.
+
+Usage:
+  kb-people-remind [--horizon 7]
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import click
+from _kb_people import card
+from _kb_people.channel import send
+
+
+@click.command()
+@click.option("--horizon", default=7, show_default=True, help="Days ahead to look")
+@click.option("--dry-run", is_flag=True, help="Print without sending")
+def main(horizon, dry_run):
+    """Send contact follow-up reminders via Vepol channel."""
+    due_contacts = card.list_due(horizon)
+
+    if not due_contacts:
+        return
+
+    lines = [f"👤 Follow-up reminders ({len(due_contacts)} contact{'s' if len(due_contacts) > 1 else ''}):\n"]
+    for c in due_contacts:
+        tags = f"  [{', '.join(c['tags'])}]" if c.get("tags") else ""
+        lines.append(f"  • {c['name']} — due {c['due']}{tags}")
+
+    message = "\n".join(lines)
+
+    if dry_run:
+        click.echo(message)
+    else:
+        send("contact-reminder", message)
+
+
+if __name__ == "__main__":
+    main()

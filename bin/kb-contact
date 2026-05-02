@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""kb-contact — Vepol People CLI.
+
+Usage:
+  kb-contact add "Name" [--email x] [--telegram @x] [--met "context"] [--tags a,b] [--draft]
+  kb-contact log <slug> "interaction summary"
+  kb-contact remind <slug> [--in 2w | --date 2026-06-01]
+  kb-contact search <query>
+  kb-contact due [--horizon 7]
+  kb-contact show <slug>
+"""
+
+import sys
+import re
+from datetime import date, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import click
+from _kb_people import card, index, dedup
+
+
+def _parse_duration(s: str) -> date:
+    """Parse '2w', '10d', '3m' into a future date."""
+    m = re.match(r"^(\d+)([dwm])$", s.strip().lower())
+    if not m:
+        raise click.BadParameter(f"Invalid duration '{s}'. Use e.g. 2w, 10d, 3m.")
+    n, unit = int(m.group(1)), m.group(2)
+    today = date.today()
+    if unit == "d":
+        return today + timedelta(days=n)
+    elif unit == "w":
+        return today + timedelta(weeks=n)
+    else:
+        return date(today.year + (today.month + n - 1) // 12,
+                    (today.month + n - 1) % 12 + 1, today.day)
+
+
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--email", default="", help="Email address")
+@click.option("--telegram", default="", help="Telegram handle (@username)")
+@click.option("--met", default="", help="How/where you met (first_met_context)")
+@click.option("--tags", default="", help="Comma-separated tags")
+@click.option("--company", default="", help="Company")
+@click.option("--role", default="", help="Role / title")
+@click.option("--draft", is_flag=True, help="Mark as draft (unreviewed)")
+def add(name, email, telegram, met, tags, company, role, draft):
+    """Add a new contact or update existing."""
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+    result = dedup.resolve(name, email=email, telegram=telegram)
+    action = result["action"]
+
+    if action == "update":
+        uid = result["uid"]
+        slug = index.get_slug(uid)
+        path = card.PEOPLE_DIR / f"{slug}.md"
+        post = card.load(slug)
+        if post:
+            if email:
+                post["email"] = email
+            if telegram:
+                post["telegram"] = telegram
+            if met:
+                post["first_met_context"] = met
+            if company:
+                post["company"] = company
+            if role:
+                post["role"] = role
+            if tag_list:
+                existing = post.get("tags", [])
+                post["tags"] = list(set(existing + tag_list))
+            card.save(post, path)
+            locators = {}
+            if email:
+                locators["email"] = email
+            if telegram:
+                locators["telegram"] = telegram
+            index.register(uid, slug, name, locators)
+            click.echo(f"Updated: people/{slug}.md")
+    else:
+        is_draft = draft or action == "create-draft"
+        dup_of = result.get("possible_duplicate_of", "")
+        path = card.create(
+            name,
+            email=email,
+            telegram=telegram,
+            first_met_context=met,
+            tags=tag_list,
+            company=company,
+            role=role,
+            draft=is_draft,
+            possible_duplicate_of=dup_of,
+        )
+        slug = path.stem
+        post = card.load(slug)
+        uid = post["id"]
+        locators = {}
+        if email:
+            locators["email"] = email
+        if telegram:
+            locators["telegram"] = telegram
+        index.register(uid, slug, name, locators)
+        status = " [DRAFT]" if is_draft else ""
+        dup_note = f" (possible duplicate of {dup_of})" if dup_of else ""
+        click.echo(f"Created{status}: people/{slug}.md{dup_note}")
+
+
+@cli.command()
+@click.argument("slug")
+@click.argument("summary")
+def log(slug, summary):
+    """Log an interaction with a contact."""
+    today = date.today().isoformat()
+    card.upsert_sighting(slug, today, "manual", summary)
+    click.echo(f"Logged interaction for {slug}.")
+
+
+@cli.command()
+@click.argument("slug")
+@click.option("--in", "duration", default="", help="Duration from now, e.g. 2w, 30d")
+@click.option("--date", "due_date", default="", help="Exact date YYYY-MM-DD")
+def remind(slug, duration, due_date):
+    """Set a follow-up reminder for a contact."""
+    if duration:
+        target = _parse_duration(duration).isoformat()
+    elif due_date:
+        target = due_date
+    else:
+        raise click.UsageError("Provide --in or --date.")
+    card.set_remind(slug, target)
+    click.echo(f"Reminder set: {slug} → {target}")
+
+
+@cli.command()
+@click.argument("query")
+def search(query):
+    """Search contacts by name, tag, company, or any text."""
+    results = card.search(query)
+    if not results:
+        click.echo("No matches.")
+        return
+    for r in results:
+        draft_flag = " [draft]" if r.get("draft") else ""
+        tags = ", ".join(r.get("tags", []))
+        company = f" @ {r['company']}" if r.get("company") else ""
+        click.echo(f"  {r['name']}{company}{draft_flag}  [{r['slug']}]  {tags}")
+
+
+@cli.command()
+@click.option("--horizon", default=7, show_default=True, help="Days ahead to look")
+def due(horizon):
+    """List contacts due for follow-up within the next N days."""
+    results = card.list_due(horizon)
+    if not results:
+        click.echo("No contacts due.")
+        return
+    click.echo(f"Contacts due in next {horizon} days:\n")
+    for r in results:
+        tags = ", ".join(r.get("tags", []))
+        click.echo(f"  {r['due']}  {r['name']}  [{r['slug']}]  {tags}")
+
+
+@cli.command()
+@click.argument("slug")
+def show(slug):
+    """Show a contact card."""
+    post = card.load(slug)
+    if post is None:
+        click.echo(f"Contact '{slug}' not found.", err=True)
+        sys.exit(1)
+    fm = post.metadata
+    click.echo(f"\n{'='*50}")
+    click.echo(f"  {fm.get('name', slug)}")
+    if fm.get("company"):
+        click.echo(f"  {fm.get('role', '')} @ {fm['company']}")
+    click.echo(f"{'='*50}")
+    for field in ["email", "telegram", "linkedin", "phone"]:
+        if fm.get(field):
+            click.echo(f"  {field}: {fm[field]}")
+    click.echo()
+    if fm.get("first_met_context"):
+        click.echo(f"  Met: {fm.get('first_met', '')} — {fm['first_met_context']}")
+    if fm.get("last_seen"):
+        click.echo(f"  Last seen: {fm['last_seen']}")
+    if fm.get("next_touch_due"):
+        click.echo(f"  Follow-up due: {fm['next_touch_due']}")
+    if fm.get("tags"):
+        click.echo(f"  Tags: {', '.join(fm['tags'])}")
+    if fm.get("draft"):
+        click.echo(f"\n  ⚠ DRAFT — not yet reviewed")
+    if fm.get("possible_duplicate_of"):
+        click.echo(f"  ⚠ Possible duplicate of: {fm['possible_duplicate_of']}")
+    click.echo()
+    click.echo(post.content)
+
+
+if __name__ == "__main__":
+    cli()

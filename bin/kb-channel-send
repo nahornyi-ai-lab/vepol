@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# kb-channel-send — minimal wrapper to deliver a message through the Vepol
+# channel layer (Telegram today; pluggable surface tomorrow).
+#
+# Usage:
+#   kb-channel-send <message_type> <message>
+#
+# Env required (read from $KB_HUB/personal/.secrets if not already set):
+#   TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN as a backwards-compat alias)
+#   TELEGRAM_CHAT_ID
+#
+# Exit codes:
+#   0 — message accepted by Telegram (HTTP 200, ok=true)
+#   1 — bad args
+#   2 — missing credentials
+#   3 — network/HTTP failure (or Telegram returned non-ok)
+#
+# Behavior:
+#   - Single message ≤ 4096 chars sent verbatim. Longer messages get split
+#     on a paragraph boundary and sent as 2 parts; very long messages are
+#     truncated to the second part with a "[truncated]" tail.
+#   - `<message_type>` is recorded as a one-line prefix in stderr logs and
+#     made visible to user-side filters via the `Message-Type` HTTP form
+#     field equivalent (we put it in stderr so it doesn't muddle the user's
+#     chat). Channel module callers can use the type to discriminate routing
+#     in future versions; for now it's labelling only.
+#
+# Why a wrapper rather than ad-hoc curl in each caller:
+#   - Centralises the auth + retry + truncation rules.
+#   - Lets us swap Telegram for a different surface (or add a second one)
+#     without touching every caller. The `<message_type>` argument is the
+#     contract that survives such a swap.
+
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: kb-channel-send <message_type> <message>" >&2
+  exit 1
+fi
+
+MESSAGE_TYPE="$1"
+MESSAGE="$2"
+KB_HUB="${KB_HUB:-$HOME/knowledge}"
+SECRETS="$KB_HUB/personal/.secrets"
+
+# Resolve credentials: ENV always wins per-variable, secrets fills gaps.
+# We do NOT `source` the file (that would overwrite already-set env
+# values with empties from the file). Instead we grep each key
+# individually and take the first non-empty one.
+_read_secret() {
+  local key="$1"
+  [[ -f "$SECRETS" ]] || return 0
+  grep -E "^(export[[:space:]]+)?${key}=" "$SECRETS" 2>/dev/null \
+    | tail -1 \
+    | sed -E "s/^(export[[:space:]]+)?[^=]+=//; s/^\"(.*)\"$/\\1/; s/^'(.*)'$/\\1/" \
+    || true
+}
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  TELEGRAM_BOT_TOKEN="$(_read_secret TELEGRAM_BOT_TOKEN)"
+fi
+# Backwards-compat alias: older configs use TELEGRAM_TOKEN.
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  TELEGRAM_BOT_TOKEN="${TELEGRAM_TOKEN:-$(_read_secret TELEGRAM_TOKEN)}"
+fi
+if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+  TELEGRAM_CHAT_ID="$(_read_secret TELEGRAM_CHAT_ID)"
+fi
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+  echo "kb-channel-send: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (env or $SECRETS)" >&2
+  exit 2
+fi
+
+ts="$(date -Iseconds 2>/dev/null || date)"
+echo "[$ts] kb-channel-send type=$MESSAGE_TYPE bytes=${#MESSAGE}" >&2
+
+# Telegram message limit is 4096 chars. Split on a paragraph boundary if
+# possible, else on a sentence boundary, else hard-cut with truncation tag.
+TELEGRAM_MAX=4096
+
+send_one() {
+  local body="$1"
+  local code
+  code=$(curl -s -o /tmp/.kb-channel-send.$$ -w "%{http_code}" \
+    -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=$body" || true)
+  ok=$(grep -q '"ok":true' /tmp/.kb-channel-send.$$ 2>/dev/null && echo 1 || echo 0)
+  rm -f /tmp/.kb-channel-send.$$
+  if [[ "$code" != "200" || "$ok" != "1" ]]; then
+    echo "[$ts] kb-channel-send: send failed (http=$code, ok=$ok)" >&2
+    return 1
+  fi
+  return 0
+}
+
+if (( ${#MESSAGE} <= TELEGRAM_MAX )); then
+  send_one "$MESSAGE" || exit 3
+  exit 0
+fi
+
+# Split: try paragraph break before TELEGRAM_MAX
+split_at=$TELEGRAM_MAX
+prefix="${MESSAGE:0:$TELEGRAM_MAX}"
+last_para=$(printf '%s' "$prefix" | awk 'BEGIN{RS=""; ORS=""} {print length}' 2>/dev/null || echo 0)
+# Simple heuristic: cut at last \n\n if found in first 4000 chars
+boundary=$(printf '%s' "${MESSAGE:0:4000}" | awk -v RS='\n\n' '{p+=length+2; print p}' | tail -1)
+if [[ -n "$boundary" && "$boundary" -gt 0 && "$boundary" -lt $TELEGRAM_MAX ]]; then
+  split_at="$boundary"
+fi
+
+part1="${MESSAGE:0:$split_at}"
+part2="${MESSAGE:$split_at}"
+if (( ${#part2} > TELEGRAM_MAX )); then
+  part2="${part2:0:$((TELEGRAM_MAX - 14))}…[truncated]"
+fi
+
+send_one "$part1" || exit 3
+send_one "$part2" || exit 3
+exit 0

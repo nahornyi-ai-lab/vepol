@@ -156,6 +156,29 @@ if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
   warn "    These enable extras (cross-agent review, session auto-capture, etc.)"
   warn "    Install: brew install ${OPTIONAL_MISSING[*]}"
 fi
+
+# Python 3.10+ for People module + future Python-side tooling
+if command -v python3 >/dev/null 2>&1; then
+  PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)' 2>/dev/null || echo 0)
+  if [[ "$PY_OK" != "1" ]]; then
+    warn "  python3 < 3.10 detected — Vepol People module requires 3.10+"
+  fi
+else
+  warn "  python3 not found — Vepol People module needs it"
+fi
+
+# Python deps — checked, NOT installed (per detect-only policy)
+if [[ -f "$VEPOL_DIR/requirements.txt" ]]; then
+  MISSING_PY=()
+  python3 -c "import frontmatter" 2>/dev/null || MISSING_PY+=(python-frontmatter)
+  python3 -c "import click" 2>/dev/null || MISSING_PY+=(click)
+  if [[ ${#MISSING_PY[@]} -gt 0 ]]; then
+    warn "  Python deps missing: ${MISSING_PY[*]}"
+    warn "    Install with: pip3 install -r \"$VEPOL_DIR/requirements.txt\""
+    warn "    (Or in a venv — see requirements.txt for the full list)"
+  fi
+fi
+
 ok "  All required prerequisites present"
 
 # ─────────────────────────────────────────
@@ -178,9 +201,12 @@ for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki; do
   scriptname="$(basename "$script")"
   ln -sf "$script" "$HUB/bin/$scriptname"
 done
-# Internal Python package — symlink directory
+# Internal Python packages — symlink directories
 if [[ -d "$VEPOL_DIR/bin/_kb_backlog" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_backlog" "$HUB/bin/_kb_backlog"
+fi
+if [[ -d "$VEPOL_DIR/bin/_kb_people" ]]; then
+  ln -sfn "$VEPOL_DIR/bin/_kb_people" "$HUB/bin/_kb_people"
 fi
 # Prompt templates
 if [[ -d "$VEPOL_DIR/bin/templates" ]]; then
@@ -313,11 +339,12 @@ echo "  Vepol can run scheduled background tasks via macOS LaunchAgents:"
 echo "    • daily morning brief (sunrise+45min)"
 echo "    • orchestrator tick (every 15 min, light pulse)"
 echo "    • cycle launch (twice a day — brief + retro)"
+echo "    • People follow-up reminders (daily at 9:00)"
 
 if ask "Install scheduled tasks?"; then
   LA_DIR="$HOME_DIR/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
-  for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle; do
+  for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle com.knowledge.people-remind; do
     DEST="$LA_DIR/$name.plist"
     SRC="$VEPOL_DIR/launchd/$name.plist.template"
     if [[ ! -f "$SRC" ]]; then
