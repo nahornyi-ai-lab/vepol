@@ -109,15 +109,52 @@ def save(post: frontmatter.Post, path: Path):
     os.replace(tmp, path)
 
 
+def _escape_markdown_table_cell(text: str) -> str:
+    """Make `text` safe to drop into a single markdown table cell.
+
+    External data (calendar event titles, mail subjects, etc.) can contain
+    pipes, newlines, and HTML-comment markers that would corrupt the
+    interactions table or escape the DERIVED-SIGHTINGS region. We do the
+    escaping here, centrally, so every source is protected regardless of
+    what its sanitizer did or didn't do.
+
+    Transformations:
+    - `\\` → `\\\\` (must be first to avoid double-escaping)
+    - `|`  → `\\|`  (pipe would split the cell)
+    - newline / CR / tab → space (single-line cells)
+    - `<!--` and `-->` → `<! --` and `-- >` (defang HTML comment markers
+      so a row body can never escape the managed region)
+    """
+    if text is None:
+        return ""
+    s = str(text)
+    s = s.replace("\\", "\\\\")
+    s = s.replace("|", "\\|")
+    s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    s = s.replace("<!--", "<! --").replace("-->", "-- >")
+    # Collapse runs of whitespace introduced by newline/tab replacement.
+    while "  " in s:
+        s = s.replace("  ", " ")
+    return s.strip()
+
+
 def upsert_sighting(slug: str, event_date: str, source: str, summary: str):
-    """Append a sighting row to DERIVED-SIGHTINGS block. Idempotent by date+summary."""
+    """Append a sighting row to DERIVED-SIGHTINGS block. Idempotent by date+summary.
+
+    All cell content is markdown-escaped before insertion — see
+    `_escape_markdown_table_cell` for the full set of transformations.
+    Sources should NOT pre-escape; the escape is the canonical authority.
+    """
     path = PEOPLE_DIR / f"{slug}.md"
     if not path.exists():
         return
     post = load(slug)
     body = post.content
 
-    new_row = f"| {event_date} | {source} | {summary} |"
+    safe_date = _escape_markdown_table_cell(event_date)
+    safe_source = _escape_markdown_table_cell(source)
+    safe_summary = _escape_markdown_table_cell(summary)
+    new_row = f"| {safe_date} | {safe_source} | {safe_summary} |"
 
     if SIGHTINGS_BEGIN not in body:
         body += f"\n## Interactions\n{SIGHTINGS_BEGIN}\n{SIGHTINGS_HEADER}\n{new_row}\n{SIGHTINGS_END}\n"

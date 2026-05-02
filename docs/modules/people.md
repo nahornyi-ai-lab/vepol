@@ -273,8 +273,12 @@ Implementation: **shipping** in `bin/_kb_people/`, `bin/kb-contact`,
 `launchd/com.knowledge.people-remind.plist.template`.
 
 Python dependencies (`python-frontmatter`, `click`, `PyYAML`,
-`jellyfish`; plus optional `google-api-python-client` for the
-calendar source) are listed in the project root `requirements.txt`.
+`jellyfish`) are listed in the project root `requirements.txt`.
+
+The calendar source fetches data through the configured MCP host —
+see [MCP-first for external sources](../methodology/mcp-first-sources.md).
+No vendor SDK or OAuth client library is required; the user
+configures Google Calendar access once in their MCP host.
 
 If you find an unfamiliar term in this page (orchestrator, channel,
 cross-agent review), it is documented in the methodology pages at

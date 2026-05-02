@@ -160,37 +160,66 @@ print("T8_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T8: slug collision → UUID-suffix slug" || fail "T8: slug collision"
 
-# T9/T10: calendar source filters self and no-email (unit test with mock)
+# T9: MCP runner strict envelope parse (preamble/trailing/tool-error/empty)
 python3 - << 'PYEOF'
-import sys, os
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path.home() / "knowledge" / "bin"))
+from _kb_mcp.runner import McpHostRunner, McpResponseError, McpToolError
 
-# Simulate the filtering logic directly without real OAuth
-SELF_EMAIL = "me@example.com"
-raw_attendees = [
-    {"email": SELF_EMAIL, "displayName": "Me"},          # self → skip
-    {"displayName": "Room"},                              # no email → skip
-    {"email": "", "displayName": "Empty email"},          # empty → skip
-    {"email": "resource.calendar.google.com", "displayName": "Room B"},  # resource → skip
-    {"email": "alice@company.com", "displayName": "Alice"},  # valid → keep
-]
+def r1(p, t): return 'Sure!\n{"ok": true, "items": [], "stats": {"n_items": 0, "fetched_at": "X"}}'
+try:
+    McpHostRunner(runner=r1).call("test"); raise AssertionError("expected raise")
+except McpResponseError: pass
 
-results = []
-for a in raw_attendees:
-    email = a.get("email", "").lower().strip()
-    if not email:
-        continue
-    if email == SELF_EMAIL:
-        continue
-    if "resource.calendar.google.com" in email:
-        continue
-    results.append(email)
+def r2(p, t): return '{"ok": true, "items": [], "stats": {"n_items": 0, "fetched_at": "X"}}\n\nThanks.'
+try:
+    McpHostRunner(runner=r2).call("test"); raise AssertionError("expected raise")
+except McpResponseError: pass
 
-assert results == ["alice@company.com"], f"Unexpected: {results}"
-print("T9_T10_PASS")
+def r3(p, t): return '{"ok": false, "error": "auth_required", "detail": "ya"}'
+try:
+    McpHostRunner(runner=r3).call("test"); raise AssertionError("expected raise")
+except McpToolError as e:
+    assert e.error == "auth_required"
+
+def r4(p, t): return ""
+try:
+    McpHostRunner(runner=r4).call("test"); raise AssertionError("expected raise")
+except McpResponseError: pass
+
+print("T9_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T9+T10: calendar filter skips self and no-email attendees" || fail "T9+T10: calendar filtering"
+[[ $? -eq 0 ]] && ok "T9: MCP runner strict envelope parse" || fail "T9: MCP runner parse"
+
+# T10: Calendar source sanitize — invalid email/date dropped, lowercase, length caps
+python3 - << 'PYEOF'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / "knowledge" / "bin"))
+from _kb_mcp.runner import McpHostRunner
+from _kb_people.sources.calendar_source import CalendarSource
+
+def mock(p, t):
+    long_n = "A" * 500
+    long_c = "B" * 1000
+    return ('{"ok": true, "items": ['
+            '{"name": "Alice", "email": "alice@example.com", "date": "2026-04-30", "context": "Standup"},'
+            '{"name": "Bob", "email": "BOB@example.COM", "date": "2026-04-30", "context": "Standup"},'
+            '{"name": "NoEmail", "email": "", "date": "2026-04-29", "context": "skip"},'
+            '{"name": "BadDate", "email": "bd@x.com", "date": "yesterday", "context": "skip"},'
+            f'{{"name": "{long_n}", "email": "long@example.com", "date": "2026-05-01", "context": "{long_c}"}}'
+            '], "stats": {"n_items": 5, "fetched_at": "X"}}')
+
+src = CalendarSource(days_back=7, runner=McpHostRunner(runner=mock))
+contacts = src.get_contacts()
+assert len(contacts) == 3, f"expected 3, got {len(contacts)}"
+emails = [c["email"] for c in contacts]
+assert emails == ["alice@example.com", "bob@example.com", "long@example.com"], emails
+assert len(contacts[2]["name"]) == 200 and len(contacts[2]["context"]) == 500
+print("T10_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T10: Calendar source sanitize" || fail "T10: Calendar source"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

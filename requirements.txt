@@ -5,9 +5,12 @@
 # Python beyond the standard library.
 #
 # Modules that need these:
-#   - People  → python-frontmatter, click,
-#               google-api-python-client + google-auth-oauthlib (calendar source only)
+#   - People  → python-frontmatter, click, PyYAML, jellyfish
 #   - Daily-plan generator → standard library only (no extras)
+#
+# External-source ingestion (calendar, mail, chat, etc.) goes through
+# the MCP host via `claude -p`. Vepol modules do NOT link against
+# vendor SDKs. See docs/methodology/mcp-first-sources.md.
 #
 # When adding a Python dependency, pin a known-good version range and
 # add a one-line note about which module needs it.
@@ -16,9 +19,3 @@ python-frontmatter>=1.1,<2.0   # People — markdown+YAML frontmatter parsing
 click>=8.1,<9.0                # People — CLI framework for kb-contact, kb-calendar-sync, kb-people-remind
 PyYAML>=6.0,<7.0               # People — _index.yaml read/write
 jellyfish>=1.0,<2.0            # People — Jaro-Winkler string distance for soft-signal dedup
-
-# Optional — only required if you connect the Google Calendar source.
-# Skip these if you do not plan to ingest calendar attendees into People.
-google-api-python-client>=2.130,<3.0
-google-auth>=2.30,<3.0
-google-auth-oauthlib>=1.2,<2.0

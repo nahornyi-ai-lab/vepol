@@ -2222,6 +2222,259 @@ def install_health_check() -> list[Finding]:
     return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
 
 
+# ──────────────────────────────────────────────────────────────────────
+# mcp-check — preflight for MCP-first sources
+# Spec: docs/methodology/mcp-first-sources.md § Preflight
+#
+# We verify the MCP host is reachable from a non-interactive shell
+# (cron, LaunchAgent) by:
+#   1. claude binary in PATH.
+#   2. Basic envelope echo — claude responds within timeout, returns
+#      strict-parseable JSON envelope.
+# Tool-specific probes (Calendar, Mail, ...) are added by each module
+# as it ships and are gated behind their own subcommand or env flag.
+# Per Codex Layer-1 review: never trust a hallucinated "I can see this
+# tool" from the model — only attempt-and-observe-failure-mode is
+# deterministic. v1 ships the basic-echo probe; per-tool probes will
+# follow when more sources land.
+# ──────────────────────────────────────────────────────────────────────
+
+def mcp_check() -> list[Finding]:
+    """Verify the configured MCP host is reachable + responsive.
+
+    Returns a list of findings. Empty list = healthy.
+    """
+    findings: list[Finding] = []
+    import shutil as _sh
+    import subprocess as _sp
+
+    claude = _sh.which("claude")
+    if claude is None:
+        findings.append(finding(
+            "mcp-check:host-missing", "hub", "<PATH>",
+            "P0",
+            "claude binary not found in PATH; MCP-first sources cannot run.",
+            "see docs/methodology/mcp-first-sources.md § Preflight",
+        ))
+        return findings
+
+    # Basic-echo probe. Asks the host to emit one specific JSON envelope.
+    # If the host can do that, the subprocess plumbing works; if it
+    # garbles the envelope, the strict parser catches it.
+    probe_token = "vepol-mcp-check-" + dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+    prompt = (
+        "Output exactly this JSON object on stdout, with no preamble, "
+        "no markdown, no trailing content:\n"
+        f'{{"ok": true, "items": [], "stats": {{"n_items": 0, '
+        f'"fetched_at": "{probe_token}"}}}}'
+    )
+
+    try:
+        proc = _sp.run(
+            [claude, "-p", prompt],
+            capture_output=True, text=True, timeout=60,
+        )
+    except _sp.TimeoutExpired:
+        findings.append(finding(
+            "mcp-check:host-timeout", "hub", claude,
+            "P0",
+            "claude -p timed out after 60s on a trivial echo probe.",
+            "host is unresponsive in non-interactive context",
+        ))
+        return findings
+
+    if proc.returncode != 0:
+        findings.append(finding(
+            "mcp-check:host-rc", "hub", claude,
+            "P0",
+            f"claude -p exited rc={proc.returncode} on a trivial echo probe.",
+            f"stderr: {proc.stderr.strip()[-300:]!r}",
+        ))
+        return findings
+
+    # Use the same strict parser modules use, to catch the same way.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    try:
+        from _kb_mcp.runner import _strict_envelope_parse, _validate_success_envelope  # type: ignore
+    except ImportError as e:
+        findings.append(finding(
+            "mcp-check:runner-missing", "hub", str(pathlib.Path(__file__).parent / "_kb_mcp"),
+            "P0",
+            f"_kb_mcp.runner not importable: {e}",
+            "install Vepol fully; check `bin/_kb_mcp` exists",
+        ))
+        return findings
+
+    try:
+        envelope = _strict_envelope_parse(proc.stdout)
+    except Exception as e:
+        findings.append(finding(
+            "mcp-check:envelope-parse", "hub", claude,
+            "P0",
+            "MCP host did not return a strict-parseable JSON envelope.",
+            f"{type(e).__name__}: {e}",
+        ))
+        return findings
+
+    try:
+        _validate_success_envelope(envelope)
+    except Exception as e:
+        findings.append(finding(
+            "mcp-check:envelope-shape", "hub", claude,
+            "P0",
+            "MCP host envelope shape failed validation.",
+            f"{type(e).__name__}: {e}",
+        ))
+        return findings
+
+    # Confirm the probe token round-tripped — catches the "model ignored
+    # the prompt and emitted some other envelope" case.
+    if envelope.get("stats", {}).get("fetched_at") != probe_token:
+        findings.append(finding(
+            "mcp-check:probe-mismatch", "hub", claude,
+            "P1",
+            "MCP host returned a valid envelope but did NOT echo the probe token.",
+            f"expected {probe_token!r} in stats.fetched_at",
+        ))
+        return findings  # without basic round-trip, calendar canary is moot
+
+    # ── Per-tool canaries ─────────────────────────────────────────
+    # Each MCP-backed source ships its own canary that ATTEMPTS a real
+    # call. Per Codex Layer-1 caution: do not trust the model's
+    # self-report of which tools it can see — only attempt-and-observe.
+    findings.extend(_mcp_canary_calendar(claude))
+    return findings
+
+
+def _mcp_canary_calendar(claude_path: str) -> list[Finding]:
+    """Probe the Google Calendar MCP server.
+
+    Asks the host to attempt mcp__claude_ai_Google_Calendar__list_calendars
+    and report success-with-count or a structured failure code. We do not
+    inspect calendar contents — only whether the tool is reachable.
+
+    Findings emitted:
+      P0 mcp-check:calendar-tool-missing   — server not connected at all
+      P0 mcp-check:calendar-auth-required  — connected but unauthorized
+      P1 mcp-check:calendar-canary-shape   — envelope structurally valid
+                                             but content unparseable
+      (no finding if calendar is reachable AND authorized)
+    """
+    import subprocess as _sp
+    findings: list[Finding] = []
+
+    canary_prompt = (
+        "Try to use the Google Calendar MCP tool "
+        "mcp__claude_ai_Google_Calendar__list_calendars to fetch the "
+        "user's accessible calendars. We are NOT interested in the "
+        "calendar contents — only whether the tool is reachable.\n\n"
+        "Output a single JSON object on stdout, no preamble, no markdown, "
+        "no trailing content. On success:\n\n"
+        '{"ok": true, "items": [], "stats": {"n_items": <integer count of calendars>, "fetched_at": "canary"}}\n\n'
+        "On failure use one of these short codes in `error`:\n"
+        '- "tool_unavailable" — the list_calendars tool is not accessible\n'
+        '  in this MCP host.\n'
+        '- "auth_required" — the tool is accessible but not authorized.\n'
+        '- "other" — anything else; put detail in `detail`.\n\n'
+        '{"ok": false, "error": "<code>", "detail": "<brief>"}\n'
+    )
+    try:
+        proc = _sp.run(
+            [claude_path, "-p", canary_prompt],
+            capture_output=True, text=True, timeout=60,
+        )
+    except _sp.TimeoutExpired:
+        findings.append(finding(
+            "mcp-check:calendar-canary-timeout", "hub", claude_path,
+            "P1",
+            "Calendar canary probe timed out after 60s.",
+            "host responsive earlier; calendar tool may hang on first call",
+        ))
+        return findings
+
+    if proc.returncode != 0:
+        findings.append(finding(
+            "mcp-check:calendar-canary-rc", "hub", claude_path,
+            "P1",
+            f"Calendar canary exited rc={proc.returncode}.",
+            f"stderr: {proc.stderr.strip()[-200:]!r}",
+        ))
+        return findings
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from _kb_mcp.runner import _strict_envelope_parse, _validate_success_envelope  # type: ignore
+
+    try:
+        envelope = _strict_envelope_parse(proc.stdout)
+    except Exception as e:
+        findings.append(finding(
+            "mcp-check:calendar-canary-shape", "hub", claude_path,
+            "P1",
+            "Calendar canary returned malformed envelope.",
+            f"{type(e).__name__}: {e}",
+        ))
+        return findings
+
+    ok = envelope.get("ok")
+    if ok is True:
+        # Validate full success-envelope shape — `{"ok": true}` alone
+        # could be a malformed success the model fudged. Require items[]
+        # and stats.n_items as int.
+        try:
+            _validate_success_envelope(envelope)
+        except Exception as e:
+            findings.append(finding(
+                "mcp-check:calendar-canary-shape", "hub", claude_path,
+                "P1",
+                "Calendar canary success envelope failed schema validation.",
+                f"{type(e).__name__}: {e}",
+            ))
+            return findings
+        if not isinstance(envelope.get("stats", {}).get("n_items"), int):
+            findings.append(finding(
+                "mcp-check:calendar-canary-shape", "hub", claude_path,
+                "P1",
+                "Calendar canary stats.n_items is not an integer.",
+                f"got: {envelope.get('stats', {}).get('n_items')!r}",
+            ))
+            return findings
+        # Fully working. No finding.
+        return findings
+    if ok is False:
+        err = envelope.get("error", "?")
+        detail = envelope.get("detail", "")[:200]
+        if err == "auth_required":
+            findings.append(finding(
+                "mcp-check:calendar-auth-required", "hub", claude_path,
+                "P0",
+                "Google Calendar MCP server is connected but not authorized.",
+                "open Claude Code → MCP and authorize Google Calendar",
+            ))
+        elif err == "tool_unavailable":
+            findings.append(finding(
+                "mcp-check:calendar-tool-missing", "hub", claude_path,
+                "P0",
+                "Google Calendar MCP server is not connected.",
+                f"detail: {detail!r}",
+            ))
+        else:
+            findings.append(finding(
+                "mcp-check:calendar-canary-error", "hub", claude_path,
+                "P1",
+                f"Calendar canary failed with code: {err}",
+                f"detail: {detail!r}",
+            ))
+        return findings
+
+    findings.append(finding(
+        "mcp-check:calendar-canary-shape", "hub", claude_path,
+        "P1",
+        "Calendar canary envelope.ok is neither true nor false.",
+        f"got: {ok!r}",
+    ))
+    return findings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deterministic KB read-path audit.")
     parser.add_argument(
@@ -2242,6 +2495,10 @@ def main() -> None:
             "graph-audit",
             # Cycle A — install-manifest + system health
             "install-health",
+            # MCP-first sources (docs/methodology/mcp-first-sources.md):
+            # preflight that verifies the MCP host is reachable from
+            # non-interactive context (cron, LaunchAgent).
+            "mcp-check",
         ],
         help=(
             "audit (default) | concepts-consistency | hierarchy-check | "
@@ -2249,7 +2506,7 @@ def main() -> None:
             "decompose-staleness | report-quality-check | "
             "cycle-source-id-collision | seed-docs-drift | "
             "channel-instances | seed-content-audit | graph-audit | "
-            "install-health"
+            "install-health | mcp-check"
         ),
     )
     parser.add_argument(
@@ -2275,6 +2532,21 @@ def main() -> None:
                 "generated_at": TODAY.isoformat(),
                 "hub": str(HUB),
                 "mode": "graph-audit",
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        raise SystemExit(strict_exit(findings, args.strict))
+
+    if args.mode == "mcp-check":
+        findings = mcp_check()
+        if args.write:
+            write_pending(findings)
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": "mcp-check",
                 "findings": [asdict(item) for item in findings],
             }, ensure_ascii=False, indent=2))
         else:

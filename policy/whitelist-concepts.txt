@@ -21,3 +21,4 @@ triz-for-design
 spec-driven-workflow
 cross-agent-review
 parallel-orchestrators
+mcp-first-sources

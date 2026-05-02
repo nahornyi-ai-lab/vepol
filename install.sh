@@ -172,6 +172,8 @@ if [[ -f "$VEPOL_DIR/requirements.txt" ]]; then
   MISSING_PY=()
   python3 -c "import frontmatter" 2>/dev/null || MISSING_PY+=(python-frontmatter)
   python3 -c "import click" 2>/dev/null || MISSING_PY+=(click)
+  python3 -c "import yaml" 2>/dev/null || MISSING_PY+=(PyYAML)
+  python3 -c "import jellyfish" 2>/dev/null || MISSING_PY+=(jellyfish)
   if [[ ${#MISSING_PY[@]} -gt 0 ]]; then
     warn "  Python deps missing: ${MISSING_PY[*]}"
     warn "    Install with: pip3 install -r \"$VEPOL_DIR/requirements.txt\""
@@ -207,6 +209,9 @@ if [[ -d "$VEPOL_DIR/bin/_kb_backlog" ]]; then
 fi
 if [[ -d "$VEPOL_DIR/bin/_kb_people" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_people" "$HUB/bin/_kb_people"
+fi
+if [[ -d "$VEPOL_DIR/bin/_kb_mcp" ]]; then
+  ln -sfn "$VEPOL_DIR/bin/_kb_mcp" "$HUB/bin/_kb_mcp"
 fi
 # Prompt templates
 if [[ -d "$VEPOL_DIR/bin/templates" ]]; then

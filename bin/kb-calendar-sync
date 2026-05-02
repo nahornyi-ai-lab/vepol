@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """kb-calendar-sync — ingest Google Calendar attendees into Vepol People.
 
+Calendar data is fetched through the configured MCP host (Claude Code
++ Google Calendar MCP server). See docs/methodology/mcp-first-sources.md
+for the principle and docs/modules/people.md for module context.
+
 Usage:
-  kb-calendar-sync [--days 30] [--dry-run] [--reauth]
+  kb-calendar-sync [--days 30] [--dry-run]
+
+Exit codes:
+  0  success
+  1  unexpected error
+  2  invalid CLI arguments (Click default for usage errors)
+  3  MCP host unavailable (claude binary missing, exit non-zero, timeout)
+  4  MCP tool error (auth missing, scope denied, calendar not connected)
+  5  MCP envelope schema error (host returned malformed response)
 """
 
 import sys
@@ -13,28 +25,45 @@ sys.path.insert(0, str(Path(__file__).parent))
 import click
 from _kb_people import card, index, dedup
 from _kb_people.channel import send
+from _kb_mcp.runner import McpHostError, McpResponseError, McpToolError
 
 
 @click.command()
 @click.option("--days", default=30, show_default=True, help="Days back to scan")
 @click.option("--dry-run", is_flag=True, help="Print what would happen, no writes")
-@click.option("--reauth", is_flag=True, help="Force re-authentication with Google")
-def main(days, dry_run, reauth):
-    """Sync Google Calendar attendees to people/ contacts."""
-    try:
-        from _kb_people.sources.calendar_source import CalendarSource
-    except ImportError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+def main(days, dry_run):
+    """Sync Google Calendar attendees to people/ contacts via MCP."""
+    from _kb_people.sources.calendar_source import CalendarSource
 
     click.echo(f"Scanning Google Calendar (last {days} days){'  [DRY RUN]' if dry_run else ''}...")
 
-    source = CalendarSource(days_back=days, reauth=reauth)
+    source = CalendarSource(days_back=days)
     try:
         contacts = source.get_contacts()
-    except FileNotFoundError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
+    except McpHostError as e:
+        click.echo(
+            f"MCP host unavailable: {e}\n"
+            "→ Run `kb-doctor --mode mcp-check` for a diagnostic.",
+            err=True,
+        )
+        sys.exit(3)
+    except McpToolError as e:
+        click.echo(
+            f"MCP tool error: {e.error}: {e.detail}\n"
+            "→ This usually means the Google Calendar MCP server isn't "
+            "connected or hasn't been authorized in Claude Code's MCP "
+            "settings. Open Claude Code → MCP and verify the connector.",
+            err=True,
+        )
+        sys.exit(4)
+    except McpResponseError as e:
+        click.echo(
+            f"MCP envelope error: {e}\n"
+            "→ The host returned a response that didn't match the expected "
+            "schema. This is a Vepol or MCP-server bug — please report.",
+            err=True,
+        )
+        sys.exit(5)
 
     if not contacts:
         click.echo("No attendees found.")
@@ -63,11 +92,17 @@ def main(days, dry_run, reauth):
             click.echo(f"  [{action}] {c['name']} <{c['email']}> — {c['context']}")
             continue
 
+        # Provenance: tag each sighting with a short request_id slice so an
+        # audit can grep all rows from one fetch. Per
+        # docs/methodology/mcp-first-sources.md § Security: provenance.
+        rid = (c.get("request_id") or "")[:8]
+        sighting_source = f"calendar/{rid}" if rid else "calendar"
+
         if action == "update":
             uid = result["uid"]
             slug = index.get_slug(uid)
             if slug:
-                card.upsert_sighting(slug, c["date"], "calendar", c["context"])
+                card.upsert_sighting(slug, c["date"], sighting_source, c["context"])
                 index.register(uid, slug, c["name"], {"email": c["email"]})
                 updated += 1
 
@@ -85,7 +120,7 @@ def main(days, dry_run, reauth):
             post = card.load(slug)
             uid = post["id"]
             index.register(uid, slug, c["name"], {"email": c["email"]})
-            card.upsert_sighting(slug, c["date"], "calendar", c["context"])
+            card.upsert_sighting(slug, c["date"], sighting_source, c["context"])
 
             if is_draft:
                 created_draft += 1
