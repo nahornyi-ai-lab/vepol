@@ -69,13 +69,22 @@ def main(days, dry_run):
         click.echo("No attendees found.")
         return
 
-    # Deduplicate by email within this batch
+    # Deduplicate by email within this batch. Also fill in a fallback
+    # display name from the email's local part when the source emitted
+    # an empty `name` — Calendar attendees with no displayName produce
+    # empty names, and an empty name slugifies to "" which lands the
+    # card at `<people>/.md` (a hidden file) and breaks downstream
+    # `card.load(slug)`. Local-part-as-name (e.g. "alice" from
+    # "alice@example.com") is a safe, recoverable default that the user
+    # can correct later.
     seen_emails: set[str] = set()
     unique_contacts = []
     for c in contacts:
         key = c["email"].lower()
         if key not in seen_emails:
             seen_emails.add(key)
+            if not (c.get("name") or "").strip():
+                c["name"] = c["email"].split("@", 1)[0]
             unique_contacts.append(c)
 
     updated = 0

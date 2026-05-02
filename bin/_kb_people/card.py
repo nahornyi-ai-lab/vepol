@@ -79,9 +79,23 @@ def _build_body(notes: str = "", sightings: list[dict] | None = None) -> str:
 
 
 def create(name: str, **kwargs) -> Path:
-    """Create a new people/<slug>.md. Returns path."""
+    """Create a new people/<slug>.md. Returns path.
+
+    Raises ValueError on empty/whitespace name — the slug derived from
+    such a name would be "", landing the card at PEOPLE_DIR/.md (a
+    hidden file). Callers MUST supply a non-empty name; sources that
+    have only an email should derive a local-part fallback before
+    calling.
+    """
+    if not (name or "").strip():
+        raise ValueError("create() refuses empty name (would produce hidden .md file)")
     PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
     slug = _unique_slug(name)
+    if not slug:
+        raise ValueError(
+            f"create() name {name!r} slugified to empty string "
+            "(only special chars / whitespace?) — supply a usable name"
+        )
     path = PEOPLE_DIR / f"{slug}.md"
     fm = _default_frontmatter(name, slug, **kwargs)
     body = _build_body()
