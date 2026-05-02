@@ -2,7 +2,12 @@
 """kb-people-remind — check next_touch_due and send reminders via Vepol channel.
 
 Usage:
-  kb-people-remind [--horizon 7]
+  kb-people-remind [--horizon 0]
+
+Default horizon is 0 — surfaces only contacts whose next_touch_due is
+today or earlier (overdue). The intent is "remind me on the day, not
+a week before." Pass --horizon N (N>0) if you want N-day-ahead
+anticipation reminders.
 """
 
 import sys
@@ -16,7 +21,9 @@ from _kb_people.channel import send
 
 
 @click.command()
-@click.option("--horizon", default=7, show_default=True, help="Days ahead to look")
+@click.option("--horizon", default=0, show_default=True,
+              help="Days ahead to look. 0 = today only (plus overdue). "
+                   "Increase for anticipation reminders.")
 @click.option("--dry-run", is_flag=True, help="Print without sending")
 def main(horizon, dry_run):
     """Send contact follow-up reminders via Vepol channel."""

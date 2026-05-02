@@ -10,7 +10,7 @@
         <string>python3</string>
         <string>__HOME__/knowledge/bin/kb-people-remind</string>
         <string>--horizon</string>
-        <string>7</string>
+        <string>0</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
