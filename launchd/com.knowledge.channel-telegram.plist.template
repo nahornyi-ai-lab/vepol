@@ -27,6 +27,8 @@
         <string>__HOME__</string>
         <key>KB_HUB</key>
         <string>__HOME__/knowledge</string>
+        <key>CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL</key>
+        <string>1</string>
     </dict>
 
     <key>StandardOutPath</key>

@@ -16,4 +16,5 @@ HUB="${KB_HUB:-$HOME/knowledge}"
 cd "$HUB"
 exec claude \
   --channels "plugin:telegram@claude-plugins-official" \
+  --plugin-dir "$HOME/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6" \
   --dangerously-skip-permissions
