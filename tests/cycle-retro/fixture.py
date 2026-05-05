@@ -35,6 +35,7 @@ def setup_sandbox():
     (p / ".orchestrator" / "runs").mkdir(parents=True)
     (p / "daily").mkdir()
     (p / "backlog.md").write_text("# Hub\n\n## Open\n\n## Done\n\n", encoding="utf-8")
+    (p / "log.md").write_text("# Hub log\n\n", encoding="utf-8")
 
     # Three projects: leaf-a, mid (parent of leaf-a), and a top-level standalone.
     for slug, parent in [("leaf-a", "mid"), ("mid", "hub"), ("solo", "hub")]:
@@ -147,8 +148,9 @@ def setup_sandbox():
     retro_stub.chmod(0o755)
 
     # Copy the actual cycle CLI + retro prompt template into the sandbox.
-    shutil.copy("__HOME__/knowledge/bin/kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
-    shutil.copy("__HOME__/knowledge/bin/templates/cycle-retro.prompt.md",
+    HUB_SRC = pathlib.Path.home() / "knowledge"
+    shutil.copy(HUB_SRC / "bin" / "kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
+    shutil.copy(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md",
                 p / "bin" / "templates" / "cycle-retro.prompt.md")
 
     return p

@@ -41,14 +41,27 @@ def regenerate_plan() -> dict | None:
     return load_plan()
 
 
-def fire(script: str) -> None:
+def fire(script: str) -> int:
+    """Run a hub event script and return its exit code.
+
+    Blocking call. Caller decides whether to mark `*_fired=true` based on
+    rc==0. Was Popen+start_new_session previously, but that path set the
+    fired flag *before* the script finished — if kb-retro/kb-brief crashed
+    the flag was already true and the message never went out, with no retry
+    on the next tick. Incident-2026-05-05.
+
+    Launchd's StartInterval=900 schedule re-fires only after the previous
+    instance exits, so blocking here for ~3 min (retro) or ~6 min (brief)
+    only shifts the next tick, it doesn't stack instances.
+    """
     log(f"firing {script}")
-    subprocess.Popen(
+    proc = subprocess.run(
         [str(HUB / "bin" / script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
     )
+    log(f"{script} completed rc={proc.returncode}")
+    return proc.returncode
 
 
 def channel_instances_guard() -> None:
@@ -98,17 +111,27 @@ def main() -> None:
             log("plan still missing after regen, abort")
             return
 
-    # Brief
+    # Brief — only mark fired on rc==0 so a crash retries on next tick
+    # rather than silently swallowing the day's brief.
     if not plan.get("brief_fired") and now_hm >= plan["brief_hm"]:
-        fire("kb-brief")
-        plan["brief_fired"] = True
-        save_plan(plan)
+        rc = fire("kb-brief")
+        if rc == 0:
+            plan["brief_fired"] = True
+            save_plan(plan)
+        else:
+            log(f"brief rc={rc}, brief_fired NOT set; will retry next tick")
 
-    # Retro
+    # Retro — same retry-on-failure semantics. Note: on most days
+    # kb-orchestrator-cycle (20:45 cron) marks retro_fired=true before this
+    # tick checks, so this branch is the fallback path when cycle is
+    # disabled or fails.
     if not plan.get("retro_fired") and now_hm >= plan["retro_hm"]:
-        fire("kb-retro")
-        plan["retro_fired"] = True
-        save_plan(plan)
+        rc = fire("kb-retro")
+        if rc == 0:
+            plan["retro_fired"] = True
+            save_plan(plan)
+        else:
+            log(f"retro rc={rc}, retro_fired NOT set; will retry next tick")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,10 @@ echo "=== Phase 3 CR5-B2 broker race (6 concurrent kb-orchestrator-run) ==="
 python3 cycle-retro/broker-race.py > /dev/null && pass "cycle-retro/broker-race.py" || { fail "broker-race"; exit 1; }
 
 echo
+echo "=== Wave-rollup-to-log (T1-T6, 22 ассерций) ==="
+python3 wave-rollup/test-wave-rollup.py > /dev/null && pass "wave-rollup/test-wave-rollup.py" || { fail "wave-rollup"; exit 1; }
+
+echo
 echo "=== Phase 5 carried-item plan dispatch (F1-F4) ==="
 python3 cycle-plan/fixtures.py > /dev/null && pass "cycle-plan/fixtures.py" || { fail "cycle-plan"; exit 1; }
 

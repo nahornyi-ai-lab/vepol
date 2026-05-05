@@ -18,6 +18,9 @@ import tempfile
 import textwrap
 
 
+
+HUB_SRC = pathlib.Path.home() / "knowledge"
+
 def make_sandbox(hier: str):
     sb = tempfile.mkdtemp(prefix="kb-cr4-")
     p = pathlib.Path(sb)
@@ -27,6 +30,7 @@ def make_sandbox(hier: str):
     (p / ".orchestrator" / "runs").mkdir(parents=True)
     (p / "daily").mkdir()
     (p / "backlog.md").write_text("# Hub\n\n## Open\n\n## Done\n", encoding="utf-8")
+    (p / "log.md").write_text("# Hub log\n\n", encoding="utf-8")
     (p / "hierarchy.yaml").write_text(hier, encoding="utf-8")
     # Stub broker: no-op success that doesn't write a report file.
     stub = p / "bin" / "kb-orchestrator-run"
@@ -35,9 +39,9 @@ def make_sandbox(hier: str):
     retro = p / "bin" / "kb-retro"
     retro.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     retro.chmod(0o755)
-    shutil.copy("__HOME__/knowledge/bin/kb-orchestrator-cycle",
+    shutil.copy(str(HUB_SRC / "bin" / "kb-orchestrator-cycle"),
                 p / "bin" / "kb-orchestrator-cycle")
-    shutil.copy("__HOME__/knowledge/bin/templates/cycle-retro.prompt.md",
+    shutil.copy(str(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md"),
                 p / "bin" / "templates" / "cycle-retro.prompt.md")
     return p
 
@@ -112,6 +116,7 @@ def cr5_b3_skips_spawn_for_completed():
     (p / ".orchestrator" / "runs").mkdir(parents=True)
     (p / "daily").mkdir()
     (p / "backlog.md").write_text("# Hub\n\n## Open\n\n## Done\n", encoding="utf-8")
+    (p / "log.md").write_text("# Hub log\n\n", encoding="utf-8")
     proj = p / "solo" / "knowledge"
     (proj / "reports").mkdir(parents=True)
     (proj / "backlog.md").write_text("# solo\n\n## Open\n\n", encoding="utf-8")
@@ -174,8 +179,8 @@ def cr5_b3_skips_spawn_for_completed():
     retro = p / "bin" / "kb-retro"
     retro.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     retro.chmod(0o755)
-    shutil.copy("__HOME__/knowledge/bin/kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
-    shutil.copy("__HOME__/knowledge/bin/templates/cycle-retro.prompt.md",
+    shutil.copy(str(HUB_SRC / "bin" / "kb-orchestrator-cycle"), p / "bin" / "kb-orchestrator-cycle")
+    shutil.copy(str(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md"),
                 p / "bin" / "templates" / "cycle-retro.prompt.md")
 
     proc = subprocess.run(
@@ -239,6 +244,7 @@ def cr4_b3_no_overwrite_completed():
     (p / ".orchestrator" / "runs").mkdir(parents=True)
     (p / "daily").mkdir()
     (p / "backlog.md").write_text("# Hub\n\n## Open\n\n## Done\n", encoding="utf-8")
+    (p / "log.md").write_text("# Hub log\n\n", encoding="utf-8")
     proj = p / "solo" / "knowledge"
     (proj / "reports").mkdir(parents=True)
     (proj / "backlog.md").write_text("# solo\n\n## Open\n\n", encoding="utf-8")
@@ -263,8 +269,8 @@ def cr4_b3_no_overwrite_completed():
     retro = p / "bin" / "kb-retro"
     retro.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     retro.chmod(0o755)
-    shutil.copy("__HOME__/knowledge/bin/kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
-    shutil.copy("__HOME__/knowledge/bin/templates/cycle-retro.prompt.md",
+    shutil.copy(str(HUB_SRC / "bin" / "kb-orchestrator-cycle"), p / "bin" / "kb-orchestrator-cycle")
+    shutil.copy(str(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md"),
                 p / "bin" / "templates" / "cycle-retro.prompt.md")
 
     # Run cycle. Pre-pass should see existing status: done and skip.

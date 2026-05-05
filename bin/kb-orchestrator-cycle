@@ -541,6 +541,251 @@ def _spawn_one(node: dict, date: str, cycle_run_id: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Wave rollup — append `cycle | <slug> | …` lines to parent and hub log.md
+# Spec: ~/knowledge/concepts/wave-rollup-to-log.md
+# ──────────────────────────────────────────────────────────────────────────
+
+# Counters that wave-rollup tracks across results[].
+_WAVE_STATUS_KEYS = ("done", "partial", "skipped", "error", "timeout")
+
+
+def _aggregate_status_counts(slugs: list[str], results: dict) -> dict[str, int]:
+    """Count how many of `slugs` ended up in each terminal status.
+
+    Unknown statuses are bucketed into 'error' to keep the log line stable —
+    silent loss of a result would defeat the point of the rollup.
+    """
+    counts = {k: 0 for k in _WAVE_STATUS_KEYS}
+    for slug in slugs:
+        st = (results.get(slug) or {}).get("status", "error")
+        if st in counts:
+            counts[st] += 1
+        else:
+            counts["error"] += 1
+    return counts
+
+
+def _count_escalations_in_report(report_path: pathlib.Path) -> Optional[int]:
+    """Count bullet lines under the `## Escalations` section of a report.
+
+    Returns int or None if the file/section can't be parsed (mapped to '?'
+    in the log line). Reads the section between `## Escalations` and the
+    next `## ` header (or EOF). A 'bullet' is a line whose first non-space
+    char is `-` or `*`.
+    """
+    if not report_path.is_file():
+        return None
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    in_section = False
+    count = 0
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if line.startswith("## "):
+            if in_section:
+                break  # left the section
+            if stripped.lower().startswith("## escalations"):
+                in_section = True
+                continue
+        if in_section and (stripped.startswith("- ") or stripped.startswith("* ")):
+            count += 1
+    return count if in_section else 0
+
+
+def _format_wave_log_line(date: str, category_slug: str, summary_kv: dict,
+                          cycle_run_id: str) -> str:
+    """Render the canonical `## [date] cycle | <slug> | k=v k=v … run_id=…` line.
+
+    `summary_kv` is an ordered list of (key, value) — but a dict is fine
+    because we control insertion order. The `run_id` field is always last.
+    """
+    body_parts = [f"{k}={v}" for k, v in summary_kv.items()]
+    body_parts.append(f"run_id={cycle_run_id}")
+    body = " ".join(body_parts)
+    return f"## [{date}] cycle | {category_slug} | {body}"
+
+
+def _wave_log_already_recorded(log_path: pathlib.Path, slug: str, date: str,
+                                cycle_run_id: str) -> bool:
+    """Idempotency check: has a line for THIS date+slug+run_id already been
+    written? Date-bound regex per Codex Layer-2 #2: substring match alone
+    is too loose if dates ever overlap. Anchored at line start, run_id at
+    word boundary or EOL."""
+    if not log_path.is_file():
+        return False
+    try:
+        text = log_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    pattern = re.compile(
+        rf"^## \[{re.escape(date)}\] cycle \| {re.escape(slug)} \| .*"
+        rf"run_id={re.escape(cycle_run_id)}(?:\s|$)",
+    )
+    return any(pattern.match(line) for line in text.splitlines())
+
+
+def _append_cycle_log_line(log_path: pathlib.Path, slug: str, date: str,
+                            summary_kv: dict, cycle_run_id: str) -> None:
+    """Idempotent append of the wave-rollup line.
+
+    Race-safe via fcntl.flock (LOCK_EX) — protects against concurrent
+    writers (e.g. claude-memory-compiler `flush.py` writing a session
+    line into the same log.md). Codex Layer-2 #1.
+
+    Soft-fails on missing log.md or write errors via warn() — these must
+    not crash the cycle. The hub log is critical; caller decides how to
+    react to a hub-side failure (cmd_retro returns rc=4 in that case).
+    """
+    if not log_path.is_file():
+        warn(f"wave-rollup: {log_path} not found, skipping cycle line for {slug}")
+        return
+    if _wave_log_already_recorded(log_path, slug, date, cycle_run_id):
+        say(f"wave-rollup: {slug} line already in {log_path.name} for run_id={cycle_run_id[:8]}…, skip")
+        return
+    line = _format_wave_log_line(date, slug, summary_kv, cycle_run_id)
+    try:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                # Re-check after acquiring lock — another process might have
+                # just written the same line.
+                if _wave_log_already_recorded(log_path, slug, date, cycle_run_id):
+                    return
+                existing = log_path.read_text(encoding="utf-8")
+                prefix = "" if existing.endswith("\n") or not existing else "\n"
+                fh.write(f"{prefix}{line}\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        warn(f"wave-rollup: failed to append to {log_path}: {exc!r}")
+
+
+def _write_parent_wave_log_lines(nodes_dict: dict, results: dict, date: str,
+                                  cycle_run_id: str, root_slug: str,
+                                  only_slugs: Optional[list] = None) -> None:
+    """For each non-root intermediate parent (has children, status==done),
+    append one `cycle | <parent> | …` line to <parent>/knowledge/log.md.
+
+    `only_slugs` (Codex Layer-2 #4): if given, restrict to parents within
+    that set — used by per-level invocation so each level's parents are
+    written before the next level starts spawning. Idempotency in
+    `_append_cycle_log_line` makes calling this multiple times safe.
+
+    Quiet skip if parent failed (status != done) — absence of the line in
+    parent's log.md means the wave didn't pass through cleanly. The
+    cycle-summary JSON and daily/<date>.md still record the failure.
+    """
+    candidates = nodes_dict.items() if only_slugs is None else (
+        (s, nodes_dict[s]) for s in only_slugs if s in nodes_dict
+    )
+    for parent_slug, node in candidates:
+        if node.get("kind") == "root":
+            continue
+        children = node.get("children") or []
+        if not children:
+            continue  # leaf, not an intermediate parent — Non-goal per spec
+        parent_result = results.get(parent_slug) or {}
+        if parent_result.get("status") != "done":
+            continue  # FM1: parent failed → no log line
+
+        knowledge_path = pathlib.Path(node["knowledge_path"])
+        report_path = knowledge_path / REPORTS_DIR_NAME / f"{date}.md"
+        log_path = knowledge_path / "log.md"
+
+        counts = _aggregate_status_counts(children, results)
+        esc = _count_escalations_in_report(report_path)
+        esc_repr = "?" if esc is None else str(esc)
+
+        summary_kv = {
+            "rolled_up_children": str(len(children)),
+            **{k: str(v) for k, v in counts.items()},
+            "escalations": esc_repr,
+            "report": f"reports/{date}.md",
+        }
+        _append_cycle_log_line(log_path, parent_slug, date, summary_kv,
+                                cycle_run_id)
+
+
+def _write_hub_wave_log_line(hub_log_path: pathlib.Path, nodes_dict: dict,
+                              results: dict, date: str, cycle_run_id: str,
+                              summary_path: pathlib.Path,
+                              daily_path: pathlib.Path) -> int:
+    """Append the hub `cycle | hub | wave_complete …` line. Returns:
+        0 — written or already present (idempotent skip),
+        4 — hub log missing or unwritable (cmd_retro should propagate)."""
+    # Aggregate over ALL non-root nodes that participated.
+    all_slugs = [slug for slug, n in nodes_dict.items() if n.get("kind") != "root"]
+    counts = _aggregate_status_counts(all_slugs, results)
+    nodes_total = len(all_slugs)
+
+    # Hub escalations = sum of escalation counts across reports that exist.
+    hub_esc_total = 0
+    hub_esc_unknown = False
+    for slug in all_slugs:
+        kp = pathlib.Path(nodes_dict[slug]["knowledge_path"])
+        rp = kp / REPORTS_DIR_NAME / f"{date}.md"
+        n = _count_escalations_in_report(rp)
+        if n is None:
+            hub_esc_unknown = True
+        else:
+            hub_esc_total += n
+    esc_repr = "?" if hub_esc_unknown and hub_esc_total == 0 else str(hub_esc_total)
+
+    # NB: field is `report_escalations`, not `escalations`. Codex Layer-2 #3:
+    # this is a sum of bullets across all project reports, NOT what reaches
+    # the final hub-retro Telegram (kb-retro dedupes/filters). The renamed
+    # field makes that distinction explicit so future readers don't conflate
+    # raw report counts with user-visible escalations.
+    summary_kv = {
+        "wave_complete": "true",
+        "nodes": str(nodes_total),
+        **{k: str(v) for k, v in counts.items()},
+        "report_escalations": esc_repr,
+        "daily": f"daily/{date}.md",
+        "summary": f".orchestrator/cycle-{date}.json",
+    }
+
+    if not hub_log_path.is_file():
+        warn(f"wave-rollup: hub log {hub_log_path} missing — cannot record wave_complete")
+        return 4
+    if _wave_log_already_recorded(hub_log_path, "hub", date, cycle_run_id):
+        say(f"wave-rollup: hub line already present for run_id={cycle_run_id[:8]}…, skip")
+        return 0
+    # Render manually to keep `wave_complete` as the leading flag without `=true`.
+    body_parts = [
+        "wave_complete",
+        f"nodes={summary_kv['nodes']}",
+        *(f"{k}={summary_kv[k]}" for k in _WAVE_STATUS_KEYS),
+        f"report_escalations={summary_kv['report_escalations']}",
+        f"daily={summary_kv['daily']}",
+        f"summary={summary_kv['summary']}",
+        f"run_id={cycle_run_id}",
+    ]
+    line = f"## [{date}] cycle | hub | " + " ".join(body_parts)
+    try:
+        with hub_log_path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                if _wave_log_already_recorded(hub_log_path, "hub", date, cycle_run_id):
+                    return 0
+                existing = hub_log_path.read_text(encoding="utf-8")
+                prefix = "" if existing.endswith("\n") or not existing else "\n"
+                fh.write(f"{prefix}{line}\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return 0
+    except OSError as exc:
+        warn(f"wave-rollup: failed to append hub log: {exc!r}")
+        return 4
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Main retro algorithm
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -559,7 +804,14 @@ def cmd_retro(args) -> int:
     say(f"hierarchy: {sum(len(l) for l in levels)} nodes across {len(levels)} levels")
 
     date = args.date or dt.date.today().isoformat()
-    cycle_run_id = str(uuid.uuid4())
+    # KB_CYCLE_RUN_ID_OVERRIDE — test-only hook for idempotency tests.
+    # Codex Layer-2 #6: gated behind KB_TEST_MODE=1 so accidental prod env
+    # leakage cannot collapse multiple real cycles onto a single run_id and
+    # silently break traceability. In prod (no KB_TEST_MODE), always uuid4().
+    if os.environ.get("KB_TEST_MODE") == "1" and os.environ.get("KB_CYCLE_RUN_ID_OVERRIDE"):
+        cycle_run_id = os.environ["KB_CYCLE_RUN_ID_OVERRIDE"]
+    else:
+        cycle_run_id = str(uuid.uuid4())
     total_deadline = time.time() + DEFAULT_TOTAL_TIMEOUT
 
     # CR4-B2: validate "enabled implies all ancestors enabled".
@@ -668,6 +920,17 @@ def cmd_retro(args) -> int:
                     circuit_record_fail(slug, "crash", repr(exc)[:200])
                 say(f"  {slug}: {results[slug].get('status')} ({results[slug].get('category', '?')})")
 
+        # Wave-rollup (per-level): write parent log.md lines for every node
+        # of THIS level that has children and finished `done`. Doing it here,
+        # not after `for level in levels:`, ensures durable evidence of a
+        # successful parent even if the cycle crashes before higher levels
+        # complete (Codex Layer-2 review 2026-05-05, blocker #4 — AC1).
+        if not args.dry_run:
+            _write_parent_wave_log_lines(
+                nodes_dict, results, date, cycle_run_id, root_slug,
+                only_slugs=enabled,
+            )
+
     # Step 5: hub level — inline kb-retro
     say("hub level — inline kb-retro")
     summary_path = ORCHESTRATOR_DIR / f"cycle-{date}.json"
@@ -688,6 +951,22 @@ def cmd_retro(args) -> int:
         if rc != 0:
             warn(f"kb-retro returned rc={rc}")
             return 4
+        # Mark retro_fired in today-plan.json so kb-tick doesn't fire a
+        # duplicate Telegram retro later when now >= retro_hm.
+        # Incident-2026-05-05: cycle-launch (20:45 cron) and tick (sunset+15min)
+        # both ended up calling kb-retro; cycle never updated the plan flag.
+        plan_path = HUB / "logs" / "today-plan.json"
+        if plan_path.exists():
+            try:
+                plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+                if not plan_data.get("retro_fired"):
+                    plan_data["retro_fired"] = True
+                    plan_path.write_text(
+                        json.dumps(plan_data, indent=2), encoding="utf-8"
+                    )
+                    say(f"marked retro_fired=true in {plan_path}")
+            except Exception as exc:
+                warn(f"failed to mark retro_fired in today-plan.json: {exc!r}")
 
     # Step 6: append cycle summary to daily/<date>.md
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
@@ -697,6 +976,19 @@ def cmd_retro(args) -> int:
         with open(daily_path, "a", encoding="utf-8") as fh:
             fh.write("\n" + summary_section + "\n")
         say(f"appended cycle summary to {daily_path}")
+
+    # Step 6.5: wave-rollup → hub log.md.
+    # Spec: ~/knowledge/concepts/wave-rollup-to-log.md.
+    # Hub log is critical for orchestrator-continuity — if missing/unwritable
+    # we return rc=4 (same convention as failed hub-retro) so the failure is
+    # surfaced rather than silently dropped.
+    if not args.dry_run:
+        hub_log_rc = _write_hub_wave_log_line(
+            HUB / "log.md", nodes_dict, results, date, cycle_run_id,
+            summary_path, daily_path,
+        )
+        if hub_log_rc != 0:
+            return hub_log_rc
 
     # Generate tomorrow's draft plan (v0.1, mechanical only).
     # Spec: concepts/daily-plan-generator-v0_1.md.
