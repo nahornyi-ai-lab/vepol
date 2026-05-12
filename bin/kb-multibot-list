@@ -1,0 +1,102 @@
+#!/usr/bin/python3
+"""kb-multibot-list — show the current state of all multibot agents.
+
+Output (default): a human-readable table.
+With --json: machine-readable JSON for scripting.
+
+Columns:
+  slug         agent slug
+  bot          @bot_username
+  parent       parent_slug or '-'
+  children     comma-separated child slugs
+  enabled      true / false
+  token        present / missing
+  last_run     run_id and status of the most recent run, or '-'
+
+Usage:
+  kb-multibot-list
+  kb-multibot-list --json
+  kb-multibot-list --only-enabled
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from _kb_multibot.config import load_config  # noqa: E402
+from _kb_multibot.registry import load_from_projects_dir  # noqa: E402
+from _kb_multibot.state import StateStore  # noqa: E402
+
+
+def _latest_run(state: StateStore, slug: str):
+    """Return the newest run for this agent, or None."""
+    matches = [r for r in state.list_runs() if r.agent_slug == slug]
+    if not matches:
+        return None
+    return max(matches, key=lambda r: r.started_at)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="list multibot agents and their state")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--only-enabled", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    registry = load_from_projects_dir(config.projects_dir)
+    state = StateStore(config.state_root)
+
+    rows = []
+    for spec in sorted(registry.all_agents(), key=lambda s: (s.parent_slug or "", s.slug)):
+        if args.only_enabled and not spec.enabled:
+            continue
+        token_present = (config.bot_tokens_dir / f"{spec.slug}.env").is_file()
+        latest = _latest_run(state, spec.slug)
+        rows.append({
+            "slug": spec.slug,
+            "bot": f"@{spec.bot_username}" if spec.bot_username else "-",
+            "parent": spec.parent_slug or "-",
+            "children": ",".join(spec.children_slugs) if spec.children_slugs else "-",
+            "enabled": spec.enabled,
+            "token": "present" if token_present else "missing",
+            "last_run": (
+                f"{latest.run_id[:8]} {latest.status}" if latest else "-"
+            ),
+        })
+
+    if args.json:
+        json.dump({"agents": rows, "count": len(rows)}, sys.stdout,
+                  ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    if not rows:
+        print("(no agents registered)")
+        return 0
+
+    # Compute column widths
+    cols = ["slug", "bot", "parent", "enabled", "token", "last_run"]
+    widths = {c: max(len(c), max(len(str(r[c])) for r in rows)) for c in cols}
+    header = " | ".join(c.ljust(widths[c]) for c in cols)
+    sep = "-+-".join("-" * widths[c] for c in cols)
+    print(header)
+    print(sep)
+    for r in rows:
+        print(" | ".join(str(r[c]).ljust(widths[c]) for c in cols))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

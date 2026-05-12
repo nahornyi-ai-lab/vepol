@@ -1,0 +1,298 @@
+#!/usr/bin/python3
+"""kb-multibot-add — register a Telegram bot for an existing project.
+
+You: create the project (with `knowledge/.orchestration.yaml`), create the
+bot in @BotFather, send the token to this script.
+
+The script does the rest: identify the bot via `getMe`, derive the slug,
+look up the project workdir, save the token, update the `telegram:` block
+in `.orchestration.yaml`, add the bot to the shared group via Telethon,
+and kickstart the supervisor so it picks the new agent up immediately.
+
+The default is production-ready: `enabled: true`, `kickstart: yes`. There
+is no smoke-test path.
+
+Usage:
+  kb-multibot-add <token>                  # auto-infer everything
+  kb-multibot-add <token> --slug <slug>    # override slug if can't be inferred
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+import yaml  # noqa: E402
+
+from _kb_multibot.config import load_config  # noqa: E402
+
+
+HUB_SLUG = "hub"
+
+
+def _get_me(token: str) -> dict:
+    url = f"https://api.telegram.org/bot{token}/getMe"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.load(r)
+    except Exception as e:
+        raise ValueError(f"getMe failed: {e}")
+    if not data.get("ok"):
+        raise ValueError(f"getMe returned error: {data}")
+    return data["result"]
+
+
+def _infer_slug_from_username(bot_username: str, projects_dir: Path) -> str | None:
+    """Try to match bot_username against existing project slugs.
+
+    Heuristics, in order of confidence:
+      1. Strip common prefixes/suffixes, match a projects/<slug> symlink.
+         e.g. `<your_handle>_<slug>_bot` → try `vepol_dev`, `vepol-dev`.
+      2. Try slug == username minus `_bot` suffix entirely.
+      3. Try slug derived from any infix tokens.
+
+    Returns the matched slug, or None if nothing in projects/ matches.
+    """
+    available = {p.name for p in projects_dir.iterdir()
+                 if p.is_dir() or p.is_symlink()}
+    # Hub is special — `projects/hub` symlink doesn't exist
+    available.add(HUB_SLUG)
+
+    u = bot_username.lower().removesuffix("_bot")
+    candidates: list[str] = []
+    # Strip personal prefix tokens (first underscore-separated word)
+    # e.g. "<your_handle>_<slug>" → ["vepol_dev"]; "<another_handle>_<slug>" → ["landing"]
+    parts = u.split("_")
+    for i in range(len(parts)):
+        tail = "_".join(parts[i:])
+        if tail:
+            candidates.append(tail)
+            candidates.append(tail.replace("_", "-"))
+    # Also try the full username minus _bot
+    candidates.append(u)
+    candidates.append(u.replace("_", "-"))
+    # Hub heuristic
+    if u.endswith("_hub") or u == "hub":
+        candidates.append(HUB_SLUG)
+
+    seen: set[str] = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        if c in available:
+            return c
+    return None
+
+
+def _yaml_path_for(slug: str, workdir: Path) -> Path:
+    if slug == HUB_SLUG:
+        return workdir / ".orchestration.yaml"
+    return workdir / "knowledge" / ".orchestration.yaml"
+
+
+def _workdir_for(slug: str, projects_dir: Path) -> Path | None:
+    if slug == HUB_SLUG:
+        return projects_dir.parent
+    link = projects_dir / slug
+    if not link.exists():
+        return None
+    try:
+        knowledge_dir = link.resolve(strict=True)
+        return knowledge_dir.parent
+    except (OSError, RuntimeError):
+        return None
+
+
+async def _add_bot_to_group(config, bot_username: str) -> tuple[bool, str]:
+    from telethon import TelegramClient
+    from telethon.errors import (
+        FloodWaitError, PeerFloodError, ChatAdminRequiredError, UserPrivacyRestrictedError,
+    )
+    from telethon.tl.functions.channels import InviteToChannelRequest
+    from telethon.tl.functions.messages import AddChatUserRequest
+
+    client = TelegramClient(str(config.session_file), config.tg_api_id, config.tg_api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return False, "Telethon session not authorized — run `kb-multibot-setup --auth`"
+        bot = await client.get_entity(f"@{bot_username}")
+        group = await client.get_entity(config.group_chat_id)
+        if hasattr(group, "megagroup") and group.megagroup:
+            await client(InviteToChannelRequest(channel=group, users=[bot]))
+        else:
+            await client(AddChatUserRequest(chat_id=group.id, user_id=bot, fwd_limit=0))
+        return True, "added"
+    except FloodWaitError as e:
+        return False, f"FloodWait {e.seconds}s"
+    except PeerFloodError:
+        return False, "PeerFlood — Telegram throttling"
+    except ChatAdminRequiredError:
+        return False, "ChatAdminRequired — your account must be admin in the group"
+    except UserPrivacyRestrictedError:
+        return False, "UserPrivacyRestricted — bot privacy blocks add"
+    except Exception as e:
+        if "USER_ALREADY_PARTICIPANT" in str(e):
+            return True, "already in group"
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        await client.disconnect()
+
+
+def _kickstart_supervisor() -> bool:
+    try:
+        uid = os.getuid()
+        r = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.knowledge.multibot-supervisor"],
+            check=False, capture_output=True, text=True,
+        )
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="register a Telegram bot for an existing project")
+    parser.add_argument("token", help="Bot API token from @BotFather")
+    parser.add_argument("--slug", default=None,
+                        help="agent slug if auto-inference fails (must match projects/<slug>)")
+    parser.add_argument("--no-enable", action="store_true",
+                        help="register as enabled=false (default: enabled=true)")
+    parser.add_argument("--no-group-add", action="store_true",
+                        help="skip Telethon group-add (do it manually later)")
+    parser.add_argument("--no-kickstart", action="store_true",
+                        help="don't restart supervisor after add")
+    args = parser.parse_args()
+
+    # Config (needs TG creds, group_chat_id, session file)
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"✗ {e}\n  Run `kb-multibot-setup` first.", file=sys.stderr)
+        return 2
+
+    # Identify the bot
+    try:
+        me = _get_me(args.token)
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+    bot_id = me["id"]
+    bot_username = me["username"]
+    print(f"✓ token belongs to @{bot_username} (id={bot_id})")
+
+    # Resolve slug — explicit override beats inference
+    slug = args.slug
+    if not slug:
+        slug = _infer_slug_from_username(bot_username, config.projects_dir)
+        if not slug:
+            available = sorted(p.name for p in config.projects_dir.iterdir()
+                               if p.is_dir() or p.is_symlink())
+            print(f"✗ cannot infer slug from @{bot_username}.\n"
+                  f"  Pass --slug <slug>. Available projects: {', '.join(available)} (+ hub).",
+                  file=sys.stderr)
+            return 2
+    print(f"✓ slug: {slug}")
+
+    # Resolve workdir
+    workdir = _workdir_for(slug, config.projects_dir)
+    if not workdir or not workdir.is_dir():
+        print(f"✗ project not found for slug={slug!r}.\n"
+              f"  Run `init-kb` in the project directory first, then retry.",
+              file=sys.stderr)
+        return 2
+
+    yaml_path = _yaml_path_for(slug, workdir)
+    if not yaml_path.parent.is_dir():
+        print(f"✗ knowledge dir missing: {yaml_path.parent}", file=sys.stderr)
+        return 2
+    if not yaml_path.exists():
+        # Hub special case — create the yaml at workdir root if absent
+        if slug == HUB_SLUG:
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            print(f"✗ .orchestration.yaml missing at {yaml_path}.\n"
+                  f"  Run `init-kb` in the project first to bootstrap the wiki.",
+                  file=sys.stderr)
+            return 2
+
+    # Look up parent from existing yaml or default
+    existing_yaml: dict = {}
+    if yaml_path.exists():
+        existing_yaml = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    existing_tg = existing_yaml.get("telegram") or {}
+    parent_slug = existing_tg.get("parent_slug")
+    if parent_slug is None and slug != HUB_SLUG:
+        parent_slug = HUB_SLUG  # default: every project agent is a child of hub
+
+    enabled = not args.no_enable  # production default: enabled
+
+    # Tmp-write token
+    token_path = config.bot_tokens_dir / f"{slug}.env"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_tmp = token_path.with_suffix(".env.tmp")
+    token_tmp.write_text(f"BOT_TOKEN={args.token}\n", encoding="utf-8")
+    os.chmod(token_tmp, 0o600)
+
+    # Tmp-write yaml — merge into existing telegram block
+    merged = dict(existing_yaml)
+    tg = dict(existing_tg)
+    tg.update({
+        "bot_id": bot_id,
+        "bot_username": bot_username,
+        "bot_token_ref": f"~/.claude/channels/bots/{slug}.env",
+        "parent_slug": parent_slug,
+        "runtime": tg.get("runtime", "claude"),
+        "persona": tg.get("persona", ""),
+        "enabled": enabled,
+    })
+    merged["telegram"] = tg
+    yaml_tmp = yaml_path.with_suffix(".yaml.tmp")
+    yaml_tmp.write_text(
+        yaml.safe_dump(merged, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    # Best-effort group add
+    group_status = "skipped"
+    if not args.no_group_add:
+        ok, msg = asyncio.run(_add_bot_to_group(config, bot_username))
+        group_status = msg if ok else f"failed: {msg}"
+        if not ok:
+            print(f"⚠ group add failed: {msg}\n"
+                  f"  → manual fallback: open Telegram → search @{bot_username} → add to group")
+
+    # Atomic rename
+    os.replace(token_tmp, token_path)
+    os.replace(yaml_tmp, yaml_path)
+
+    # Kickstart
+    kick = "skipped"
+    if not args.no_kickstart:
+        kick = "ok" if _kickstart_supervisor() else "failed"
+
+    # Summary
+    print(f"\n✓ {slug} → @{bot_username}")
+    print(f"  token:    {token_path}")
+    print(f"  yaml:     {yaml_path}")
+    print(f"  parent:   {parent_slug or '(root)'}")
+    print(f"  enabled:  {enabled}")
+    print(f"  group:    {group_status}")
+    print(f"  kickstart: {kick}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

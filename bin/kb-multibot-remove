@@ -1,0 +1,161 @@
+#!/usr/bin/python3
+"""kb-multibot-remove — deactivate a multibot agent.
+
+Three escalation levels:
+
+  kb-multibot-remove <slug>              # soft disable: enabled=false, bot stays in group
+  kb-multibot-remove <slug> --kick       # + kick the bot from the shared group
+  kb-multibot-remove <slug> --archive    # + move token file to bots/_archive/
+
+The bot itself is NOT deleted at @BotFather — that step is manual via
+@BotFather → /deletebot if you want the bot to disappear from Telegram.
+
+Usage:
+  kb-multibot-remove <slug>              # default: enabled=false, supervisor stops invoking
+  kb-multibot-remove <slug> --kick       # also kick bot out of group
+  kb-multibot-remove <slug> --archive    # also archive token (soft delete)
+  kb-multibot-remove <slug> --no-kickstart
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import datetime as dt
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+import yaml  # noqa: E402
+
+from _kb_multibot.config import load_config  # noqa: E402
+
+
+HUB_SLUG = "hub"
+
+
+def _yaml_path_for(slug: str, projects_dir: Path) -> Path | None:
+    if slug == HUB_SLUG:
+        return projects_dir.parent / ".orchestration.yaml"
+    link = projects_dir / slug
+    if not link.exists():
+        return None
+    try:
+        knowledge_dir = link.resolve(strict=True)
+        return knowledge_dir / ".orchestration.yaml"
+    except (OSError, RuntimeError):
+        return None
+
+
+async def _kick_from_group(config, bot_username: str) -> tuple[bool, str]:
+    from telethon import TelegramClient
+    from telethon.tl.functions.channels import EditBannedRequest
+    from telethon.tl.types import ChatBannedRights
+
+    client = TelegramClient(str(config.session_file), config.tg_api_id, config.tg_api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return False, "Telethon session not authorized"
+        bot = await client.get_entity(f"@{bot_username}")
+        group = await client.get_entity(config.group_chat_id)
+        if hasattr(group, "megagroup") and group.megagroup:
+            await client(EditBannedRequest(
+                channel=group, participant=bot,
+                banned_rights=ChatBannedRights(until_date=None, view_messages=True),
+            ))
+            return True, "kicked"
+        return False, "basic-group kick not implemented; remove manually"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        await client.disconnect()
+
+
+def _kickstart_supervisor() -> bool:
+    try:
+        uid = os.getuid()
+        r = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.knowledge.multibot-supervisor"],
+            check=False, capture_output=True, text=True,
+        )
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="deactivate a multibot agent")
+    parser.add_argument("slug", help="agent slug")
+    parser.add_argument("--kick", action="store_true",
+                        help="also kick the bot from the shared group")
+    parser.add_argument("--archive", action="store_true",
+                        help="also move the bot token to bots/_archive/<slug>-<date>.env")
+    parser.add_argument("--no-kickstart", action="store_true",
+                        help="don't restart supervisor after change")
+    args = parser.parse_args()
+
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    yaml_path = _yaml_path_for(args.slug, config.projects_dir)
+    if not yaml_path or not yaml_path.is_file():
+        print(f"✗ no .orchestration.yaml for slug={args.slug!r} "
+              f"(looked at {yaml_path})", file=sys.stderr)
+        return 2
+
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    tg = data.get("telegram") or {}
+    if not tg:
+        print(f"✗ agent {args.slug} has no telegram: block — nothing to disable")
+        return 0
+
+    bot_username = tg.get("bot_username", "")
+    bot_token_ref = tg.get("bot_token_ref", "")
+    tg["enabled"] = False
+    data["telegram"] = tg
+
+    # Atomic yaml rewrite
+    tmp = yaml_path.with_suffix(".yaml.tmp")
+    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                   encoding="utf-8")
+    os.replace(tmp, yaml_path)
+    print(f"✓ {args.slug}: enabled=false  ({yaml_path})")
+
+    if args.kick and bot_username:
+        ok, msg = asyncio.run(_kick_from_group(config, bot_username))
+        symbol = "✓" if ok else "⚠"
+        print(f"  {symbol} kick @{bot_username}: {msg}")
+
+    if args.archive and bot_token_ref:
+        src = Path(os.path.expanduser(bot_token_ref))
+        if src.is_file():
+            archive_dir = config.bot_tokens_dir / "_archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            dst = archive_dir / f"{args.slug}-{stamp}.env"
+            shutil.move(str(src), str(dst))
+            print(f"  ✓ token archived → {dst}")
+        else:
+            print(f"  ⚠ token file not found at {src}")
+
+    if not args.no_kickstart:
+        print(f"  → kickstart supervisor: {'ok' if _kickstart_supervisor() else 'failed'}")
+
+    if bot_username:
+        print(f"\n  note: bot @{bot_username} still exists at @BotFather. "
+              f"To delete fully, send /deletebot in @BotFather manually.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
