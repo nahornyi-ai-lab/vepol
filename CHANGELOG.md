@@ -14,7 +14,15 @@ upgrading.
 
 ## [Unreleased]
 
-(no changes since 0.1.0)
+### Added
+- **Multi-bot agent runtime** — `kb-multibot-supervisor`, plus
+  `kb-multibot-setup` / `kb-init-agent` / `kb-deactivate-agent`
+  CLIs, a LaunchAgent template, a Telethon group listener, a Bot
+  API sender with retry/backoff, per-agent queues, file-lock
+  serialization, stdout-silence watchdog, four loop guards
+  (cooldown / depth / fan-out / hourly quota), and 154 unit
+  tests. Concept and spec at
+  [`docs/methodology/multibot-agent-runtime.md`](docs/methodology/multibot-agent-runtime.md).
 
 ## [0.1.0] — 2026-05-02
 

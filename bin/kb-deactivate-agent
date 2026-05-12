@@ -1,0 +1,111 @@
+#!/usr/bin/python3
+"""kb-deactivate-agent — disable an agent.
+
+Sets `telegram.enabled: false` in agent's .orchestration.yaml. Optionally
+kicks bot from group. Does NOT revoke token at BotFather — that's manual.
+
+Usage:
+  kb-deactivate-agent <slug>            # disable
+  kb-deactivate-agent <slug> --kick     # also kick bot from group
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+import yaml  # noqa: E402
+
+from _kb_multibot.config import load_config  # noqa: E402
+
+
+async def _kick_from_group(
+    api_id: int, api_hash: str, session_file: Path,
+    group_chat_id: int, bot_username: str,
+) -> tuple[bool, str]:
+    from telethon import TelegramClient
+    client = TelegramClient(str(session_file), api_id, api_hash)
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return False, "Telethon session not authorized"
+    try:
+        from telethon.tl.functions.channels import EditBannedRequest
+        from telethon.tl.types import ChatBannedRights
+        bot = await client.get_entity(f"@{bot_username}")
+        group = await client.get_entity(group_chat_id)
+        if hasattr(group, "megagroup") and group.megagroup:
+            await client(EditBannedRequest(
+                channel=group, participant=bot,
+                banned_rights=ChatBannedRights(until_date=None, view_messages=True),
+            ))
+            return True, "kicked from supergroup"
+        return False, "basic group kick not implemented; remove manually"
+    except Exception as e:  # pragma: no cover
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        await client.disconnect()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="deactivate a multibot agent")
+    parser.add_argument("slug", help="agent slug")
+    parser.add_argument("--kick", action="store_true",
+                        help="also kick bot from group")
+    args = parser.parse_args()
+
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    project_link = config.projects_dir / args.slug
+    if not project_link.exists():
+        print(f"✗ project not in registry: {project_link}", file=sys.stderr)
+        return 2
+
+    knowledge_dir = project_link.resolve() if project_link.is_symlink() else project_link
+    orch_path = knowledge_dir / ".orchestration.yaml"
+    if not orch_path.is_file():
+        print(f"✗ no .orchestration.yaml at {orch_path}", file=sys.stderr)
+        return 2
+
+    data = yaml.safe_load(orch_path.read_text(encoding="utf-8")) or {}
+    tg = data.get("telegram") or {}
+    if not tg:
+        print(f"✗ agent {args.slug} has no telegram block — already not active")
+        return 0
+
+    bot_username = tg.get("bot_username", "")
+    tg["enabled"] = False
+    data["telegram"] = tg
+
+    tmp = orch_path.with_suffix(".yaml.tmp")
+    tmp.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    tmp.replace(orch_path)
+    print(f"✓ {args.slug}: telegram.enabled=false")
+    print(f"  config: {orch_path}")
+    print(f"  bot @{bot_username} stays in group (use --kick to remove)")
+
+    if args.kick and bot_username:
+        ok, msg = asyncio.run(_kick_from_group(
+            config.tg_api_id, config.tg_api_hash, config.session_file,
+            config.group_chat_id, bot_username,
+        ))
+        prefix = "✓" if ok else "⚠"
+        print(f"  {prefix} kick: {msg}")
+
+    print(f"\n  → bot token at ~/.claude/channels/bots/{args.slug}.env stays "
+          f"on disk. Revoke via @BotFather → /revoke if compromised.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

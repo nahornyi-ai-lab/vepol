@@ -1,0 +1,233 @@
+#!/usr/bin/python3
+"""kb-init-agent — interactive onboarding for a new multibot agent.
+
+Concept atomic + rollback: 1. Accept slug + project path + parent_slug
+  2. Print BotFather checklist (creator follows in @BotFather, returns token)
+  3. Receive token + @username
+  4. tmp-write `<bot_token_dir>/<slug>.env.tmp` + `.orchestration.yaml.tmp`
+  5. Try Telethon `client.add_chat_user(group, @bot_username)` — best-effort
+  6. Atomic rename of token + YAML
+  7. Mark status in bots-roster.md
+
+Rollback: if any step fails after token written but before rename, remove tmp
+files. After rename, no rollback — kb-deactivate-agent is the disable path.
+
+Usage:
+  kb-init-agent <slug> --workdir <path> [--parent <slug>] [--runtime claude|codex]
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+import yaml  # noqa: E402
+
+from _kb_multibot.config import load_config  # noqa: E402
+
+
+_BOT_FATHER_CHECKLIST = """\
+═══ @BotFather checklist для нового бота ═══
+
+1. Открой @BotFather в Telegram → отправь /newbot
+2. Display name: choose any (e.g., "{slug} agent")
+3. Username: typically `@demo_{slug_und}_bot` — must end in `bot`,
+   5–32 chars, [a-zA-Z0-9_] only.
+   If taken, try `@nailab_{slug_und}_bot` or `@vepol_{slug_und}_bot`.
+4. Copy the token shown (format `12345:ABC...`).
+5. Send /setprivacy → select your bot → Disable
+6. Send /setjoingroups → select your bot → Enable
+7. Enable Bot-to-Bot Communication Mode in @BotFather (Bot API 10.0+).
+"""
+
+
+def _validate_slug(slug: str) -> None:
+    if not slug or not slug.replace("-", "").replace("_", "").isalnum():
+        raise ValueError(f"invalid slug: {slug!r}")
+    if "/" in slug or ".." in slug:
+        raise ValueError(f"invalid slug: {slug!r}")
+
+
+def _validate_bot_token(token: str) -> int:
+    """Token format: `<bot_id>:<random>`. Returns bot_id as int."""
+    if not token or ":" not in token:
+        raise ValueError("token must have form `<bot_id>:<random>`")
+    prefix = token.split(":", 1)[0]
+    if not prefix.isdigit():
+        raise ValueError(f"token prefix must be digits, got {prefix!r}")
+    return int(prefix)
+
+
+def _validate_bot_username(username: str) -> str:
+    """Lowercase, no @ prefix. Validates BotFather rules."""
+    u = username.lstrip("@").lower()
+    if len(u) < 5 or len(u) > 32:
+        raise ValueError(f"username must be 5–32 chars, got {len(u)}")
+    if not u[0].isalpha():
+        raise ValueError("username must start with a letter")
+    if not all(c.isalnum() or c == "_" for c in u):
+        raise ValueError("username must be [a-z0-9_] only")
+    if not u.endswith("bot"):
+        raise ValueError("username must end with 'bot' (BotFather rule)")
+    return u
+
+
+def _atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+async def _try_add_to_group(
+    api_id: int, api_hash: str, session_file: Path,
+    group_chat_id: int, bot_username: str,
+) -> tuple[bool, str]:
+    """Best-effort add bot to group via user-account. Concept ."""
+    from telethon import TelegramClient
+    from telethon.errors import (
+        FloodWaitError, PeerFloodError, ChatAdminRequiredError, UserPrivacyRestrictedError,
+    )
+    client = TelegramClient(str(session_file), api_id, api_hash)
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return False, "Telethon session not authorized — run `kb-multibot-setup --auth`"
+    try:
+        from telethon.tl.functions.messages import AddChatUserRequest
+        from telethon.tl.functions.channels import InviteToChannelRequest
+        bot = await client.get_entity(f"@{bot_username}")
+        group = await client.get_entity(group_chat_id)
+        # Channel/supergroup vs basic chat — different RPCs
+        if hasattr(group, "megagroup") and group.megagroup:
+            await client(InviteToChannelRequest(channel=group, users=[bot]))
+        else:
+            await client(AddChatUserRequest(chat_id=group.id, user_id=bot, fwd_limit=0))
+        return True, "added"
+    except FloodWaitError as e:
+        return False, f"FloodWait ({e.seconds}s) — Telegram rate-limited; add manually"
+    except PeerFloodError:
+        return False, "PeerFlood — Telegram blocked auto-add; add manually"
+    except ChatAdminRequiredError:
+        return False, "ChatAdminRequired — the operator must be admin; add manually"
+    except UserPrivacyRestrictedError:
+        return False, "UserPrivacyRestricted — bot privacy settings; add manually"
+    except Exception as e:  # pragma: no cover — Telethon zoo of errors
+        return False, f"Telethon error: {type(e).__name__}: {e}"
+    finally:
+        await client.disconnect()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="onboard a multibot agent")
+    parser.add_argument("slug", help="agent slug (kebab-case)")
+    parser.add_argument("--workdir", required=True,
+                        help="absolute path to agent's project workdir")
+    parser.add_argument("--parent", default=None,
+                        help="parent agent slug (omit for root)")
+    parser.add_argument("--runtime", default="claude", choices=["claude", "codex"])
+    parser.add_argument("--no-group-add", action="store_true",
+                        help="skip auto-add to group (manual fallback)")
+    parser.add_argument("--persona", default="",
+                        help="one-line persona description")
+    args = parser.parse_args()
+
+    try:
+        _validate_slug(args.slug)
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    workdir = Path(args.workdir).expanduser().resolve()
+    if not workdir.is_dir():
+        print(f"✗ workdir does not exist: {workdir}", file=sys.stderr)
+        return 2
+    knowledge_dir = workdir / "knowledge"
+    if not knowledge_dir.is_dir():
+        print(f"✗ workdir has no knowledge/ subdir: {knowledge_dir}", file=sys.stderr)
+        return 2
+
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"✗ {e}\nRun `kb-multibot-setup` first.", file=sys.stderr)
+        return 2
+
+    # Print BotFather checklist
+    print(_BOT_FATHER_CHECKLIST.format(
+        slug=args.slug, slug_und=args.slug.replace("-", "_")
+    ))
+
+    token = input("\nPaste BOT_TOKEN here: ").strip()
+    try:
+        bot_id = _validate_bot_token(token)
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    username_in = input("Paste @bot_username (e.g., demo_vepol_bot): ").strip()
+    try:
+        bot_username = _validate_bot_username(username_in)
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
+    # tmp-write token file
+    token_path = config.bot_tokens_dir / f"{args.slug}.env"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_tmp = token_path.with_suffix(".env.tmp")
+    token_tmp.write_text(f"BOT_TOKEN={token}\n", encoding="utf-8")
+    os.chmod(token_tmp, 0o600)
+
+    # tmp-write or merge .orchestration.yaml
+    orch_path = knowledge_dir / ".orchestration.yaml"
+    orch_data: dict = {}
+    if orch_path.exists():
+        orch_data = yaml.safe_load(orch_path.read_text(encoding="utf-8")) or {}
+    orch_data.setdefault("telegram", {})
+    orch_data["telegram"].update({
+        "bot_id": bot_id,
+        "bot_username": bot_username,
+        "bot_token_ref": f"~/.claude/channels/bots/{args.slug}.env",
+        "runtime": args.runtime,
+        "parent_slug": args.parent,
+        "persona": args.persona or orch_data["telegram"].get("persona", ""),
+        "enabled": False,  # safety: default false; the operator flips when ready
+    })
+    orch_tmp = orch_path.with_suffix(".yaml.tmp")
+    orch_tmp.write_text(yaml.safe_dump(orch_data, allow_unicode=True), encoding="utf-8")
+
+    # Best-effort group add
+    group_status = "skipped"
+    if not args.no_group_add:
+        ok, msg = asyncio.run(_try_add_to_group(
+            config.tg_api_id, config.tg_api_hash, config.session_file,
+            config.group_chat_id, bot_username,
+        ))
+        group_status = msg if not ok else "added"
+        if not ok:
+            print(f"⚠ auto-add to group failed: {msg}")
+            print(f"   → open <your_group> in Telegram, search @{bot_username}, add manually")
+
+    # Atomic rename — point of no return
+    os.replace(token_tmp, token_path)
+    os.replace(orch_tmp, orch_path)
+    print(f"\n✓ {args.slug} onboarded")
+    print(f"  token: {token_path}")
+    print(f"  config: {orch_path}")
+    print(f"  group: {group_status}")
+    print(f"\n  status: enabled=false (safety toggle)")
+    print(f"  → flip `telegram.enabled: true` in {orch_path} when ready")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

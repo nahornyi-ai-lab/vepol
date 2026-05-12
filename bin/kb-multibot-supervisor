@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+"""kb-multibot-supervisor — main supervisor binary (LaunchAgent target).
+
+Concept: ~/knowledge/concepts/multibot-agent-runtime.md
+Spec: §7 + §16 + §17
+
+Reads config from env (TG_API_ID, TG_API_HASH, KB_MULTIBOT_GROUP_CHAT_ID),
+loads agent registry from `~/knowledge/projects/*/.orchestration.yaml`,
+connects Telethon listener, dispatches mentions to per-agent spawn loop.
+
+Usage:
+  kb-multibot-supervisor             # normal run (LaunchAgent invokes this)
+  kb-multibot-supervisor --check     # validate config + registry, exit
+  kb-multibot-supervisor --version   # print version
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+# Make _kb_multibot importable when this script runs directly
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from _kb_multibot import __version__  # noqa: E402
+from _kb_multibot.config import load_config  # noqa: E402
+from _kb_multibot.registry import load_from_projects_dir  # noqa: E402
+
+
+def cmd_check() -> int:
+    """Validate config + registry, exit 0 if all good."""
+    try:
+        config = load_config()
+    except ValueError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    print(f"config ok: group_chat_id={config.group_chat_id}")
+    print(f"  state_root: {config.state_root}")
+    print(f"  session_file: {config.session_file}")
+    print(f"  projects_dir: {config.projects_dir}")
+    print(f"  bot_tokens_dir: {config.bot_tokens_dir}")
+    registry = load_from_projects_dir(config.projects_dir)
+    print(f"registry: {len(registry)} agents loaded")
+    for spec in registry.all_agents():
+        marker = "OK" if spec.bot_id else "no-token"
+        parent = spec.parent_slug or "root"
+        children = ",".join(spec.children_slugs) if spec.children_slugs else "-"
+        print(f"  [{marker}] {spec.slug} @{spec.bot_username} "
+              f"parent={parent} children={children} "
+              f"enabled={spec.enabled} runtime={spec.runtime}")
+    enabled = sum(1 for a in registry.all_agents() if a.enabled)
+    print(f"summary: {len(registry)} total, {enabled} enabled")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="multibot supervisor")
+    parser.add_argument("--check", action="store_true",
+                        help="validate config + registry and exit")
+    parser.add_argument("--version", action="store_true")
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"kb-multibot-supervisor {__version__}")
+        return 0
+    if args.check:
+        return cmd_check()
+
+    from _kb_multibot.supervisor import main as supervisor_main
+    return asyncio.run(supervisor_main())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

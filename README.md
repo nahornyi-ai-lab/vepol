@@ -82,6 +82,21 @@ unit tests. The list grows release by release; see
   plan for tomorrow from your open backlog at the end of evening
   retro. You confirm overnight; the morning dispatch turns the
   approved plan into per-project work.
+- **Multi-bot agent runtime** — a Telegram-based supervisor that
+  gives each project agent its own bot identity while starting
+  compute only on demand. It routes mentions, queues work per
+  agent, applies loop guards (cooldown / depth / fan-out / hourly
+  quota), and writes durable outcomes back through the existing
+  project knowledge base.
+  [`docs/methodology/multibot-agent-runtime.md`](docs/methodology/multibot-agent-runtime.md)
+
+> **Self-hosting only.** The multi-bot runtime uses a Telegram
+> user-account session to observe the configured group and can
+> add bot accounts to it. Run it only for private groups you
+> control, with consent from all participants. Treat bot tokens,
+> Telegram API credentials, session files, and group chat IDs as
+> secrets. Do not use this runtime to join, monitor, scrape, or
+> automate groups where you lack authorization.
 
 The methodology that holds these modules together (the markdown
 substrate, the orchestrator, the cross-agent review gate, the

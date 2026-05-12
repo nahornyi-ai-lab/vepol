@@ -1,0 +1,197 @@
+#!/usr/bin/python3
+"""kb-multibot-setup — first-time setup CLI.
+
+Interactive Telethon login (handles the verification code Telegram sends to
+your phone), then prompts for the shared group and writes the resolved
+chat_id together with `TG_API_ID` / `TG_API_HASH` to
+`~/.orchestrator/multibot.env` (chmod 600).
+
+Idempotent: re-running validates existing setup and only prompts for the
+pieces that are still missing.
+
+Usage:
+  kb-multibot-setup                 # full interactive setup
+  kb-multibot-setup --auth          # only Telethon auth (refresh session)
+  kb-multibot-setup --check         # report current setup status, no changes
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from _kb_multibot.config import (  # noqa: E402
+    MULTIBOT_ENV,
+    load_config,
+)
+
+
+def _read_existing_env() -> dict[str, str]:
+    try:
+        from dotenv import dotenv_values  # type: ignore
+    except ImportError:
+        return {}
+    return dict(dotenv_values(MULTIBOT_ENV)) if MULTIBOT_ENV.exists() else {}
+
+
+
+def _write_env(env: dict[str, str]) -> None:
+    MULTIBOT_ENV.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# kb-multibot-setup auto-generated — edit with care\n"]
+    for k, v in sorted(env.items()):
+        lines.append(f"{k}={v}\n")
+    MULTIBOT_ENV.write_text("".join(lines), encoding="utf-8")
+    os.chmod(MULTIBOT_ENV, 0o600)
+
+
+async def _run_telethon_auth(api_id: int, api_hash: str, session_path: Path) -> int:
+    """Trigger Telethon interactive login — verification code via SMS/Telegram."""
+    from telethon import TelegramClient
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(str(session_path), api_id, api_hash)
+    print(f"Connecting to Telegram (session: {session_path})...")
+    await client.start()
+    me = await client.get_me()
+    print(f"✓ Authenticated as @{me.username or me.first_name} (id={me.id})")
+    await client.disconnect()
+    return 0
+
+
+async def _resolve_group_chat_id(
+    api_id: int, api_hash: str, session_path: Path, group_handle: str
+) -> int | None:
+    from telethon import TelegramClient
+    client = TelegramClient(str(session_path), api_id, api_hash)
+    await client.connect()
+    if not await client.is_user_authorized():
+        print("Telethon session not authorized — run `kb-multibot-setup --auth` first",
+              file=sys.stderr)
+        return None
+    try:
+        entity = await client.get_entity(group_handle)
+        chat_id = entity.id
+        # Telegram channel IDs need -100 prefix to match Bot API form
+        if getattr(entity, "megagroup", False) or getattr(entity, "broadcast", False):
+            chat_id = -1000000000000 - entity.id
+        elif hasattr(entity, "title"):  # chat
+            chat_id = -entity.id
+        return chat_id
+    finally:
+        await client.disconnect()
+
+
+def cmd_check() -> int:
+    try:
+        config = load_config()
+        print(f"✓ config complete")
+        print(f"  TG_API_ID:        {config.tg_api_id}")
+        print(f"  TG_API_HASH:      {'*' * len(config.tg_api_hash)}")
+        print(f"  group_chat_id:    {config.group_chat_id}")
+        print(f"  session_file:     {config.session_file}")
+        if config.session_file.exists():
+            print(f"  session status:   exists ({config.session_file.stat().st_size}b)")
+        else:
+            print(f"  session status:   missing — run `kb-multibot-setup --auth`")
+        return 0
+    except ValueError as e:
+        print(f"✗ config incomplete: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_auth() -> int:
+    existing = _read_existing_env()
+    api_id_str = existing.get("TG_API_ID")
+    api_hash = existing.get("TG_API_HASH")
+    if not api_id_str or not api_hash:
+        print(f"TG_API_ID/TG_API_HASH not found in env or {MULTIBOT_ENV}",
+              file=sys.stderr)
+        return 2
+    api_id = int(api_id_str)
+    session_path = Path.home() / ".orchestrator" / "multibot-supervisor.session"
+    return asyncio.run(_run_telethon_auth(api_id, api_hash, session_path))
+
+
+def cmd_full() -> int:
+    existing = _read_existing_env()
+    api_id_str = existing.get("TG_API_ID")
+    api_hash = existing.get("TG_API_HASH")
+    if not api_id_str or not api_hash:
+        print("\n=== Step 1: Telegram API credentials ===\n")
+        print("Get TG_API_ID and TG_API_HASH at https://my.telegram.org → API development tools.")
+        api_id_str = input("Enter TG_API_ID: ").strip()
+        api_hash = input("Enter TG_API_HASH: ").strip()
+        if not api_id_str.isdigit() or not api_hash:
+            print("invalid input", file=sys.stderr)
+            return 2
+
+    api_id = int(api_id_str)
+
+    # Telethon auth
+    print("\n=== Step 2: Telethon authentication ===\n")
+    session_path = Path.home() / ".orchestrator" / "multibot-supervisor.session"
+    if session_path.exists():
+        print(f"Existing session found at {session_path}. Re-using.")
+    else:
+        rc = asyncio.run(_run_telethon_auth(api_id, api_hash, session_path))
+        if rc != 0:
+            return rc
+
+    # Group chat_id
+    group_chat_id = existing.get("KB_MULTIBOT_GROUP_CHAT_ID")
+    if not group_chat_id:
+        print("\n=== Step 3: shared group chat_id ===\n")
+        handle = input("Enter group @username or invite link: ").strip()
+        if not handle:
+            print("aborted", file=sys.stderr)
+            return 2
+        resolved = asyncio.run(
+            _resolve_group_chat_id(api_id, api_hash, session_path, handle)
+        )
+        if not resolved:
+            print("could not resolve group chat_id", file=sys.stderr)
+            return 2
+        group_chat_id = str(resolved)
+        print(f"✓ resolved {handle} → chat_id = {group_chat_id}")
+
+    # Persist
+    print("\n=== Step 4: Writing config ===\n")
+    env_out = {
+        "TG_API_ID": str(api_id),
+        "TG_API_HASH": api_hash,
+        "KB_MULTIBOT_GROUP_CHAT_ID": group_chat_id,
+    }
+    _write_env(env_out)
+    print(f"✓ wrote {MULTIBOT_ENV} (chmod 600)")
+
+    # Validate
+    rc = cmd_check()
+    if rc == 0:
+        print("\n✓ kb-multibot-setup complete. Next: create bots via @BotFather "
+              "and run `kb-init-agent <slug>` per agent.")
+    return rc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="multibot first-time setup")
+    parser.add_argument("--check", action="store_true",
+                        help="report current setup status, no changes")
+    parser.add_argument("--auth", action="store_true",
+                        help="only Telethon auth (refresh session)")
+    args = parser.parse_args()
+
+    if args.check:
+        return cmd_check()
+    if args.auth:
+        return cmd_auth()
+    return cmd_full()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
