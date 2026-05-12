@@ -274,7 +274,7 @@ class Supervisor:
         return []
 
     async def _handle_stop_command(self, event: TelegramEvent) -> None:
-        """parse /stop @bot or reply '/stop' on bot's message."""
+        """Concept Q-impl-8: parse /stop @bot or reply '/stop' on bot's message."""
         targets_usernames = extract_stop_targets(event.text)
         targets_specs: list[AgentSpec] = []
         for u in targets_usernames:
@@ -363,13 +363,23 @@ class Supervisor:
                 trigger_text=event.text,
             )
 
-            # Spawn via adapter
-            adapter = make_adapter(
-                spec.runtime,
-                resume_session_id=(
-                    None  # warm-resume not wired in v0.1 — + Phase 2
-                ),
-            )
+            # Resolve warm-session id: per-(chat_id, agent_slug), latest success run.
+            resume_id: str | None = None
+            if spec.warm_session:
+                latest = None
+                for r in self.state.list_runs():
+                    if (r.agent_slug == spec.slug
+                            and r.source_chat_id == event.chat_id
+                            and r.status == RUN_STATUS_SUCCESS
+                            and r.claude_session_id):
+                        if latest is None or r.started_at > latest.started_at:
+                            latest = r
+                if latest:
+                    resume_id = latest.claude_session_id
+                    logger.info("warm-session: agent %s chat %s → resume %s",
+                                spec.slug, event.chat_id, resume_id[:8])
+
+            adapter = make_adapter(spec.runtime, resume_session_id=resume_id)
 
             self.watchdog.add(
                 run_id=run_id,
@@ -467,6 +477,26 @@ class Supervisor:
         # only reads .user_id and .username.
         await self._spawn_for_agent(spec, synthetic)
 
+
+def _add_helper_to_registry() -> None:
+    """Monkey-patch AgentRegistry with .by_username_or_none_from_chat_id().
+
+    DM chats have chat_id == other user's id. If that id is one of our bots,
+    we want to find the AgentSpec.
+    """
+
+    def by_username_or_none_from_chat_id(
+        self: AgentRegistry, chat_id: int
+    ) -> AgentSpec | None:
+        for spec in self._by_slug.values():
+            if spec.bot_id == chat_id:
+                return spec
+        return None
+
+    AgentRegistry.by_username_or_none_from_chat_id = by_username_or_none_from_chat_id  # type: ignore[attr-defined]
+
+
+_add_helper_to_registry()
 
 
 async def main() -> int:
