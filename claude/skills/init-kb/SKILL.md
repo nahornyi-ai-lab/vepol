@@ -75,6 +75,7 @@ bash ~/knowledge/bin/new-wiki "<absolute-project-path>" <slug> <category>
 
 Это создаст:
 - `<project>/CLAUDE.md`
+- `<project>/GEMINI.md`
 - `<project>/knowledge/README.md`, `index.md`, `log.md`, `state.md`
 - `<project>/knowledge/raw/assets/`, `sources/`, `daily/`
 - Обновит `<project>/.gitignore` (добавит `knowledge/` и `.kb-ignore`)
@@ -97,6 +98,7 @@ touch "<project>/knowledge/icp/.gitkeep" ...
 1. **`<project>/knowledge/README.md`** — Edit: убрать плейсхолдер описания, вставить твой анализ из Шага 2 (1-2 предложения: что это, для кого, в каком статусе)
 2. **`<project>/knowledge/state.md`** — Edit: «Одной строкой» → твоя оценка статуса. Остальное оставить как в шаблоне (пусто).
 3. **`<project>/CLAUDE.md`** — Edit: раздел «О проекте» → реальное описание; раздел «Категории» → перечисление выбранных категорий.
+4. **`<project>/GEMINI.md`** — проверить, что это тонкий adapter на `CLAUDE.md`, без отдельной копии правил.
 
 ### Шаг 7. Обновить хаб
 

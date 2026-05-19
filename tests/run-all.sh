@@ -4,6 +4,19 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd .. && pwd)"
+
+# Sanitized seed/public fixtures use literal __HOME__/knowledge/... paths.
+# Provide that layout locally so the same fixtures run from source checkouts.
+COMPAT_HOME="$PWD/__HOME__"
+rm -rf "$COMPAT_HOME"
+mkdir -p "$COMPAT_HOME/knowledge"
+ln -s "$REPO_ROOT/bin" "$COMPAT_HOME/knowledge/bin"
+ln -s "$PWD" "$COMPAT_HOME/knowledge/tests"
+cleanup() {
+  rm -rf "$COMPAT_HOME"
+}
+trap cleanup EXIT
 
 pass() { printf '\033[1;32m●\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m●\033[0m %s\n' "$*" >&2; }

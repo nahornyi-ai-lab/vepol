@@ -15,8 +15,10 @@ mindmap
     Architecture & Components
       Universal Core &lpar;scripts/schema&rpar;
       User Overlay &lpar;~/knowledge/&rpar;
-      Claude Code &lpar;Primary Orchestrator&rpar;
-      Codex &lpar;Secondary Orchestrator&rpar;
+      Claude Code &lpar;CLI agent&rpar;
+      Codex &lpar;CLI agent&rpar;
+      Gemini CLI &lpar;reviewer / CLI agent&rpar;
+      Future CLI-capable agents
       Knowledge-base Hub
     Knowledge Structure
       Local project wiki &lpar;<project>/knowledge/&rpar;

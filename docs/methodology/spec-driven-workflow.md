@@ -139,8 +139,8 @@ Loop until green.
 
 ## How AI agents fit in
 
-Vepol assumes you're working with one or more AI agents (Claude,
-Codex, and future agents). The agents apply this workflow
+Vepol assumes you're working with one or more AI agents (Claude Code,
+Codex, Gemini CLI, and future CLI-capable agents). The agents apply this workflow
 automatically for any non-trivial work:
 
 - They write the spec first when prompted to make a non-trivial

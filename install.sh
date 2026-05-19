@@ -156,6 +156,11 @@ if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
   warn "    These enable extras (cross-agent review, session auto-capture, etc.)"
   warn "    Install: brew install ${OPTIONAL_MISSING[*]}"
 fi
+if ! command -v gemini >/dev/null 2>&1; then
+  warn "  Optional tool missing: gemini"
+  warn "    Enables third-opinion reviews / quorum"
+  warn "    Install: npm install -g @google/gemini-cli"
+fi
 
 # Python 3.10+ for People module + future Python-side tooling
 if command -v python3 >/dev/null 2>&1; then
@@ -220,17 +225,31 @@ fi
 ok "  bin/ symlinks point at $VEPOL_DIR/bin/"
 
 # Templates (always overwrite — schema is canonical)
+cp "$VEPOL_DIR/_template/AGENTS.md" "$HUB/_template/AGENTS.md"
 cp "$VEPOL_DIR/_template/CLAUDE.md" "$HUB/_template/CLAUDE.md"
+cp "$VEPOL_DIR/_template/GEMINI.md" "$HUB/_template/GEMINI.md"
 cp -R "$VEPOL_DIR/_template/knowledge/." "$HUB/_template/knowledge/"
 ok "  _template/ refreshed"
 
-# Hub-level master schema CLAUDE.md
+# Hub-level master contract AGENTS.md + Claude adapter
+if [[ ! -f "$HUB/AGENTS.md" ]]; then
+  cp "$VEPOL_DIR/knowledge/AGENTS.md" "$HUB/AGENTS.md"
+  ok "  $HUB/AGENTS.md installed (master contract)"
+else
+  warn "  $HUB/AGENTS.md already exists — not overwritten"
+  warn "    Compare with $VEPOL_DIR/knowledge/AGENTS.md if you want updates"
+fi
 if [[ ! -f "$HUB/CLAUDE.md" ]]; then
   cp "$VEPOL_DIR/knowledge/CLAUDE.md" "$HUB/CLAUDE.md"
-  ok "  $HUB/CLAUDE.md installed (master schema)"
+  ok "  $HUB/CLAUDE.md installed (Claude Code adapter)"
 else
   warn "  $HUB/CLAUDE.md already exists — not overwritten"
-  warn "    Compare with $VEPOL_DIR/knowledge/CLAUDE.md if you want updates"
+fi
+if [[ ! -f "$HUB/GEMINI.md" ]]; then
+  cp "$VEPOL_DIR/knowledge/GEMINI.md" "$HUB/GEMINI.md"
+  ok "  $HUB/GEMINI.md installed (Gemini CLI adapter)"
+else
+  warn "  $HUB/GEMINI.md already exists — not overwritten"
 fi
 
 # Hub-level triad / state files — only if missing
@@ -468,8 +487,14 @@ ${C_INFO}━━━ Try these next ━━━${C_OFF}
 
 ${C_INFO}━━━ Read next ━━━${C_OFF}
 
-  ${C_DIM}# Project schema (how the knowledge base is organized):${C_OFF}
+  ${C_DIM}# Canonical hub contract (how the knowledge base is organized):${C_OFF}
+  $HUB/AGENTS.md
+
+  ${C_DIM}# Claude Code adapter (loads the canonical contract):${C_OFF}
   $HUB/CLAUDE.md
+
+  ${C_DIM}# Gemini CLI project-context template (if you use Gemini CLI):${C_OFF}
+  $HUB/_template/GEMINI.md
 
   ${C_DIM}# Global Claude Code conventions (your edits stay; managed block updates):${C_OFF}
   $HOME_DIR/.claude/CLAUDE.md
@@ -485,10 +510,13 @@ ${C_INFO}━━━ Manual steps remaining ━━━${C_OFF}
   2. Optional — enable cross-agent review with Codex CLI:
        codex login                      # or place API key in ~/.codex/auth.json
 
-  3. Optional — paste Telegram bot token into:
+  3. Optional — enable third-opinion reviews with Gemini CLI:
+       gemini                            # choose an auth method, or configure GEMINI_API_KEY / Vertex AI / Google Code Assist
+
+  4. Optional — paste Telegram bot token into:
        $HOME_DIR/.claude/channels/telegram/.env
 
-  4. To start a wiki in your first project:
+  5. To start a wiki in your first project:
        cd <your-project>
        claude -p "/init-kb"
 

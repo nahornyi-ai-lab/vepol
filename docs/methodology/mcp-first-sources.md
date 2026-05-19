@@ -108,7 +108,7 @@ networking) is permitted only when:
      justification.
 2. **Listed in the registry** at the bottom of this page.
 3. **Code-reviewed** through the standard cross-agent review gate
-   (Codex Layer-1 on the justification, Layer-2 on the adapter).
+   (a configured independent reviewer; Codex is the v0.1 default).
 
 If those three conditions are met, the direct adapter is acceptable
 under the exception. If any are missing, the rule applies and the
@@ -359,8 +359,9 @@ primitive, not an exception.
 ## Implications for Vepol prerequisites
 
 Source-ingestion modules require a working MCP host. Vepol's
-`AGENTS.md` already lists Claude Code as a hard prereq, so this is
-consistent with onboarding. MCP servers themselves (Google Calendar
+`AGENTS.md` already lists Claude Code as a hard prereq because the
+v1 MCP host is Claude Code, so this is consistent with onboarding.
+MCP servers themselves (Google Calendar
 MCP, Gmail MCP, etc.) need separate user setup; `kb-doctor mcp-check`
 verifies and points the user to setup docs when missing.
 

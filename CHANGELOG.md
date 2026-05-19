@@ -15,6 +15,9 @@ upgrading.
 ## [Unreleased]
 
 ### Added
+- **Gemini CLI project-context adapters** — root `GEMINI.md` and
+  `_template/GEMINI.md` now point Gemini CLI at the same shared
+  operating contract instead of duplicating rules.
 - **Multi-bot agent runtime** — `kb-multibot-supervisor`, plus
   `kb-multibot-setup` / `kb-init-agent` / `kb-deactivate-agent`
   CLIs, a LaunchAgent template, a Telethon group listener, a Bot
@@ -23,6 +26,9 @@ upgrading.
   (cooldown / depth / fan-out / hourly quota), and 154 unit
   tests. Concept and spec at
   [`docs/methodology/multibot-agent-runtime.md`](docs/methodology/multibot-agent-runtime.md).
+- **Vendor-neutral agent positioning in docs** — public docs now
+  state that Vepol coordinates ready-made CLI agents such as Claude
+  Code, Codex, Gemini CLI, and future agents over one shared KB.
 
 ## [0.1.0] — 2026-05-02
 
@@ -57,8 +63,8 @@ Links, People, MCP-first sources) landed between 2026-04-30 and
   designed but is maintainer-only tooling and is not part of this
   public release.
 - **Agent-driven onboarding** — `AGENTS.md` (operating manual for AI
-  agents installing Vepol) + `CLAUDE.md` pointer for Claude Code's
-  convention.
+  agents installing Vepol) + runtime adapters such as `CLAUDE.md`
+  for Claude Code and `GEMINI.md` for Gemini CLI.
 
 ### Daily-plan generator v0.1 (2026-04-30)
 

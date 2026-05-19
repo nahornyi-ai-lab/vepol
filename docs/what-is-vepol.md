@@ -17,6 +17,25 @@ control of where it goes?**
 That's the actual product. Memory is just one of the things that makes it
 possible.
 
+## Vepol is an operating layer for existing agents
+
+Vepol is not a new foundation model. It works through the AI agents you
+already trust: Claude Code, Codex, Gemini CLI, or another CLI-capable
+agent that can read files, run commands, and obey a project contract.
+
+Think of it as the local coordination layer around those agents:
+
+- plain markdown files as the shared source of truth
+- a durable project/person/task graph
+- scripts and schedules that wake agents up for routine work
+- cross-agent review so one model can challenge another
+- incidents, logs, backlog, and handoff notes that survive across sessions
+
+The model provider is replaceable. The knowledge base is not. If Claude,
+Codex, Gemini, or a future agent picks up the task, it starts from the same
+files and writes back to the same protocol. That is how Vepol avoids
+turning into one more vendor-specific chat history.
+
 ## What Vepol does for you
 
 **Plans your day.** Each morning Vepol looks at your knowledge base — open
@@ -190,8 +209,8 @@ chronicle; you both refer to the same record.
 
 ## Who this is for
 
-- Power users of Claude Code who already write in markdown and want their
-  notes to *act*, not just sit there
+- Power users of CLI-capable AI agents who already write in markdown and want
+  their notes to *act*, not just sit there
 - Founders, builders, and consultants who can't afford to start every AI
   conversation from scratch
 - Engineers who don't trust black-box assistants for important work and
@@ -203,10 +222,10 @@ chronicle; you both refer to the same record.
 
 - People who want a managed cloud service — by design, this is your
   local environment
-- People who don't already use Claude Code or a similar AI agent —
-  Vepol works *through* the agent's interface (Claude Code's macOS
-  app, Codex's macOS app, or their respective CLIs); if you're not
-  in that flow yet, start there first
+- People who don't already use a capable AI coding/CLI agent —
+  Vepol works *through* the agent's interface (Claude Code, Codex,
+  Gemini CLI, or another configured agent); if you're not in that
+  flow yet, start there first
 - People who prefer their AI to be reactive only — Vepol's whole
   point is initiative
 

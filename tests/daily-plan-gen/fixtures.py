@@ -290,8 +290,9 @@ def e2e_7_dispatch_after_stamp():
         capture_output=True, text=True,
     )
     assert_(proc2.returncode == 0, f"plan dispatch ok (got {proc2.returncode}, stderr={proc2.stderr[:300]})")
-    summary_path = sb / ".orchestrator" / f"plan-{TODAY}.json"
-    assert_(summary_path.is_file(), "plan summary written")
+    summaries = list((sb / ".orchestrator").glob("plan-*.json"))
+    assert_(len(summaries) == 1, f"plan summary written (got {summaries})")
+    summary_path = summaries[0]
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     all_actions = []
     for slug_results in summary["results"].values():

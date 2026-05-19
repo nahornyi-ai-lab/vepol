@@ -143,16 +143,16 @@ skipping the review is the only forbidden path.
 
 ## Why both directions
 
-Vepol can host multiple AI orchestrators: Claude, Codex, and future
-agents. Each can act as author or reviewer. Cross-review goes
-both ways:
+Vepol can host multiple AI orchestrators: Claude Code, Codex,
+Gemini CLI, and future agents. Each can act as author or reviewer.
+Cross-review goes both ways:
 
-- Plans authored by Claude get reviewed by Codex (or another
-  agent)
-- Plans authored by Codex get reviewed by Claude (or another
-  agent)
-- Plans authored by any additional agent get reviewed by one of
-  the others
+- Plans authored by Claude Code get reviewed by Codex, Gemini CLI,
+  or another configured agent
+- Plans authored by Codex get reviewed by Claude Code, Gemini CLI,
+  or another configured agent
+- Plans authored by Gemini CLI or any additional agent get reviewed
+  by one of the others
 
 Symmetry matters because the bias profiles of different model
 families are different — what one model glosses over, another

@@ -28,10 +28,16 @@
           "name": "User Overlay (~/knowledge/)"
         },
         {
-          "name": "Claude Code (Primary Orchestrator)"
+          "name": "Claude Code (CLI agent)"
         },
         {
-          "name": "Codex (Secondary Orchestrator)"
+          "name": "Codex (CLI agent)"
+        },
+        {
+          "name": "Gemini CLI (reviewer / CLI agent)"
+        },
+        {
+          "name": "Future CLI-capable agents"
         },
         {
           "name": "Knowledge-base Hub"

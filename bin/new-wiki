@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # new-wiki — bootstrap локальной вики в проекте и регистрация в хабе.
-# Создаёт <project>/CLAUDE.md и <project>/knowledge/ со всей структурой,
+# Создаёт <project>/AGENTS.md, <project>/CLAUDE.md, <project>/GEMINI.md и <project>/knowledge/ со всей структурой,
 # симлинкает knowledge/ в ~/knowledge/projects/<slug> и логирует в хаб.
 #
 # Usage: new-wiki <path-to-project> [slug] [category]
@@ -50,7 +50,11 @@ render() {
   echo "  ✓ $dst"
 }
 
+render "$TEMPLATE/AGENTS.md"            "$PROJECT_PATH/AGENTS.md"
 render "$TEMPLATE/CLAUDE.md"            "$PROJECT_PATH/CLAUDE.md"
+if [[ -f "$TEMPLATE/GEMINI.md" ]]; then
+  render "$TEMPLATE/GEMINI.md"          "$PROJECT_PATH/GEMINI.md"
+fi
 render "$TEMPLATE/knowledge/README.md"  "$PROJECT_PATH/knowledge/README.md"
 render "$TEMPLATE/knowledge/index.md"   "$PROJECT_PATH/knowledge/index.md"
 render "$TEMPLATE/knowledge/log.md"     "$PROJECT_PATH/knowledge/log.md"
@@ -75,7 +79,7 @@ ensure_gitignore_line() {
   if [[ ! -f "$GITIGNORE" ]]; then
     {
       echo "# Knowledge base (personal wiki, curated outside git)"
-      echo "# See ~/knowledge/CLAUDE.md"
+      echo "# See ~/knowledge/AGENTS.md"
     } > "$GITIGNORE"
   fi
   echo "$line" >> "$GITIGNORE"
@@ -116,7 +120,7 @@ fi
 
 echo ""
 echo "✅ Вика заведена. Дальше:"
-echo "  1. Открой $PROJECT_PATH/CLAUDE.md и заполни «О проекте» и «Категории»."
+echo "  1. Открой $PROJECT_PATH/AGENTS.md и заполни «О проекте» и «Категории»."
 echo "  2. Открой $PROJECT_PATH/knowledge/README.md и напиши 1–2 предложения описания."
 echo "  3. Обнови запись в $HUB/registry.md (статус seeded/live, описание)."
 echo "  4. Дропни первый источник в $PROJECT_PATH/knowledge/raw/ и скажи Claude «ingest»."

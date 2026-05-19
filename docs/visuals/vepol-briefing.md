@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Vepol is an opinionated, local-first personal operating environment designed to transform passive AI interactions into a proactive partnership. It is explicitly not a "memory tool"; rather, it utilizes a structured markdown knowledge base as infrastructure to support an autonomous agent that grows in agency over time. By layering active orchestrators—primarily Claude Code and Codex—over a unified source of truth, Vepol automates routine tasks, monitors user health and goals, and self-reflects on its own operational strategies.
+Vepol is an opinionated, local-first personal operating environment designed to transform passive AI interactions into a proactive partnership. It is explicitly not a "memory tool"; rather, it utilizes a structured markdown knowledge base as infrastructure to support autonomous CLI-capable agents that grow in agency over time. By layering active orchestrators—Claude Code, Codex, Gemini CLI, and future agents—over a unified source of truth, Vepol automates routine tasks, monitors user health and goals, and self-reflects on its own operational strategies.
 
 The system is built on the TRIZ "substance-field" model (*Ve-pol*), where the user and the AI agents are interacting elements bound by a "field" of structured markdown. For developers, Vepol offers a "visible discipline" where every AI action leaves a textual trace, ensuring transparency, auditability, and a compounding level of autonomy that reduces operational overhead the longer the system is utilized.
 
@@ -55,10 +55,10 @@ The `strategies.md` file is a critical differentiator. Vepol does not just store
 Vepol embeds rigorous engineering methodologies into the AI’s workflow to ensure high-quality output and architectural integrity.
 
 ### Parallel Orchestration and Cross-Agent Review
-Vepol treats Claude Code and Codex as interchangeable interfaces to the same knowledge base. To prevent "split-brain" scenarios, a strict protocol is enforced:
-*   **Single Source of Truth:** Both agents read and write to the same `~/knowledge/` hub and project-specific folders.
-*   **Cross-Agent Review:** Any non-trivial implementation (≥30 minutes or architectural changes) requires a plan review by the *other* agent. A plan written by Claude Code must be approved or critiqued by Codex before implementation begins.
-*   **Knowledge-Gap Delegation:** If one agent lacks specific knowledge (e.g., an external API), it must delegate the search to the other agent and require the result be written to the permanent knowledge base (`sources/` or `concepts/`) rather than just the chat history.
+Vepol treats Claude Code, Codex, Gemini CLI, and future CLI-capable agents as interchangeable interfaces to the same knowledge base. To prevent "split-brain" scenarios, a strict protocol is enforced:
+*   **Single Source of Truth:** All configured agents read and write to the same `~/knowledge/` hub and project-specific folders.
+*   **Cross-Agent Review:** Any non-trivial implementation (≥30 minutes or architectural changes) requires a plan review by an independent configured agent. In a three-agent setup, 2-of-3 quorum can move work forward, while safety/security/data-loss blockers remain vetoes.
+*   **Knowledge-Gap Delegation:** If one agent lacks specific knowledge (e.g., an external API), it must delegate the search to another configured agent and require the result be written to the permanent knowledge base (`sources/` or `concepts/`) rather than just the chat history.
 
 ### Spec-Driven and TRIZ-Grounded Design
 *   **Spec-Driven Workflow:** For non-trivial work, the agent must follow a cycle: Specification -> Tests-before-code (Red) -> Code implementation -> Test execution (Green) -> Revision.
@@ -70,8 +70,8 @@ Vepol treats Claude Code and Codex as interchangeable interfaces to the same kno
 
 ### Environment and Dependencies
 Vepol is a local operating environment, currently optimized for macOS 13+.
-*   **Primary Orchestrator:** Claude Code CLI.
-*   **Secondary Orchestrator:** Codex CLI (recommended for cross-review).
+*   **Agent layer:** Claude Code CLI, Codex CLI, Gemini CLI, or another configured CLI-capable agent.
+*   **Review layer:** Independent configured agents provide cross-review and optional quorum.
 *   **Runtime:** Node 18+ and Bun 1.0+ for performance scripts.
 *   **Storage:** Plain markdown files, searchable via CLI (`kb-search`) or visualizable via Obsidian.
 
@@ -89,8 +89,8 @@ Every Claude Code session is captured via the `claude-memory-compiler`. Upon ses
 > **"Memory is just infrastructure."**
 *Context: Defining the core philosophy that Vepol is an agentic partner, not a storage tool.*
 
-> **"If after your session the second orchestrator cannot understand what you did and what changed from the files, then the memory is updated insufficiently."**
-*Context: The practical rule for maintaining the "Zero Split-Brain" policy between Claude and Codex.*
+> **"If after your session the next orchestrator cannot understand what you did and what changed from the files, then the memory is updated insufficiently."**
+*Context: The practical rule for maintaining the "Zero Split-Brain" policy across Claude Code, Codex, Gemini CLI, and future agents.*
 
 > **"Vepol's autonomy compounds over time... the progression is real because Vepol watches what you actually edited vs accepted."**
 *Context: Explaining how the AI monitors user behavior to adjust its own level of initiative for specific task types.*

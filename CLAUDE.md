@@ -1,6 +1,7 @@
 # Vepol — Repository Instructions
 
-If you are an AI agent (Claude Code, Codex, or another) reading this
+If you are an AI agent (Claude Code, Codex, Gemini CLI, or another
+CLI-capable agent) reading this
 file because you've been asked to install or evolve Vepol on the
 user's machine, **the operating manual you need is in
 [AGENTS.md](AGENTS.md)** in this same directory.
@@ -23,9 +24,10 @@ That file describes:
 Read it end-to-end before taking any action.
 
 This `CLAUDE.md` exists for Claude Code's convention of looking up
-project instructions in `CLAUDE.md`; Codex by convention reads
-`AGENTS.md`. Both files point to the same operating manual so
-whichever agent is acting has the same instructions.
+project instructions in `CLAUDE.md`; `GEMINI.md` exists for Gemini
+CLI's project-context convention; Codex and other agents often read
+`AGENTS.md`. These adapter files point to the same operating manual
+so whichever configured agent is acting has the same instructions.
 
 ## For human readers
 

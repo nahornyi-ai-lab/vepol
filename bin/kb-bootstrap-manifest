@@ -43,7 +43,9 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
     Driven by:
       - seed/knowledge/bin/kb-* — managed scripts (excluding .retired and hidden)
       - seed/knowledge/_template/** — managed templates
-      - seed/knowledge/CLAUDE.md — user-templated hub schema
+      - seed/knowledge/AGENTS.md — user-templated hub contract
+      - seed/knowledge/CLAUDE.md — user-templated Claude adapter
+      - seed/knowledge/GEMINI.md — user-templated Gemini adapter
       - seed/claude/CLAUDE.md — user-templated global Claude config
       - seed/claude/skills/*/SKILL.md — managed skills
       - seed/launchd/com.knowledge.*.plist.template — managed-templated LaunchAgents
@@ -78,12 +80,26 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
                 "install_path": str(home / "knowledge" / "_template" / rel),
             })
 
+    if (seed / "knowledge" / "AGENTS.md").is_file():
+        items.append({
+            "artifact_id": "hub-agents-md",
+            "category": "user-templated",
+            "source_path": "knowledge/AGENTS.md",
+            "install_path": str(home / "knowledge" / "AGENTS.md"),
+        })
     if (seed / "knowledge" / "CLAUDE.md").is_file():
         items.append({
             "artifact_id": "hub-claude-md",
             "category": "user-templated",
             "source_path": "knowledge/CLAUDE.md",
             "install_path": str(home / "knowledge" / "CLAUDE.md"),
+        })
+    if (seed / "knowledge" / "GEMINI.md").is_file():
+        items.append({
+            "artifact_id": "hub-gemini-md",
+            "category": "user-templated",
+            "source_path": "knowledge/GEMINI.md",
+            "install_path": str(home / "knowledge" / "GEMINI.md"),
         })
     if (seed / "claude" / "CLAUDE.md").is_file():
         items.append({

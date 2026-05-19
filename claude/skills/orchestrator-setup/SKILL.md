@@ -1,6 +1,6 @@
 ---
 name: orchestrator-setup
-description: Bootstrap the personal Karpathy-wiki + active orchestrator on a clean macOS — clones the orchestrator-seed repo, runs install.sh, verifies prereqs (Claude CLI / Codex CLI / Node / Bun), wires LaunchAgents (planner / tick / channel-telegram / orchestrator-cycle), creates the first project wiki, and verifies via kb-doctor. Use this skill when the user says "set up orchestrator", "установи orchestrator", "разверни базу знаний", "/orchestrator-setup", "set up the wiki system", "deploy orchestrator-seed", or otherwise indicates they want to install the full system on this machine. The skill is idempotent — safe to re-run.
+description: Bootstrap the personal Karpathy-wiki + active orchestrator on a clean macOS — clones the orchestrator-seed repo, runs install.sh, verifies prereqs (Claude CLI / Codex CLI / optional Gemini CLI / Node / Bun), wires LaunchAgents (planner / tick / channel-telegram / orchestrator-cycle), creates the first project wiki, and verifies via kb-doctor. Use this skill when the user says "set up orchestrator", "установи orchestrator", "разверни базу знаний", "/orchestrator-setup", "set up the wiki system", "deploy orchestrator-seed", or otherwise indicates they want to install the full system on this machine. The skill is idempotent — safe to re-run.
 ---
 
 # orchestrator-setup — turnkey deploy of the Karpathy-wiki + active orchestrator
@@ -40,6 +40,7 @@ Before doing ANY mutation, verify these one-by-one and **stop with explicit mess
 | Python ≥ 3.11 | `python3 --version` | "Run `brew install python@3.13` then re-run" |
 | Claude CLI ≥ 2.1.113 | `claude --version` | "Run `npm install -g @anthropic-ai/claude-code` then `claude login`, then re-run" |
 | Codex CLI | `codex --version` | "Run `npm install -g @openai/codex` then `codex login`, then re-run" |
+| Gemini CLI (optional reviewer) | `gemini --version` | "Run `npm install -g @google/gemini-cli`, configure auth, then re-run" |
 | ripgrep | `rg --version` | "Run `brew install ripgrep` then re-run" |
 | Logged into Claude | `claude config get` doesn't error | "Run `claude login` and complete browser auth, then re-run" |
 | Logged into Codex | `codex config get` or check token file | "Run `codex login`, then re-run" |
@@ -128,7 +129,7 @@ test -L ~/knowledge/orchestrator-seed/.git/hooks/pre-push && echo "✓ pre-push"
 If 4.5 fails (hooks missing): re-run `cd ~/knowledge/orchestrator-seed && ./install.sh`
 — hook installation is idempotent and will fix it.
 
-If 4.3 returns `category: auth` → user not logged into providers; remind them to run `claude login` and `codex login`.
+If 4.3 returns `category: auth` → user not logged into providers; remind them to run `claude login`, `codex login`, and configure Gemini CLI auth if Gemini is enabled as reviewer.
 
 If 4.4 fails with permission/lock errors → report and stop, point to docs/troubleshooting.md.
 
@@ -137,7 +138,7 @@ If 4.4 fails with permission/lock errors → report and stop, point to docs/trou
 Ask the user:
 
 > Want to set up your first project wiki right now?
-> Give me an absolute path to an existing project (e.g. `~/projects/myapp`) and I'll create `<project>/CLAUDE.md` + `<project>/knowledge/` with full coordination triad.
+> Give me an absolute path to an existing project (e.g. `~/projects/myapp`) and I'll create `<project>/CLAUDE.md`, `<project>/GEMINI.md`, and `<project>/knowledge/` with full coordination triad.
 > Skip with «later» / «потом».
 
 If they give a path:
@@ -249,7 +250,7 @@ The structure is documented in `docs/security-and-privacy.md`.
 
 ## Important constraints
 
-- **Never** modify a user's existing project files outside `<project>/CLAUDE.md` and `<project>/knowledge/`. Code stays code.
+- **Never** modify a user's existing project files outside `<project>/CLAUDE.md`, `<project>/GEMINI.md`, and `<project>/knowledge/`. Code stays code.
 - **Never** push to GitHub on behalf of the user. The seed at `~/knowledge/orchestrator-seed/` has the upstream `aladin2907/orchestrator-seed` remote — explicit user action required to push.
 - **Never** flip `cycle_enabled: true` automatically. Default is opt-in for safety; user must do it deliberately.
 - If anything goes wrong mid-install, leave the partial state intact and report exactly which step failed. Don't try to "clean up" — the install.sh is idempotent so the user can fix-and-retry.

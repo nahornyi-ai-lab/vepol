@@ -69,8 +69,9 @@ extends it on seven axes:
 5. **Plan as artifact.** `roadmap.md`, `daily-plan/<date>.md`, sprint
    cadence — the plan and its lifecycle are materialized as files,
    not held in memory.
-6. **Multi-orchestrator symmetry.** Multiple AI agents (Claude,
-   Codex, future ones) work against the same knowledge base; no
+6. **Multi-orchestrator symmetry.** Multiple AI agents (Claude Code,
+   Codex, Gemini CLI, future CLI-capable agents) work against the
+   same knowledge base; no
    single point of failure; significant plans get cross-reviewed by
    another agent (see [`cross-agent-review.md`](cross-agent-review.md)).
 7. **Reproducibility as product.** The setup is not a one-off
@@ -149,8 +150,8 @@ delegated; everyone reads incidents to avoid repeating mistakes.
 
 ## Cross-orchestrator symmetry
 
-Vepol can host more than one AI agent (Claude, Codex, and future
-ones). The discipline keeping them coherent:
+Vepol can host more than one AI agent (Claude Code, Codex, Gemini CLI,
+and future CLI-capable agents). The discipline keeping them coherent:
 
 - **One substrate.** `~/knowledge/` plus per-project `knowledge/`.
   No agent has private memory.

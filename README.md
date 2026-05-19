@@ -30,6 +30,27 @@ That's the actual product. Memory and a structured knowledge base are
 infrastructure that makes it possible. The features below are what runs on
 that infrastructure.
 
+## Bring your own AI agent
+
+Vepol is not a new foundation model and does not try to replace the
+agents you already use. It is a local operating layer for **ready-made
+CLI-capable AI agents**: Claude Code, Codex, Gemini CLI, or any future
+agent that can read files, run commands, and follow a written protocol.
+
+The agent supplies the reasoning and tool use. Vepol supplies the shared
+filesystem, markdown knowledge base, scheduler, review gates, logs,
+incidents, backlog, and handoff rules that let those agents work as one
+long-running partner instead of isolated chat sessions.
+
+Agent-specific files such as `CLAUDE.md` and `GEMINI.md` are adapters:
+they point each CLI agent at the same shared operating contract and KB
+discipline instead of becoming separate rulebooks.
+
+This matters because you keep optionality. If one provider is rate-limited,
+too expensive, weak on a task, or unavailable, another configured agent can
+pick up from the same files. The source of truth is the knowledge base, not
+any single model's private memory.
+
 ## What it does for you
 
 - **Plans your day.** Each morning Vepol reads your knowledge base — open
@@ -99,8 +120,9 @@ unit tests. The list grows release by release; see
 > automate groups where you lack authorization.
 
 The methodology that holds these modules together (the markdown
-substrate, the orchestrator, the cross-agent review gate, the
-MCP-first source-ingestion principle) is documented under
+substrate, the orchestrator, the vendor-neutral agent interface, the
+cross-agent review gate, the MCP-first source-ingestion principle) is
+documented under
 [`docs/methodology/`](docs/methodology/).
 
 ## What makes it different — visible discipline
@@ -168,9 +190,11 @@ The full breakdown:
 
 ![Quickstart workflow — from your request to a working Vepol in 5 minutes](docs/visuals/vepol-quickstart.png)
 
-You don't install Vepol by hand — your AI agent does. Open Claude
-Code, or Codex on a machine where the Claude CLI is available, and
-tell it:
+You don't install Vepol by hand — your AI agent does. The tested
+happy path today is Claude Code, or Codex on a machine where the
+Claude CLI is available. Gemini CLI and other agents can participate
+as reviewers/workers once configured, because the handoff contract is
+file-based. Start by telling your agent:
 
 > *"Install Vepol from github.com/nahornyi-ai-lab/vepol on this
 > machine. Read AGENTS.md first; before modifying ~/knowledge or
@@ -192,9 +216,9 @@ cd ~/vepol
 ```
 
 The installer detects what you have (Claude Code, Node, Bun, optionally
-Codex), reports what's missing with exact install commands, and sets up
-the rest. It does **not** auto-install package managers — that decision
-stays with you.
+Codex and Gemini CLI), reports what's missing with exact install commands,
+and sets up the rest. It does **not** auto-install package managers — that
+decision stays with you.
 
 > **Heads up if you already have `~/knowledge/` or `~/.claude/`
 > from another system:** the installer will not overwrite your
@@ -269,11 +293,12 @@ the tool.
 | Tool | Required | Why |
 |---|---|---|
 | macOS 13+ | Yes (v0.1) | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | Primary orchestrator |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.1 MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
-| [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review |
+| [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review / alternate orchestrator |
+| [Gemini CLI](https://google-gemini.github.io/gemini-cli/docs/get-started/) | Recommended | Third-opinion review / quorum |
 | Telegram bot | Optional | Brief / retro channel |
 | [claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) | Optional | Auto-capture sessions |
 
@@ -319,7 +344,8 @@ We accept PRs. Before opening one, please:
 1. Read [`docs/methodology/spec-driven-workflow.md`](docs/methodology/spec-driven-workflow.md)
    for non-trivial changes — write the spec before the code
 2. For architectural changes, ask for cross-agent review (we will run
-   the spec through both Claude and Codex)
+   the spec through configured independent agents such as Claude Code,
+   Codex, and Gemini CLI)
 3. Use the issue templates in `.github/ISSUE_TEMPLATE/`
 
 See `CONTRIBUTING.md` (when published) for the full process.
@@ -329,7 +355,7 @@ See `CONTRIBUTING.md` (when published) for the full process.
 - **Andrej Karpathy** for the [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) that gave us the initial pattern
 - **Genrich Altshuller** for TRIZ and the substance-field model that gives Vepol its name
 - **Sentry** for [FSL](https://fsl.software/) — a license model that's commercial-friendly without being permanently restrictive
-- **Anthropic** and **OpenAI** for Claude and Codex respectively — two of the orchestrators Vepol can coordinate
+- **Anthropic, OpenAI, and Google** for Claude Code, Codex, and Gemini CLI — ready-made agents Vepol can coordinate
 
 ## Reach out
 

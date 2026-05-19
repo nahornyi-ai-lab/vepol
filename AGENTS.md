@@ -1,7 +1,8 @@
 # Vepol — Setup and Evolution Instructions for AI Agents
 
 > **You are reading this file because the user asked you (Claude
-> Code, Codex, or another AI agent) to install or evolve Vepol on
+> Code, Codex, Gemini CLI, or another CLI-capable AI agent) to
+> install or evolve Vepol on
 > their machine.** This document is your operating manual. Read it
 > end-to-end before taking any action.
 
@@ -30,6 +31,13 @@ day by day. It plans the user's day, runs their routine, studies
 their work patterns, monitors their health goals, and takes on
 more of their work over time — while every action leaves an
 auditable markdown trail in their knowledge base.
+
+Vepol is not a new foundation model. It is a local operating layer
+around ready-made AI agents. Claude Code, Codex, Gemini CLI, and
+future CLI-capable agents provide reasoning and tool use; Vepol
+provides the shared markdown knowledge base, scheduler, review
+gates, logs, incidents, backlog, and handoff discipline that keep
+those agents working as one durable partner.
 
 The architecture (which you will install): user's `~/knowledge/`
 holds all knowledge as markdown files; this repo's `bin/` provides
@@ -93,6 +101,7 @@ Run prerequisite detection. Required:
 Recommended (the system works without these but loses features):
 
 - Codex (macOS app or CLI binary `codex`) — for cross-agent review
+- Gemini CLI (binary `gemini`) — for third-opinion reviews / quorum
 - `uv` — for the optional session capture integration
 - `jq` — for nicer output formatting
 
@@ -278,8 +287,8 @@ codex -p "/init-kb"
 ```
 
 The `init-kb` skill is installed in `~/.claude/skills/` (step 1.4).
-For Codex's equivalent, see if Codex has a parallel skills
-mechanism on the user's machine; if not, walk through the
+For Codex, Gemini CLI, or another agent's equivalent, see if that
+agent has a parallel skills mechanism on the user's machine; if not, walk through the
 init-kb steps manually using the methodology in
 `docs/methodology/kb-authoring-discipline.md`.
 
@@ -348,8 +357,10 @@ When you spot a candidate skill:
 
 1. Surface it to the user: "I notice you've done X three times.
    Would you like me to make this a one-command flow?"
-2. If yes, build it as a Claude Code skill (or equivalent for
-   Codex) in their `~/.claude/skills/` directory
+2. If yes, build it as a Claude Code skill or equivalent for the
+   user's configured agent stack. If no equivalent exists, document
+   the reusable workflow in `~/knowledge/solutions/` and keep the
+   executable implementation in a normal script.
 3. Document it in their hub-level `concepts/` if it captures a
    transferable pattern
 
@@ -400,8 +411,12 @@ For non-trivial plans (architectural changes, migrations, new
 infrastructure) — invoke
 [`cross-agent-review`](docs/methodology/cross-agent-review.md):
 
-- If you're Claude, ask Codex to review your plan
-- If you're Codex, ask Claude to review your plan
+- Ask one independent configured agent to review your plan. In the
+  default stack this means Claude Code ↔ Codex; in a richer stack it
+  can include Gemini CLI or another reviewer.
+- If a three-agent quorum is configured, collect votes from the
+  configured reviewers and treat safety/security/data-loss blockers
+  as vetoes even when a simple majority approves.
 - Apply the redlines that survive the user's judgment
 
 This is not optional ceremony. It's the gate that catches the
@@ -467,7 +482,9 @@ launchctl load ~/Library/LaunchAgents/com.knowledge.<name>.plist
 ### "I get rate-limited running cross-agent reviews"
 
 Switch the order: prefer the agent with more headroom. If both
-are rate-limited, queue the review for later — don't skip it.
+primary agents are rate-limited, use another configured reviewer
+such as Gemini CLI. If no reviewer is available, queue the review
+for later — don't skip it.
 
 If rate limiting is chronic, evaluate moving to API tier instead
 of consumer tier.

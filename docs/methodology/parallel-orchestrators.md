@@ -8,8 +8,9 @@ applies-to: [multi-agent-coordination, knowledge-base-architecture]
 
 # Parallel Orchestrators
 
-The rules Vepol uses to keep multiple AI agents (Claude, Codex, and
-future ones) working from the same knowledge base **without forking**
+The rules Vepol uses to keep multiple AI agents (Claude Code, Codex,
+Gemini CLI, and future CLI-capable agents) working from the same
+knowledge base **without forking**
 into incompatible private states. The goal is **zero split-brain**:
 any second agent must be able to continue where any first agent left
 off, using files alone.
@@ -77,7 +78,9 @@ coordination layer.
 Before doing significant work, *every* agent reads the same curated
 context:
 
-- Project `README.md` and `CLAUDE.md`
+- Project `README.md` and the relevant local adapter (`CLAUDE.md`,
+  `GEMINI.md`, or equivalent), which should point back to the same
+  project schema
 - `state.md`
 - `index.md`
 - The most recent entries in `log.md`
@@ -182,7 +185,8 @@ orchestrators discipline pays off:
 - It survives upgrading your agent (today's Claude becomes
   tomorrow's Claude+1; the conversation memory is gone, but the
   knowledge base persists)
-- It survives switching agents (Claude to Codex to something new)
+- It survives switching agents (Claude Code to Codex to Gemini CLI
+  to something new)
 - It produces an audit trail you can read yourself, six months
   later, when the agent's session memory is long gone
 

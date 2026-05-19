@@ -124,6 +124,30 @@ def parse_registry(path: pathlib.Path) -> list[RegistryEntry]:
     return entries
 
 
+def parse_projects_md(path: pathlib.Path) -> set[str]:
+    """Parse human-facing projects.md roster — return set of declared slugs.
+
+    Spec: ~/knowledge/concepts/projects-processes-roster.md
+    Schema: `| slug | путь | описание |` — skip header/separator/schema-doc lines.
+    """
+    if not path.exists():
+        return set()
+    text = read_text(path)
+    slugs: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or "---" in line:
+            continue
+        cells = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        slug = cells[0]
+        if not slug or slug.lower() in {"slug", "проект"}:
+            continue
+        slugs.add(slug)
+    return slugs
+
+
 def extract_latest_date(text: str) -> dt.date | None:
     dates: list[dt.date] = []
     for match in re.findall(DATE_TOKEN_RE, text):
@@ -309,6 +333,60 @@ def check_backlog(slug: str, path: pathlib.Path) -> list[Finding]:
     return findings
 
 
+def projects_md_drift_check() -> list[Finding]:
+    """Drift between projects.md (human-facing roster) and registry.md derived block.
+
+    Spec: ~/knowledge/concepts/projects-processes-roster.md
+    All findings are info-level: this is a warning, not a gate.
+    Emits nothing when projects.md doesn't exist (roster not adopted).
+    """
+    findings: list[Finding] = []
+    projects_md_path = HUB / "projects.md"
+    if not projects_md_path.exists():
+        return findings
+
+    roster = parse_projects_md(projects_md_path)
+    # projects.md scope = real init-kb'd projects only; pointer-stubs не входят.
+    registry_active = {
+        e.slug for e in parse_registry(HUB / "registry.md") if e.status in {"live", "seeded"}
+    }
+
+    for slug in sorted(roster):
+        if slug not in registry_active:
+            findings.append(finding(
+                "projects-md-not-in-registry", slug, projects_md_path, "info",
+                "slug in projects.md not found as active wiki-backed entry in registry.md",
+                f"slug={slug}",
+            ))
+        link = HUB / "projects" / slug
+        if link.is_symlink():
+            try:
+                target_exists = link.resolve(strict=True).exists()
+            except (FileNotFoundError, OSError):
+                target_exists = False
+            if not target_exists:
+                findings.append(finding(
+                    "projects-md-symlink-broken", slug, link, "info",
+                    "~/knowledge/projects/<slug> symlink target is missing",
+                    f"link={link} target={os.readlink(link)}",
+                ))
+        elif not link.exists():
+            findings.append(finding(
+                "projects-md-symlink-missing", slug, projects_md_path, "info",
+                "slug in projects.md has no ~/knowledge/projects/<slug> symlink",
+                f"expected={link}",
+            ))
+
+    for slug in sorted(registry_active - roster):
+        findings.append(finding(
+            "projects-md-missing-active", slug, projects_md_path, "info",
+            "active wiki-backed registry entry missing from projects.md (human-facing roster)",
+            f"slug={slug}",
+        ))
+
+    return findings
+
+
 def collect(project_filter: str | None) -> list[Finding]:
     registry_path = HUB / "registry.md"
     entries = parse_registry(registry_path)
@@ -318,6 +396,8 @@ def collect(project_filter: str | None) -> list[Finding]:
         return findings
     for entry in entries:
         findings.extend(check_project(entry, project_filter))
+    if project_filter is None:
+        findings.extend(projects_md_drift_check())
     return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
 
 
@@ -1250,6 +1330,110 @@ def channel_instances_check() -> list[Finding]:
             + (f" (+{n-5} more)" if n > 5 else ""),
             evidence=f"{n} processes",
         ))
+    return findings
+
+
+def _non_empty_line_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def agent_entrypoint_check() -> list[Finding]:
+    """Verify the universal `AGENTS.md` contract and thin runtime adapters."""
+    findings: list[Finding] = []
+
+    hub_agents = HUB / "AGENTS.md"
+    if not hub_agents.is_file():
+        findings.append(finding(
+            "agent-entrypoint:missing-hub-agents", "hub", hub_agents,
+            "P0",
+            "hub AGENTS.md is missing — no canonical universal agent contract",
+            evidence=str(hub_agents),
+        ))
+
+    agents_paths = [hub_agents, HUB / "_template" / "AGENTS.md"]
+    for agents_path in agents_paths:
+        if not agents_path.is_file():
+            continue
+        text = read_text(agents_path)
+        match = re.search(r"@[A-Za-z0-9_]", text)
+        if match:
+            findings.append(finding(
+                "agent-entrypoint:gemini-unsafe-at-token", "hub", agents_path,
+                "P1",
+                f"{agents_path.name} contains a bare @ token that Gemini may treat as a file import",
+                evidence=f"offset={match.start()} token={text[match.start():match.start()+24]!r}",
+            ))
+
+    adapter_paths = [
+        HUB / "CLAUDE.md",
+        HUB / "GEMINI.md",
+        HUB / "_template" / "CLAUDE.md",
+        HUB / "_template" / "GEMINI.md",
+    ]
+    for adapter in adapter_paths:
+        if not adapter.is_file():
+            findings.append(finding(
+                "agent-entrypoint:missing-adapter", "hub", adapter,
+                "P1",
+                f"{adapter.name} adapter is missing",
+                evidence=str(adapter),
+            ))
+            continue
+        text = read_text(adapter)
+        line_count = _non_empty_line_count(text)
+        if line_count > 30:
+            findings.append(finding(
+                "agent-entrypoint:adapter-too-long", "hub", adapter,
+                "P1",
+                f"{adapter.name} adapter has {line_count} non-empty lines; max is 30",
+                evidence=f"lines={line_count}",
+            ))
+        if "AGENTS.md" not in text:
+            findings.append(finding(
+                "agent-entrypoint:adapter-missing-agents", "hub", adapter,
+                "P1",
+                f"{adapter.name} adapter does not reference AGENTS.md",
+                evidence=adapter.name,
+            ))
+        if adapter.name == "GEMINI.md" and "CLAUDE.md" in text:
+            findings.append(finding(
+                "agent-entrypoint:gemini-imports-claude", "hub", adapter,
+                "P1",
+                "GEMINI.md must import/reference AGENTS.md directly, not CLAUDE.md",
+                evidence="CLAUDE.md",
+            ))
+
+    script_requirements = [
+        (HUB / "bin" / "new-wiki", "AGENTS.md"),
+        (HUB / "bin" / "kb-seed-sync", "AGENTS.md"),
+        (HUB / "bin" / "kb-bootstrap-manifest", "knowledge/AGENTS.md"),
+    ]
+    for script, needle in script_requirements:
+        if not script.is_file():
+            findings.append(finding(
+                "agent-entrypoint:missing-script", "hub", script,
+                "P1",
+                f"{script.name} is missing from hub bin",
+                evidence=str(script),
+            ))
+            continue
+        if needle not in read_text(script):
+            findings.append(finding(
+                "agent-entrypoint:script-missing-agents", "hub", script,
+                "P1",
+                f"{script.name} does not mention/carry {needle}",
+                evidence=needle,
+            ))
+
+    template_agents = HUB / "_template" / "AGENTS.md"
+    if not template_agents.is_file():
+        findings.append(finding(
+            "agent-entrypoint:missing-template-agents", "hub", template_agents,
+            "P1",
+            "_template/AGENTS.md is missing; new projects cannot bootstrap canonical contract",
+            evidence=str(template_agents),
+        ))
+
     return findings
 
 
@@ -2491,6 +2675,8 @@ def main() -> None:
             # Pre-push guard: verify seed contains only structural artifacts,
             # not real personal data (any life domain).
             "seed-content-audit",
+            # Universal agent entrypoint rollout: AGENTS.md canonical + thin adapters.
+            "agent-entrypoint",
             # Phase 1.6 — wikilink graph connectivity audit
             "graph-audit",
             # Cycle A — install-manifest + system health
@@ -2505,7 +2691,7 @@ def main() -> None:
             "migration-readiness <slug> | "
             "decompose-staleness | report-quality-check | "
             "cycle-source-id-collision | seed-docs-drift | "
-            "channel-instances | seed-content-audit | graph-audit | "
+            "channel-instances | seed-content-audit | agent-entrypoint | graph-audit | "
             "install-health | mcp-check"
         ),
     )
@@ -2570,7 +2756,7 @@ def main() -> None:
 
     phase8_modes = {"decompose-staleness", "report-quality-check",
                     "cycle-source-id-collision", "seed-docs-drift",
-                    "channel-instances", "seed-content-audit"}
+                    "channel-instances", "seed-content-audit", "agent-entrypoint"}
     if args.mode in {"concepts-consistency", "hierarchy-check", "migration-readiness"} | phase8_modes:
         if args.mode == "concepts-consistency":
             findings = concepts_consistency_check()
@@ -2591,6 +2777,8 @@ def main() -> None:
             findings = seed_docs_drift_check()
         elif args.mode == "channel-instances":
             findings = channel_instances_check()
+        elif args.mode == "agent-entrypoint":
+            findings = agent_entrypoint_check()
         else:  # seed-content-audit
             findings = seed_content_audit_check()
         if args.format == "json":
