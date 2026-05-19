@@ -348,17 +348,31 @@ if [[ -f "$VEPOL_DIR/claude/settings.json.template" && ! -f "$HOME_DIR/.claude/s
 fi
 
 # ─────────────────────────────────────────
-# Step 4. init-kb skill
+# Step 4. Global ~/.gemini/GEMINI.md
 # ─────────────────────────────────────────
-say "Step 4 · Installing init-kb skill"
+say "Step 4 · Installing global Gemini adapter (~/.gemini/GEMINI.md)"
+mkdir -p "$HOME_DIR/.gemini"
+if [[ -f "$VEPOL_DIR/gemini/GEMINI.md" && ! -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
+  sed "s|__HOME__|$HOME_DIR|g" "$VEPOL_DIR/gemini/GEMINI.md" > "$HOME_DIR/.gemini/GEMINI.md"
+  ok "  $HOME_DIR/.gemini/GEMINI.md created"
+elif [[ -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
+  warn "  $HOME_DIR/.gemini/GEMINI.md already exists — merge $VEPOL_DIR/gemini/GEMINI.md manually"
+else
+  warn "  $VEPOL_DIR/gemini/GEMINI.md missing — skipped"
+fi
+
+# ─────────────────────────────────────────
+# Step 5. init-kb skill
+# ─────────────────────────────────────────
+say "Step 5 · Installing init-kb skill"
 mkdir -p "$HOME_DIR/.claude/skills/init-kb"
 cp "$VEPOL_DIR/claude/skills/init-kb/SKILL.md" "$HOME_DIR/.claude/skills/init-kb/SKILL.md"
 ok "  init-kb skill ready (use: /init-kb in any project to bootstrap a wiki)"
 
 # ─────────────────────────────────────────
-# Step 5. Optional · LaunchAgents (opt-in)
+# Step 6. Optional · LaunchAgents (opt-in)
 # ─────────────────────────────────────────
-say "Step 5 · Optional features (opt-in)"
+say "Step 6 · Optional features (opt-in)"
 echo "  Vepol can run scheduled background tasks via macOS LaunchAgents:"
 echo "    • daily morning brief (sunrise+45min)"
 echo "    • orchestrator tick (every 15 min, light pulse)"
@@ -498,6 +512,9 @@ ${C_INFO}━━━ Read next ━━━${C_OFF}
 
   ${C_DIM}# Global Claude Code conventions (your edits stay; managed block updates):${C_OFF}
   $HOME_DIR/.claude/CLAUDE.md
+
+  ${C_DIM}# Global Gemini CLI adapter (loads the canonical contract):${C_OFF}
+  $HOME_DIR/.gemini/GEMINI.md
 
   ${C_DIM}# Methodology pages (if shipped):${C_OFF}
   $VEPOL_DIR/docs/methodology/

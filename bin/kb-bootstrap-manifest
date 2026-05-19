@@ -47,6 +47,7 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
       - seed/knowledge/CLAUDE.md — user-templated Claude adapter
       - seed/knowledge/GEMINI.md — user-templated Gemini adapter
       - seed/claude/CLAUDE.md — user-templated global Claude config
+      - seed/gemini/GEMINI.md — user-templated global Gemini config
       - seed/claude/skills/*/SKILL.md — managed skills
       - seed/launchd/com.knowledge.*.plist.template — managed-templated LaunchAgents
     """
@@ -107,6 +108,13 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
             "category": "user-templated",
             "source_path": "claude/CLAUDE.md",
             "install_path": str(home / ".claude" / "CLAUDE.md"),
+        })
+    if (seed / "gemini" / "GEMINI.md").is_file():
+        items.append({
+            "artifact_id": "global-gemini-md",
+            "category": "user-templated",
+            "source_path": "gemini/GEMINI.md",
+            "install_path": str(home / ".gemini" / "GEMINI.md"),
         })
 
     hub_seed_files = [
