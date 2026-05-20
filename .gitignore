@@ -40,11 +40,15 @@ credentials*.json
 !demo/knowledge/personal/.secrets
 
 # User overlay (must NEVER appear in this repo — that's the whole point).
-# Exception: the master schema file `knowledge/CLAUDE.md`, which install.sh
-# copies to ~/knowledge/CLAUDE.md on the user's machine. The schema itself
-# is documentation; only the user's runtime KB content stays out.
+# Exceptions: the canonical hub schema files, which `install.sh` copies
+# to `~/knowledge/` on the user's machine. `AGENTS.md` is the canonical
+# vendor-neutral contract; `CLAUDE.md` and `GEMINI.md` are thin runtime
+# adapters. The schema itself is documentation; only the user's runtime
+# KB content stays out.
 knowledge/*
+!knowledge/AGENTS.md
 !knowledge/CLAUDE.md
+!knowledge/GEMINI.md
 .kb-ignore
 
 # Maintainer-only: runtime blocklist generated locally for the staging mirror
