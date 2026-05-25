@@ -345,6 +345,113 @@ fi
 if [[ -f "$VEPOL_DIR/claude/settings.json.template" && ! -f "$HOME_DIR/.claude/settings.json" ]]; then
   sed "s|__HOME__|$HOME_DIR|g" "$VEPOL_DIR/claude/settings.json.template" > "$HOME_DIR/.claude/settings.json"
   ok "  $HOME_DIR/.claude/settings.json created from template"
+elif [[ -f "$HOME_DIR/.claude/settings.json" ]]; then
+  # ─────────────────────────────────────────
+  # Step 3b. C-01 — detect+migrate legacy bypass keys.
+  # security-model v2 § P0 C-01.
+  # python3 (required prereq); atomic write; preserves original mode.
+  # ─────────────────────────────────────────
+  detect_script="$(cat <<'PYEOF'
+import json, os, re, sys
+p = os.path.expanduser(sys.argv[1])
+try:
+    # v2.1: utf-8-sig handles UTF-8 BOM (Gemini concern #2, Codex concern #5a).
+    with open(p, 'r', encoding='utf-8-sig') as f:
+        raw = f.read()
+except Exception as exc:
+    print(f"READ_ERR:{exc!r}", end='')
+    sys.exit(4)
+# v2.1: explicit JSONC pre-scan (Codex concern #5b).
+# Reject //-comments and /*-block-comments; require strict JSON.
+# (Naive but adequate: matches any // or /* anywhere; false positive only
+#  if those tokens appear inside a string, which would itself be unusual.)
+if re.search(r'(^|[^:])//', raw) or '/*' in raw:
+    print("JSONC_ERR:settings.json contains // or /* — strict JSON required; manual fix needed", end='')
+    sys.exit(5)
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError as exc:
+    # v2.1: covers trailing-comma JSON (Codex concern #5c). Fail-fast, no auto-fix.
+    print(f"PARSE_ERR:{exc!r}", end='')
+    sys.exit(3)
+findings = []
+if isinstance(data, dict):
+    perms = data.get('permissions')
+    if isinstance(perms, dict) and perms.get('defaultMode') == 'bypassPermissions':
+        findings.append('permissions.defaultMode=bypassPermissions')
+    if data.get('skipDangerousModePermissionPrompt') is True:
+        findings.append('skipDangerousModePermissionPrompt=true')
+print('|'.join(findings), end='')
+sys.exit(0 if not findings else 2)
+PYEOF
+)"
+  detect_out=$(python3 -c "$detect_script" "$HOME_DIR/.claude/settings.json" 2>/dev/null)
+  detect_rc=$?
+  if [[ "$detect_rc" -eq 3 ]] || [[ "$detect_rc" -eq 4 ]]; then
+    warn "  $HOME_DIR/.claude/settings.json unparseable (${detect_out})"
+    warn "  Skipping C-01 migration — fix the file manually, then re-run install."
+  elif [[ "$detect_rc" -eq 5 ]]; then
+    warn "  ${detect_out}"
+    warn "  Strict JSON only — remove comments from ~/.claude/settings.json and re-run."
+    exit 1
+  elif [[ "$detect_rc" -eq 2 ]]; then
+    say "Step 3b · Legacy bypass-mode keys detected in $HOME_DIR/.claude/settings.json"
+    echo "  Found: $detect_out"
+    echo ""
+    echo "  Security impact: in this state, an injected prompt can trigger arbitrary"
+    echo "  Bash/Gmail/Telegram tool calls without your approval. See:"
+    echo "    vepol-dev/knowledge/decisions/security-model-2026-05-22.md § C-01"
+    echo ""
+    echo "  Migration will:"
+    echo "    1. snapshot to ~/.claude/settings.json.bak-<timestamp> (mode preserved)"
+    echo "    2. set permissions.defaultMode = \"default\""
+    echo "    3. remove skipDangerousModePermissionPrompt"
+    echo "  Atomic write: tempfile → chmod to ORIGINAL mode → rename."
+    echo "  Original file mode is preserved (not silently downgraded to 0600)."
+    echo ""
+    if [[ "${VEPOL_YES:-}" == "1" ]] || ask "Apply this migration now?"; then
+      snapshot="$HOME_DIR/.claude/settings.json.bak-$(date +%Y-%m-%d-%H%M%S)"
+      cp -p "$HOME_DIR/.claude/settings.json" "$snapshot"
+      ok "  snapshot: $snapshot"
+      migrate_script="$(cat <<'PYEOF'
+import json, os, re, stat, sys, tempfile
+src = os.path.expanduser(sys.argv[1])
+with open(src, 'r', encoding='utf-8-sig') as f:
+    raw = f.read()
+if re.search(r'(^|[^:])//', raw) or '/*' in raw:
+    print(f"JSONC_ERR:{src} contains // or /* — strict JSON required", file=sys.stderr); sys.exit(5)
+data = json.loads(raw)
+changed = []
+if isinstance(data.get('permissions'), dict) and \
+   data['permissions'].get('defaultMode') == 'bypassPermissions':
+    data['permissions']['defaultMode'] = 'default'
+    changed.append('permissions.defaultMode=default')
+if data.get('skipDangerousModePermissionPrompt') is True:
+    del data['skipDangerousModePermissionPrompt']
+    changed.append('removed:skipDangerousModePermissionPrompt')
+# Capture original mode BEFORE write (Codex concern #6 — preserve perms).
+orig_mode = stat.S_IMODE(os.stat(src).st_mode)
+src_dir = os.path.dirname(src) or '.'
+fd, tmp = tempfile.mkstemp(prefix='.settings-migrate-', dir=src_dir)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False); f.write('\n')
+    os.chmod(tmp, orig_mode)        # preserve original perm bits
+    os.replace(tmp, src)            # atomic same-FS swap (POSIX)
+except Exception:
+    if os.path.exists(tmp): os.unlink(tmp)
+    raise
+print('|'.join(changed), end='')
+PYEOF
+)"
+      python3 -c "$migrate_script" "$HOME_DIR/.claude/settings.json"
+      ok "  $HOME_DIR/.claude/settings.json migrated (original mode preserved)"
+    else
+      warn "  migration declined — install aborted."
+      warn "  re-run install.sh when ready to apply C-01."
+      exit 1
+    fi
+  fi
 fi
 
 # ─────────────────────────────────────────
@@ -423,6 +530,46 @@ TGEOF
     ok "  $TG_DIR/.env created — paste your bot token from @BotFather"
   fi
 fi
+
+# ─────────────────────────────────────────
+# Step 6b. C-02 (extended) — enforce mode on secret-bearing paths.
+# security-model v2 § P0 C-02 extended scope.
+# Refuses symlinks. Idempotent. Skips absent paths.
+# ─────────────────────────────────────────
+say "Step 6b · Enforcing modes on secret-bearing paths (security-model v2 C-02)"
+enforced=0; skipped=0
+
+_enforce_mode() {
+  local target="$1" mode="$2"
+  [[ -e "$target" ]] || return 0
+  if [[ -L "$target" ]]; then
+    warn "  refusing symlink: $target (C-02 forbids symlinked secret paths)"
+    skipped=$((skipped + 1)); return 0
+  fi
+  chmod "$mode" "$target"; enforced=$((enforced + 1))
+}
+
+BOTS_DIR="$HOME_DIR/.claude/channels/bots"
+if [[ -d "$BOTS_DIR" && ! -L "$BOTS_DIR" ]]; then
+  _enforce_mode "$BOTS_DIR" 700
+  for env_file in "$BOTS_DIR"/*.env; do
+    [[ -e "$env_file" ]] || continue
+    if [[ -L "$env_file" ]]; then warn "  refusing symlink: $env_file"; skipped=$((skipped+1)); continue; fi
+    chmod 600 "$env_file"; enforced=$((enforced + 1))
+  done
+fi
+
+_enforce_mode "$HUB/personal" 700
+_enforce_mode "$HUB/personal/.secrets" 600
+_enforce_mode "$HUB/personal/daily-research.yaml" 600
+
+_enforce_mode "$HOME_DIR/.orchestrator" 700
+_enforce_mode "$HOME_DIR/.orchestrator/multibot" 700
+_enforce_mode "$HOME_DIR/.orchestrator/multibot.env" 600
+_enforce_mode "$HOME_DIR/.orchestrator/multibot-supervisor.session" 600
+
+[[ "$enforced" -gt 0 ]] && ok "  enforced modes on $enforced path(s)"
+[[ "$skipped"  -gt 0 ]] && warn "  skipped $skipped symlinked entry(ies) — review manually"
 
 # ─────────────────────────────────────────
 # Step 7. Optional · claude-memory-compiler (auto session capture)

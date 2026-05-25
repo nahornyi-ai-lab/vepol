@@ -1910,6 +1910,68 @@ INSTALL_HEALTH_REQUIRED_MANIFEST_FIELDS = (
 )
 INSTALL_HEALTH_REQUIRED_BINS = ("node", "python3", "rg", "gh", "uv", "bun", "jq", "claude")
 
+# ──────────────────────────────────────────────────────────────────────
+# C-01 (security-model v2) — settings.json scan paths.
+# v2.1: registry-walk via ~/knowledge/projects/<slug> symlinks
+# (covers all currently-registered projects). Adds explicit hub-local
+# candidate per Codex pass concern (`~/knowledge/.claude/settings.json`).
+# Missing paths are skipped silently.
+# ──────────────────────────────────────────────────────────────────────
+def _ih_settings_scan_paths(home: pathlib.Path, seed: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    candidates: list[tuple[str, pathlib.Path]] = [
+        ("live",                 home / ".claude" / "settings.json"),
+        ("seed-template",        seed / "claude" / "settings.json.template"),
+        ("vepol-prep-template",  home / "vepol-dev" / "vepol-prep" / "claude" / "settings.json.template"),
+        ("hub-local",            home / "knowledge" / ".claude" / "settings.json"),
+        ("project-local",        pathlib.Path.cwd() / ".claude" / "settings.json"),
+    ]
+    # v2.1 registry walk: iterate ~/knowledge/projects/<slug> symlinks.
+    # Each entry points at <project>/knowledge; its parent is <project> root.
+    # Check <project>/.claude/settings.json (NOT <project>/knowledge/.claude/).
+    projects_dir = home / "knowledge" / "projects"
+    if projects_dir.is_dir():
+        for entry in sorted(projects_dir.iterdir()):
+            if not entry.is_symlink():
+                continue
+            try:
+                target = entry.resolve(strict=True)
+            except OSError:
+                continue  # broken symlink: skip silently (registry drift)
+            project_root = target.parent
+            project_settings = project_root / ".claude" / "settings.json"
+            candidates.append((f"project:{entry.name}", project_settings))
+    return candidates
+
+
+# C-01 — keys that, when set to these values, downgrade interactive safety
+# below the C-01 baseline.
+_IH_UNSAFE_SETTINGS_KEYS: tuple[tuple[tuple[str, ...], object, str], ...] = (
+    (("permissions", "defaultMode"), "bypassPermissions",
+     'set "permissions.defaultMode" to "default" (or remove the key)'),
+    (("skipDangerousModePermissionPrompt",), True,
+     'remove "skipDangerousModePermissionPrompt" or set it to false'),
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# C-02 (extended) — secret-bearing scope.
+# Each entry: (label, path, kind, required_mode).
+#   kind="file"     → os.lstat, expect required_mode on file.
+#   kind="dir"      → os.lstat, expect required_mode on dir.
+#   kind="dir-glob" → os.lstat on dir; iterdir() non-recursive,
+#                     every *.env entry must be 0600 (no symlink follow).
+# Test override: KB_DOCTOR_SECRETS_ROOT=/tmp/test-root → leading "~/" re-rooted.
+# ──────────────────────────────────────────────────────────────────────
+_SECRETS_SCOPE: tuple[tuple[str, str, str, int], ...] = (
+    ("claude-channels-bots-dir",   "~/.claude/channels/bots",            "dir-glob", 0o700),
+    ("hub-personal-dir",           "~/knowledge/personal",               "dir",      0o700),
+    ("hub-personal-secrets",       "~/knowledge/personal/.secrets",      "file",     0o600),
+    ("hub-personal-daily-yaml",    "~/knowledge/personal/daily-research.yaml", "file", 0o600),
+    ("orchestrator-dir",           "~/.orchestrator",                    "dir",      0o700),
+    ("orchestrator-multibot-dir",  "~/.orchestrator/multibot",           "dir",      0o700),
+    ("orchestrator-multibot-env",  "~/.orchestrator/multibot.env",       "file",     0o600),
+    ("orchestrator-supervisor",    "~/.orchestrator/multibot-supervisor.session", "file", 0o600),
+)
+
 
 def _ih_home() -> pathlib.Path:
     return pathlib.Path(os.environ.get("HOME", os.path.expanduser("~")))
@@ -2138,6 +2200,171 @@ def _ih_check_settings(home: pathlib.Path) -> list[Finding]:
                 evidence=f"expected_basename={expected_basename}",
             ))
     return findings
+
+
+# ──────────────────────────────────────────────────────────────────────
+# C-01 — bypass-key check.
+# ──────────────────────────────────────────────────────────────────────
+def _ih_get_path(data: object, pointer: tuple[str, ...]) -> tuple[bool, object]:
+    cur = data
+    for key in pointer:
+        if not isinstance(cur, dict) or key not in cur:
+            return (False, None)
+        cur = cur[key]
+    return (True, cur)
+
+
+def _ih_find_line(text: str, pointer: tuple[str, ...]) -> int | None:
+    """Best-effort line locator. Human-remediation aid only."""
+    leaf = pointer[-1]
+    pat = re.compile(rf'"\s*{re.escape(leaf)}\s*"\s*:')
+    for idx, line in enumerate(text.splitlines(), 1):
+        if pat.search(line):
+            return idx
+    return None
+
+
+def _ih_check_settings_bypass(home: pathlib.Path, seed: pathlib.Path) -> list[Finding]:
+    """C-01 (security-model v2): hard-fail on legacy bypass-mode keys."""
+    findings: list[Finding] = []
+    for label, path in _ih_settings_scan_paths(home, seed):
+        if not path.is_file():
+            continue
+        try:
+            # v2.1: utf-8-sig handles UTF-8 BOM (Gemini concern #2).
+            raw = path.read_text(encoding="utf-8-sig")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            findings.append(finding_with_key(
+                "install-health:settings-bypass-unparseable", "hub", label,
+                str(path), "P0",
+                f"{label} settings.json unparseable; bypass-key check skipped: {exc!r}",
+                evidence=str(exc)[:200],
+            ))
+            continue
+        for pointer, unsafe_value, hint in _IH_UNSAFE_SETTINGS_KEYS:
+            present, value = _ih_get_path(data, pointer)
+            if not present or value != unsafe_value:
+                continue
+            line_no = _ih_find_line(raw, pointer) or 0
+            key_repr = ".".join(pointer)
+            findings.append(finding_with_key(
+                "install-health:settings-bypass-legacy", "hub",
+                f"{label}:{key_repr}", str(path), "P0",
+                (f"{label} {path} carries legacy bypass key "
+                 f"{key_repr}={unsafe_value!r} at line {line_no}. "
+                 f"Remediation: {hint}. See "
+                 f"vepol-dev/knowledge/decisions/security-model-2026-05-22.md C-01."),
+                evidence=f"path={path} key={key_repr} value={unsafe_value!r} line={line_no}",
+            ))
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────
+# C-02 (extended) — secrets-permissions enforcement.
+# ──────────────────────────────────────────────────────────────────────
+import stat  # noqa: E402  (deliberate late import; isolated patch surface)
+stat_module_S_ISLNK = stat.S_ISLNK
+
+
+def _secrets_resolve(raw_path: str) -> pathlib.Path:
+    """Resolve ~-prefixed scope path, honoring KB_DOCTOR_SECRETS_ROOT override."""
+    root_override = os.environ.get("KB_DOCTOR_SECRETS_ROOT")
+    if root_override and raw_path.startswith("~/"):
+        return pathlib.Path(root_override) / raw_path[2:]
+    return pathlib.Path(os.path.expanduser(raw_path))
+
+
+def _secrets_iter_env_paths(directory: pathlib.Path) -> list[pathlib.Path]:
+    """Non-recursive *.env enumeration. No symlink follow."""
+    try:
+        entries = sorted(directory.iterdir())
+    except (FileNotFoundError, PermissionError):
+        return []
+    return [p for p in entries if p.name.endswith(".env")]
+
+
+def _secrets_check_one(label: str, path: pathlib.Path, kind: str,
+                       required_mode: int, effective_uid: int) -> list[Finding]:
+    findings: list[Finding] = []
+    slug = "hub"
+    if not path.exists():
+        return findings  # absent → not a finding
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        findings.append(finding(
+            f"secrets-permissions:{label}:stat-failed", slug, str(path), "P0",
+            f"cannot stat: {exc!r}",
+            evidence=f"errno={getattr(exc, 'errno', None)}",
+        ))
+        return findings
+    if stat_module_S_ISLNK(st.st_mode):
+        findings.append(finding(
+            f"secrets-permissions:{label}:is-symlink", slug, str(path), "P0",
+            f"{path} is a symlink; symlinked secret-bearing paths refused per C-02.",
+            evidence=f"target={os.readlink(path)!r}",
+        ))
+        return findings
+    mode_bits = stat.S_IMODE(st.st_mode)
+    if mode_bits != required_mode:
+        findings.append(finding(
+            f"secrets-permissions:{label}:bad-mode", slug, str(path), "P0",
+            f"{path} has mode {mode_bits:#o}; required {required_mode:#o}.",
+            evidence=f"actual_mode={mode_bits:#o} expected_mode={required_mode:#o} kind={kind}",
+        ))
+    if st.st_uid != effective_uid:
+        findings.append(finding(
+            f"secrets-permissions:{label}:bad-owner", slug, str(path), "P0",
+            f"{path} owned by uid={st.st_uid}; expected effective uid={effective_uid}.",
+            evidence=f"file_uid={st.st_uid} euid={effective_uid}",
+        ))
+    if kind == "dir-glob":
+        for env_path in _secrets_iter_env_paths(path):
+            try:
+                est = os.lstat(env_path)
+            except OSError as exc:
+                findings.append(finding(
+                    f"secrets-permissions:{label}:env-stat-failed", slug,
+                    str(env_path), "P0",
+                    f"cannot stat *.env entry: {exc!r}",
+                    evidence=f"errno={getattr(exc, 'errno', None)}",
+                ))
+                continue
+            if stat_module_S_ISLNK(est.st_mode):
+                findings.append(finding(
+                    f"secrets-permissions:{label}:env-is-symlink", slug,
+                    str(env_path), "P0",
+                    f"{env_path.name} is a symlink; refused per C-02.",
+                    evidence=f"target={os.readlink(env_path)!r}",
+                ))
+                continue
+            env_mode = stat.S_IMODE(est.st_mode)
+            if env_mode != 0o600:
+                findings.append(finding(
+                    f"secrets-permissions:{label}:env-bad-mode", slug,
+                    str(env_path), "P0",
+                    f"{env_path.name} has mode {env_mode:#o}; expected 0o600.",
+                    evidence=f"actual_mode={env_mode:#o} expected_mode=0o600",
+                ))
+            if est.st_uid != effective_uid:
+                findings.append(finding(
+                    f"secrets-permissions:{label}:env-bad-owner", slug,
+                    str(env_path), "P0",
+                    f"{env_path.name} owned by uid={est.st_uid}; expected euid={effective_uid}.",
+                    evidence=f"file_uid={est.st_uid} euid={effective_uid}",
+                ))
+    return findings
+
+
+def secrets_permissions_check() -> list[Finding]:
+    """C-02 (extended): full scope per _SECRETS_SCOPE."""
+    findings: list[Finding] = []
+    effective_uid = os.geteuid()
+    for label, raw_path, kind, required_mode in _SECRETS_SCOPE:
+        resolved = _secrets_resolve(raw_path)
+        findings.extend(_secrets_check_one(label, resolved, kind, required_mode, effective_uid))
+    return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
 
 
 def _ih_hook_basename_matches(configs, expected_basename: str) -> bool:
@@ -2399,6 +2626,7 @@ def install_health_check() -> list[Finding]:
     findings.extend(_ih_check_seed_git(seed, manifest))
     findings.extend(_ih_check_version(seed, manifest))
     findings.extend(_ih_check_settings(home))
+    findings.extend(_ih_check_settings_bypass(home, seed))   # C-01 wiring
     findings.extend(_ih_check_launchagents(home, manifest))
     findings.extend(_ih_check_memory_compiler(home))
     findings.extend(_ih_check_binaries(home))
@@ -2685,6 +2913,8 @@ def main() -> None:
             # preflight that verifies the MCP host is reachable from
             # non-interactive context (cron, LaunchAgent).
             "mcp-check",
+            # C-02 (extended) — secret-bearing path permission audit.
+            "secrets-permissions",
         ],
         help=(
             "audit (default) | concepts-consistency | hierarchy-check | "
@@ -2692,7 +2922,7 @@ def main() -> None:
             "decompose-staleness | report-quality-check | "
             "cycle-source-id-collision | seed-docs-drift | "
             "channel-instances | seed-content-audit | agent-entrypoint | graph-audit | "
-            "install-health | mcp-check"
+            "install-health | mcp-check | secrets-permissions"
         ),
     )
     parser.add_argument(
@@ -2748,6 +2978,21 @@ def main() -> None:
                 "generated_at": TODAY.isoformat(),
                 "hub": str(HUB),
                 "mode": "install-health",
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        raise SystemExit(strict_exit(findings, args.strict))
+
+    if args.mode == "secrets-permissions":
+        findings = secrets_permissions_check()
+        if args.write:
+            write_pending(findings)
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": "secrets-permissions",
                 "findings": [asdict(item) for item in findings],
             }, ensure_ascii=False, indent=2))
         else:

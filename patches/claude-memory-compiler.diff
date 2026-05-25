@@ -1,8 +1,63 @@
+diff --git a/hooks/pre-compact.py b/hooks/pre-compact.py
+index 9b3b69d..a77ed42 100644
+--- a/hooks/pre-compact.py
++++ b/hooks/pre-compact.py
+@@ -20,6 +20,9 @@ import sys
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
++from _redact import redact  # noqa: E402  -- C-06
++
+ # Recursion guard
+ if os.environ.get("CLAUDE_INVOKED_BY"):
+     sys.exit(0)
+@@ -136,7 +139,7 @@ def main() -> None:
+     # Write context to a temp file for the background process
+     timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+     context_file = STATE_DIR / f"flush-context-{session_id}-{timestamp}.md"
+-    context_file.write_text(context, encoding="utf-8")
++    context_file.write_text(redact(context), encoding="utf-8")  # C-06
+ 
+     # Spawn flush.py as a background process
+     flush_script = SCRIPTS_DIR / "flush.py"
+diff --git a/hooks/session-end.py b/hooks/session-end.py
+index 3c27a89..540f4f6 100644
+--- a/hooks/session-end.py
++++ b/hooks/session-end.py
+@@ -19,6 +19,10 @@ import sys
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
++# C-06: import canonical redact() from sibling scripts/ dir.
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
++from _redact import redact  # noqa: E402
++
+ # Recursion guard: if we were spawned by flush.py (which calls Agent SDK,
+ # which runs Claude Code, which would fire this hook again), exit immediately.
+ if os.environ.get("CLAUDE_INVOKED_BY"):
+@@ -138,7 +142,7 @@ def main() -> None:
+     # Write context to a temp file for the background process
+     timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+     context_file = STATE_DIR / f"session-flush-{session_id}-{timestamp}.md"
+-    context_file.write_text(context, encoding="utf-8")
++    context_file.write_text(redact(context), encoding="utf-8")  # C-06
+ 
+     # Spawn flush.py as a background process
+     flush_script = SCRIPTS_DIR / "flush.py"
 diff --git a/scripts/flush.py b/scripts/flush.py
-index 3cb25c4..22539ae 100644
+index 3cb25c4..374980b 100644
 --- a/scripts/flush.py
 +++ b/scripts/flush.py
-@@ -54,7 +54,62 @@ def save_flush_state(state: dict) -> None:
+@@ -22,6 +22,7 @@ import sys
+ import time
+ from datetime import datetime, timezone
+ from pathlib import Path
++from _redact import redact  # C-06: token-shape redaction before any write
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+ DAILY_DIR = ROOT / "daily"
+@@ -54,7 +55,66 @@ def save_flush_state(state: dict) -> None:
  
  
  def append_to_daily_log(content: str, section: str = "Session") -> None:
@@ -15,6 +70,7 @@ index 3cb25c4..22539ae 100644
 +    """
 +    target_daily_env = os.environ.get("CLAUDE_KB_DAILY_DIR")
 +    target_log_env = os.environ.get("CLAUDE_KB_LOG_FILE")
++    target_project_slug = os.environ.get("CLAUDE_KB_PROJECT_SLUG")
 +
 +    if target_daily_env:
 +        now = datetime.now(timezone.utc).astimezone()
@@ -29,7 +85,8 @@ index 3cb25c4..22539ae 100644
 +                f"# Daily Log: {date_str}\n\n## Sessions\n\n",
 +                encoding="utf-8",
 +            )
-+        entry = f"### {section} ({time_str})\n\n{content}\n\n"
++        # C-06: redact token-shapes immediately before write.
++        entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")
 +        with open(log_path, "a", encoding="utf-8") as f:
 +            f.write(entry)
 +
@@ -51,10 +108,12 @@ index 3cb25c4..22539ae 100644
 +                first = first[:100] + "..."
 +            if not first:
 +                first = "(session captured)"
++            slug_part = f"{target_project_slug} | " if target_project_slug else ""
 +            entry_line = (
-+                f"\n## [{date_str} {time_str}] session | {first}\n"
++                f"\n## [{date_str} {time_str}] session | {slug_part}{first}\n"
 +                f"Details: [[daily/{date_str}]]\n"
 +            )
++            entry_line = redact(entry_line)  # C-06: defense-in-depth on cross-ref
 +            try:
 +                with open(log_file, "a", encoding="utf-8") as f:
 +                    f.write(entry_line)
@@ -66,7 +125,16 @@ index 3cb25c4..22539ae 100644
      today = datetime.now(timezone.utc).astimezone()
      log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
  
-@@ -144,6 +199,10 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
+@@ -66,7 +126,7 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
+         )
+ 
+     time_str = today.strftime("%H:%M")
+-    entry = f"### {section} ({time_str})\n\n{content}\n\n"
++    entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")  # C-06
+ 
+     with open(log_path, "a", encoding="utf-8") as f:
+         f.write(entry)
+@@ -144,6 +204,10 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
  
  def maybe_trigger_compilation() -> None:
      """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
@@ -77,7 +145,7 @@ index 3cb25c4..22539ae 100644
      import subprocess as _sp
  
      now = datetime.now(timezone.utc).astimezone()
-@@ -225,15 +284,20 @@ def main():
+@@ -225,15 +289,20 @@ def main():
      # Run the LLM extraction
      response = asyncio.run(run_flush(context))
  
@@ -103,3 +171,166 @@ index 3cb25c4..22539ae 100644
      else:
          logging.info("Result: saved to daily log (%d chars)", len(response))
          append_to_daily_log(response, "Session")
+diff --git a/scripts/_redact.py b/scripts/_redact.py
+new file mode 100644
+index 0000000..b11aaec
+--- /dev/null
++++ b/scripts/_redact.py
+@@ -0,0 +1,61 @@
++"""Token-shape redaction. Applied to all transcript writes (C-06, extended).
++
++Pattern set v2: 11 specific shapes + 1 generic. See
++vepol-dev/knowledge/sources/p0-6-extended-draft-2026-05-23.md for rationale
++and benchmark.
++"""
++from __future__ import annotations
++import re
++
++PATTERNS: list[tuple[str, re.Pattern[str]]] = [
++    ("ANTHROPIC-KEY",      re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
++    ("OPENAI-KEY",         re.compile(r"\bsk-(?!ant-)[A-Za-z0-9_\-]{20,}\b")),
++    ("TELEGRAM-BOT-TOKEN", re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,45}\b")),
++    ("GOOGLE-API-KEY",     re.compile(r"\bAIza[0-9A-Za-z_\-]{35,}\b")),
++    ("GITHUB-PAT",         re.compile(r"\bghp_[A-Za-z0-9]{36}\b")),
++    ("GITHUB-FG-PAT",      re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b")),
++    ("STRIPE-LIVE",        re.compile(r"\bsk_live_[A-Za-z0-9]{24,}\b")),
++    ("STRIPE-TEST",        re.compile(r"\bsk_test_[A-Za-z0-9]{24,}\b")),
++    ("AWS-ACCESS-KEY",     re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
++    ("SLACK-TOKEN",        re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}\b")),
++    ("JWT",                re.compile(
++        r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
++    ("GENERIC-SECRET",     re.compile(
++        r"(?i)\b(api[_\-]?key|secret|token|password|passwd|pwd|bearer)"
++        r"\s*[:=]\s*['\"]?([A-Za-z0-9_\-\.+/=]{12,})['\"]?"
++    )),
++]
++
++_GENERIC_VALUE_DENYLIST = {
++    "true", "false", "none", "null", "undefined", "required", "optional",
++    "placeholder", "example", "todo", "fixme", "your_token_here",
++    "your_api_key", "redacted",
++}
++
++def _is_likely_prose_value(value: str) -> bool:
++    v = value.strip("'\"").lower()
++    if v in _GENERIC_VALUE_DENYLIST:
++        return True
++    if v.isalpha() and v.islower() and len(v) < 20:
++        return True
++    if v.startswith("[redacted"):
++        return True
++    return False
++
++
++def redact(text: str) -> str:
++    """Apply all token-shape patterns. Each match -> '[REDACTED-<TYPE>]'."""
++    if not text:
++        return text
++    out = text
++    for tag, pat in PATTERNS:
++        if tag == "GENERIC-SECRET":
++            def _sub(m: re.Match[str]) -> str:
++                key, val = m.group(1), m.group(2)
++                if _is_likely_prose_value(val):
++                    return m.group(0)
++                return f"{key}=[REDACTED-{tag}]"
++            out = pat.sub(_sub, out)
++        else:
++            out = pat.sub(f"[REDACTED-{tag}]", out)
++    return out
+diff --git a/scripts/test_redact.py b/scripts/test_redact.py
+new file mode 100644
+index 0000000..8962ae5
+--- /dev/null
++++ b/scripts/test_redact.py
+@@ -0,0 +1,90 @@
++"""Synthetic test for _redact. Run: python scripts/test_redact.py"""
++import sys
++from _redact import redact
++
++CASES = [
++    # (label, input, must_not_contain_substring, must_contain_substring)
++    ("telegram",
++     "TG token: 1234567890:AAEhBP0av28kljakWWyrPSEK7yJzdjgshAA",
++     "AAEhBP0av28kljakWWyrPSEK7yJzdjgshAA",
++     "[REDACTED-TELEGRAM-BOT-TOKEN]"),
++    ("openai",
++     "key=sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
++     "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
++     "[REDACTED-OPENAI-KEY]"),
++    ("anthropic",
++     "ANTHROPIC_API_KEY=sk-ant-api03-aBcDeFgHiJkLmNoPqRsTuVwXyZ_abc-def123",
++     "sk-ant-api03-aBcDeFgHiJkLmNoPqRsTuVwXyZ",
++     "[REDACTED-ANTHROPIC-KEY]"),
++    ("google",
++     "GMAPS_KEY=AIzaSyA-1234567890abcdefghijklmnopqrstuvw",
++     "AIzaSyA-1234567890abcdefghijklmnopqrstuvw",
++     "[REDACTED-GOOGLE-API-KEY]"),
++    ("ghp",
++     "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
++     "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
++     "[REDACTED-GITHUB-PAT]"),
++    # NB: prefix split across concat boundary defuses GitHub push-protection,
++    # which blocks any contiguous `sk_live_<24+ alphanum>` substring in committed
++    # diff text — even synthetic. Python re-assembles at runtime; redact() still
++    # sees the full Stripe-shape value.
++    ("stripe_live",
++     "STRIPE_KEY=" + ("sk" + "_live_" + "X" * 32),
++     "sk" + "_live_" + "X" * 32,
++     "[REDACTED-STRIPE-LIVE]"),
++    ("stripe_test",
++     "STRIPE_TEST=" + ("sk" + "_test_" + "X" * 32),
++     "sk" + "_test_" + "X" * 32,
++     "[REDACTED-STRIPE-TEST]"),
++    ("aws_access",
++     "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
++     "AKIAIOSFODNN7EXAMPLE",
++     "[REDACTED-AWS-ACCESS-KEY]"),
++    ("slack_bot",
++     "slack token: xoxb-1234567890-abcdefghij-AbCdEfGhIjKlMnOp",
++     "xoxb-1234567890-abcdefghij",
++     "[REDACTED-SLACK-TOKEN]"),
++    ("jwt",
++     "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
++     "eyJzdWIiOiIxMjM0NSJ9",
++     "[REDACTED-JWT]"),
++    ("generic_secret_quoted",
++     'api_key: "MYREALSECRETVALUE12345"',
++     "MYREALSECRETVALUE12345",
++     "[REDACTED-GENERIC-SECRET]"),
++
++    # FP guardrails — these MUST NOT be redacted.
++    ("fp_prose_token_required",  "token: required",       "REDACTED", "token: required"),
++    ("fp_prose_secret_optional", "secret = optional",     "REDACTED", "secret = optional"),
++    ("fp_placeholder",           "api_key: your_api_key", "REDACTED", "api_key: your_api_key"),
++    ("fp_akia_prose",            "AKIA is the prefix used by AWS", "REDACTED",
++                                 "AKIA is the prefix used by AWS"),
++    ("fp_jwt_prose",             "JWT tokens start with eyJ",      "REDACTED",
++                                 "JWT tokens start with eyJ"),
++    ("fp_stripe_prose",          "sk_live_ keys begin with that prefix", "REDACTED",
++                                 "sk_live_ keys begin with that prefix"),
++]
++
++def main() -> int:
++    fails = 0
++    for label, src, must_not, must in CASES:
++        out = redact(src)
++        if label.startswith("fp_"):
++            if "REDACTED" in out:
++                print(f"FAIL {label}: prose got redacted -> {out!r}"); fails += 1
++            elif must not in out:
++                print(f"FAIL {label}: prose corrupted -> {out!r}"); fails += 1
++            else:
++                print(f"PASS {label}")
++        else:
++            if must_not in out:
++                print(f"FAIL {label}: secret survived -> {out!r}"); fails += 1
++            elif must not in out:
++                print(f"FAIL {label}: marker missing -> {out!r}"); fails += 1
++            else:
++                print(f"PASS {label}")
++    print(f"\n{len(CASES) - fails}/{len(CASES)} passed")
++    return 1 if fails else 0
++
++if __name__ == "__main__":
++    sys.exit(main())

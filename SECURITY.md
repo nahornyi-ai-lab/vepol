@@ -45,6 +45,10 @@ anonymous.
 - Token or credential exposure (e.g. logging an API key)
 - Code execution via crafted input to any Vepol CLI
 - Supply-chain attacks (compromised dependency)
+- Dangerous defaults in pre-shipped configuration — anything Vepol's
+  `install.sh` or `_template/` writes onto a user's machine
+  (default `settings.json`, permission allowlists, hooks, LaunchAgents,
+  bundled MCP scopes)
 
 ## What does NOT count
 
@@ -52,8 +56,11 @@ anonymous.
   regular issue
 - Anything covered by the FSL competing-use clause — that's a license
   question, not security
-- Issues in user-managed configuration (your own `~/.claude/settings.json`)
-  unless Vepol's installer puts a real flaw there
+- Issues in configuration that the user has hand-edited away from the
+  Vepol defaults (your own `~/.claude/settings.json` changes, your own
+  hooks). If the unsafe value was shipped by Vepol — `install.sh`,
+  `_template/`, or any other artefact in this repo — it IS in scope and
+  should be reported through the flow above.
 
 ## Supported versions
 
