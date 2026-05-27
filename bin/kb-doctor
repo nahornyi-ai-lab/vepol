@@ -2887,6 +2887,66 @@ def _mcp_canary_calendar(claude_path: str) -> list[Finding]:
     return findings
 
 
+def fetch_allowlist_check() -> list[Finding]:
+    """C-03: outbound-HTTP host allowlist for WebFetch + Bash(curl|wget|http).
+
+    Verifies that the deny-by-default fetch allowlist is wired:
+      1. Allowlist file exists, non-empty, at the expected location.
+      2. PreToolUse guard script exists and is executable.
+      3. ~/.claude/settings.json has no bare "WebFetch" or "Bash(curl:*)".
+      4. PreToolUse Bash hook references the guard script.
+      5. Seed template (if present) is free of the same wildcards.
+    """
+    findings: list[Finding] = []
+    home = pathlib.Path(os.path.expanduser("~"))
+    allowlist = home / ".claude" / "fetch-allowlist.txt"
+    guard = home / "knowledge" / "bin" / "kb-curl-allowlist-guard"
+    live = home / ".claude" / "settings.json"
+
+    if not (allowlist.exists() and allowlist.stat().st_size > 0):
+        findings.append(finding(
+            "fetch-allowlist:file-missing", "hub", allowlist, "P0",
+            "C-03 fetch allowlist file missing or empty.",
+            f"create {allowlist} with one host pattern per line",
+        ))
+    if not (guard.exists() and os.access(guard, os.X_OK)):
+        findings.append(finding(
+            "fetch-allowlist:guard-missing", "hub", guard, "P0",
+            "C-03 PreToolUse guard script missing or not executable.",
+            f"install {guard} and chmod +x",
+        ))
+    if live.exists():
+        text = live.read_text(encoding="utf-8", errors="replace")
+        if re.search(r'"WebFetch"', text):
+            findings.append(finding(
+                "fetch-allowlist:bare-webfetch", "hub", live, "P0",
+                "Live settings.json grants bare 'WebFetch' (no domain).",
+                "replace with explicit WebFetch(domain:<host>) entries",
+            ))
+        if re.search(r'"Bash\(curl:\*\)"', text):
+            findings.append(finding(
+                "fetch-allowlist:wildcard-curl", "hub", live, "P0",
+                "Live settings.json grants wildcard 'Bash(curl:*)'.",
+                "replace with per-host Bash(curl:https://<host>/*) entries",
+            ))
+        if "kb-curl-allowlist-guard" not in text:
+            findings.append(finding(
+                "fetch-allowlist:hook-not-wired", "hub", live, "P0",
+                "PreToolUse Bash hook does not reference kb-curl-allowlist-guard.",
+                "add a PreToolUse Bash hook pointing at the guard script",
+            ))
+    seed = pathlib.Path("/Users/macbook/vepol-dev/vepol-prep/claude/settings.json.template")
+    if seed.exists():
+        seed_text = seed.read_text(encoding="utf-8", errors="replace")
+        if re.search(r'"WebFetch"', seed_text) or re.search(r'"Bash\(curl:\*\)"', seed_text):
+            findings.append(finding(
+                "fetch-allowlist:seed-wildcard", "hub", seed, "P0",
+                "Seed template still grants wildcard fetch/curl permission.",
+                "mirror the live deny-by-default allowlist into the template",
+            ))
+    return findings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deterministic KB read-path audit.")
     parser.add_argument(
@@ -2915,6 +2975,8 @@ def main() -> None:
             "mcp-check",
             # C-02 (extended) — secret-bearing path permission audit.
             "secrets-permissions",
+            # C-03 — outbound-HTTP host allowlist (WebFetch + Bash curl/wget).
+            "fetch-allowlist",
         ],
         help=(
             "audit (default) | concepts-consistency | hierarchy-check | "
@@ -2922,7 +2984,7 @@ def main() -> None:
             "decompose-staleness | report-quality-check | "
             "cycle-source-id-collision | seed-docs-drift | "
             "channel-instances | seed-content-audit | agent-entrypoint | graph-audit | "
-            "install-health | mcp-check | secrets-permissions"
+            "install-health | mcp-check | secrets-permissions | fetch-allowlist"
         ),
     )
     parser.add_argument(
@@ -2993,6 +3055,21 @@ def main() -> None:
                 "generated_at": TODAY.isoformat(),
                 "hub": str(HUB),
                 "mode": "secrets-permissions",
+                "findings": [asdict(item) for item in findings],
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(render_text(findings, args.verbose), end="")
+        raise SystemExit(strict_exit(findings, args.strict))
+
+    if args.mode == "fetch-allowlist":
+        findings = fetch_allowlist_check()
+        if args.write:
+            write_pending(findings)
+        if args.format == "json":
+            print(json.dumps({
+                "generated_at": TODAY.isoformat(),
+                "hub": str(HUB),
+                "mode": "fetch-allowlist",
                 "findings": [asdict(item) for item in findings],
             }, ensure_ascii=False, indent=2))
         else:

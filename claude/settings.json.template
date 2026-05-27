@@ -7,8 +7,31 @@
       "Glob",
       "Grep",
       "NotebookEdit",
-      "WebFetch",
       "WebSearch",
+      "WebFetch(domain:api.anthropic.com)",
+      "WebFetch(domain:*.claude.com)",
+      "WebFetch(domain:claude.ai)",
+      "WebFetch(domain:api.openai.com)",
+      "WebFetch(domain:api.telegram.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:objects.githubusercontent.com)",
+      "WebFetch(domain:codeload.github.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:ghcr.io)",
+      "WebFetch(domain:pkg-containers.githubusercontent.com)",
+      "WebFetch(domain:notebooklm.google.com)",
+      "WebFetch(domain:*.googleapis.com)",
+      "WebFetch(domain:accounts.google.com)",
+      "WebFetch(domain:*.vercel.com)",
+      "WebFetch(domain:api.vercel.com)",
+      "WebFetch(domain:registry.npmjs.org)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:files.pythonhosted.org)",
+      "WebFetch(domain:formulae.brew.sh)",
+      "WebFetch(domain:*.reddit.com)",
+      "WebFetch(domain:news.ycombinator.com)",
       "Agent",
       "Skill",
       "ToolSearch",
@@ -100,7 +123,24 @@
       "Bash(kill:*)",
       "Bash(launchctl:*)",
       "Bash(afplay:*)",
-      "Bash(curl:*)",
+      "Bash(curl:https://api.anthropic.com/*)",
+      "Bash(curl:https://api.openai.com/*)",
+      "Bash(curl:https://api.telegram.org/*)",
+      "Bash(curl:https://api.github.com/*)",
+      "Bash(curl:https://raw.githubusercontent.com/*)",
+      "Bash(curl:https://objects.githubusercontent.com/*)",
+      "Bash(curl:https://codeload.github.com/*)",
+      "Bash(curl:https://ghcr.io/*)",
+      "Bash(curl:https://pkg-containers.githubusercontent.com/*)",
+      "Bash(curl:https://notebooklm.google.com/*)",
+      "Bash(curl:https://*.googleapis.com/*)",
+      "Bash(curl:https://api.vercel.com/*)",
+      "Bash(curl:https://registry.npmjs.org/*)",
+      "Bash(curl:https://pypi.org/*)",
+      "Bash(curl:https://files.pythonhosted.org/*)",
+      "Bash(curl:https://formulae.brew.sh/*)",
+      "Bash(curl:http://127.0.0.1:*)",
+      "Bash(curl:http://localhost:*)",
       "Bash(python3:*)",
       "Bash(python:*)",
       "Bash(node:*)",
@@ -132,9 +172,28 @@
       "Bash(__HOME__/.bun/bin/*:*)",
       "Bash(/opt/homebrew/bin/*:*)"
     ],
+    "deny": [
+      "WebFetch(domain:grok.com)",
+      "WebFetch(domain:x.com)",
+      "WebFetch(domain:twitter.com)",
+      "WebFetch(domain:linkedin.com)",
+      "WebFetch(domain:*.linkedin.com)"
+    ],
     "defaultMode": "default"
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/knowledge/bin/kb-curl-allowlist-guard",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
