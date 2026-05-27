@@ -218,11 +218,27 @@ fi
 if [[ -d "$VEPOL_DIR/bin/_kb_mcp" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_mcp" "$HUB/bin/_kb_mcp"
 fi
+if [[ -d "$VEPOL_DIR/bin/_kb_scanner" ]]; then
+  ln -sfn "$VEPOL_DIR/bin/_kb_scanner" "$HUB/bin/_kb_scanner"
+fi
 # Prompt templates
 if [[ -d "$VEPOL_DIR/bin/templates" ]]; then
   ln -sfn "$VEPOL_DIR/bin/templates" "$HUB/bin/templates"
 fi
 ok "  bin/ symlinks point at $VEPOL_DIR/bin/"
+
+# Scanner signatures (context-injection detector) — copy so user hub
+# has writable working dir for catalogue updates without touching repo.
+mkdir -p "$HUB/security/scanner-signatures" "$HUB/security/scanner-cache"
+if [[ -d "$VEPOL_DIR/security/scanner-signatures" ]]; then
+  cp -p "$VEPOL_DIR/security/scanner-signatures/"*.md "$HUB/security/scanner-signatures/" 2>/dev/null || true
+  cp -p "$VEPOL_DIR/security/scanner-signatures/"*.yaml "$HUB/security/scanner-signatures/" 2>/dev/null || true
+fi
+if [[ -f "$VEPOL_DIR/security/scanner-signatures-ledger.md" ]] \
+   && [[ ! -f "$HUB/security/scanner-signatures-ledger.md" ]]; then
+  cp -p "$VEPOL_DIR/security/scanner-signatures-ledger.md" "$HUB/security/scanner-signatures-ledger.md"
+fi
+ok "  security/scanner-signatures/ seeded"
 
 # Templates (always overwrite — schema is canonical)
 cp "$VEPOL_DIR/_template/AGENTS.md" "$HUB/_template/AGENTS.md"

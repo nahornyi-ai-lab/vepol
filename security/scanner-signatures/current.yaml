@@ -1,0 +1,8 @@
+# Pointer to the active catalogue revision.
+# Per scanner v2 spec § Catalogue location and protocol:
+# this file's catalogue_sha256 MUST match the bytes of the revision file
+# AND MUST match the latest non-cancelled ledger entry for revision_id.
+# Any mismatch → fail-closed (verdict_reason: catalogue-unavailable).
+
+revision_id: r001
+catalogue_sha256: c68bfae18dbd9c8b1b16fb24b91cfb81427c553aa49b9032802c96526c848804
