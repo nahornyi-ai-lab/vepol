@@ -14,10 +14,47 @@ upgrading.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.2.0] — 2026-05-29
+
+Second public release candidate. This release moves Vepol's task workflow to
+the markdown-native `kb-board` protocol and hardens the install/security
+baseline after the May rollout audit.
+
 ### Added
-- **Gemini CLI project-context adapters** — root `GEMINI.md` and
-  `_template/GEMINI.md` now point Gemini CLI at the same shared
-  operating contract instead of duplicating rules.
+- **Markdown-native task board (`kb-board`)** — `knowledge/backlog.md`
+  is now the single source of truth for tasks, with exact status sections
+  (`Backlog`, `Ready`, `In Progress`, `Blocked`, `Review`, `Done`,
+  `Cancelled`), multiline task blocks, ID-first mutations, claim leases,
+  heartbeat/sweep support, and a full parser/formatter/checker test suite.
+- **Board-first agent workflow** — `AGENTS.md`, templates, and the
+  project seed now instruct agents to create, claim, review, and close tasks
+  through `kb-board`. Legacy `kb-backlog` mutation commands fail fast on
+  migrated boards; list/read compatibility remains for old one-line boards.
+- **Release install-health gates** — `kb-doctor install-health` now checks
+  unsafe Claude settings bypass keys, managed install hash drift, expected
+  LaunchAgent state, binary availability, and seed/git version drift. The
+  reviewed disabled state for `com.knowledge.orchestrator-cycle` is reported
+  as informational while scanner-v2 promotion evidence is pending.
+- **Seed release hygiene** — `kb-seed-sync` now blocks personal/dev leakage
+  through leak-scan and structural seed-content audit before commit/push.
+- **Daily NotebookLM research loop** — `kb-daily-research` selects one
+  useful topic per day from the active project, creates a NotebookLM notebook,
+  imports web research, and generates a Russian audio recap focused on
+  "what we found", "how this applies to Vepol", "what not to take", and
+  next actions. Topic can be pinned with `--set-topic` or returned to
+  automatic selection with `--auto-topic`; `kb-tick` runs this as the default
+  one-audio-per-day morning research path.
+- **Antigravity CLI native AGENTS.md loading** — `agy --add-dir <path>`
+  pre-loads project `AGENTS.md` (and `GEMINI.md` if present) into the
+  system prompt via `cascadeManager`. Standard launcher — `agy-here`
+  shell function appended to `~/.zshrc` by `install.sh`. Project-level
+  `GEMINI.md` adapter removed 2026-05-22 (Gemini CLI free/Pro/Ultra
+  deprecation 2026-06-18; `agy` reads `AGENTS.md` directly). Global
+  `~/.gemini/GEMINI.md` written by `install.sh` Step 4 imports the
+  canonical hub `AGENTS.md` and acts as fallback when `agy` runs
+  without `--add-dir`.
 - **Multi-bot agent runtime** — `kb-multibot-supervisor`, plus
   `kb-multibot-setup` / `kb-init-agent` / `kb-deactivate-agent`
   CLIs, a LaunchAgent template, a Telethon group listener, a Bot
@@ -28,7 +65,23 @@ upgrading.
   [`docs/methodology/multibot-agent-runtime.md`](docs/methodology/multibot-agent-runtime.md).
 - **Vendor-neutral agent positioning in docs** — public docs now
   state that Vepol coordinates ready-made CLI agents such as Claude
-  Code, Codex, Gemini CLI, and future agents over one shared KB.
+  Code, Codex, Antigravity CLI, and future agents over one shared KB.
+
+### Changed
+- Project-level `GEMINI.md` adapters are removed from the distribution;
+  `AGENTS.md` is the canonical instruction file and Antigravity CLI reads it
+  natively via `agy --add-dir`.
+- `kb-execute-next` now refuses migrated multiline `kb-board` files instead
+  of attempting legacy `kb-backlog` claim/close operations. Use explicit
+  `kb-board` claims until executor v2 is ported.
+
+### Security
+- Removed legacy `skipDangerousModePermissionPrompt` from the Claude settings
+  template and added regression coverage so unsafe bypass keys cannot silently
+  re-enter release builds.
+- Hardened seed publication against local-path, personal-name, and private
+  hub-page leakage; `knowledge/solutions/` stays home-only and is not tracked
+  in the public seed.
 
 ## [0.1.0] — 2026-05-02
 
@@ -64,7 +117,8 @@ Links, People, MCP-first sources) landed between 2026-04-30 and
   public release.
 - **Agent-driven onboarding** — `AGENTS.md` (operating manual for AI
   agents installing Vepol) + runtime adapters such as `CLAUDE.md`
-  for Claude Code and `GEMINI.md` for Gemini CLI.
+  for Claude Code. Antigravity CLI (`agy`) reads `AGENTS.md`
+  natively via `agy --add-dir <path>`; no project-level adapter needed.
 
 ### Daily-plan generator v0.1 (2026-04-30)
 
@@ -147,9 +201,11 @@ FSL-1.1-MIT — source-available; free for personal use, internal
 commercial use, professional services to clients, modifications, and
 non-competing forks. Restricted for competing products or services
 made available to others (hosted SaaS substituting for Vepol, branded
-resale). Each release auto-converts to MIT on its second anniversary;
-v0.1.0 converts on **2028-05-02**. See `LICENSE` and `COMMERCIAL.md`
-for the authoritative wording and common scenarios.
+resale). Each release auto-converts to MIT on its second anniversary:
+v0.1.0 converts on **2028-05-02** and v0.2.0 converts on
+**2028-05-29**. See `LICENSE` and `COMMERCIAL.md` for the authoritative
+wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nahornyi-ai-lab/vepol/releases/tag/v0.1.0

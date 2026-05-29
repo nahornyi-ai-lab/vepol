@@ -32,15 +32,17 @@ fail() {
 
 [[ -f "$PROJECT/AGENTS.md" ]] || fail "new project missing AGENTS.md"
 [[ -f "$PROJECT/CLAUDE.md" ]] || fail "new project missing CLAUDE.md"
-[[ -f "$PROJECT/GEMINI.md" ]] || fail "new project missing GEMINI.md"
 [[ -d "$PROJECT/knowledge" ]] || fail "new project missing knowledge/"
+# Agent-card example must exist (agent-card-schema 2026-05-12 contract).
+[[ -f "$PROJECT/knowledge/agents/_example.md" ]] || fail "new project missing knowledge/agents/_example.md"
+# Antigravity CLI (`agy`) reads project AGENTS.md natively via `agy --add-dir`;
+# project-level GEMINI.md adapter removed 2026-05-22 (Gemini CLI deprecation
+# 2026-06-18). No GEMINI.md is created or expected at project root.
+[[ ! -f "$PROJECT/GEMINI.md" ]] || fail "unexpected GEMINI.md created (removed 2026-05-22)"
 
 grep -Fq "AGENTS.md" "$PROJECT/CLAUDE.md" || fail "CLAUDE.md does not reference AGENTS.md"
-grep -Fq "@./AGENTS.md" "$PROJECT/GEMINI.md" || fail "GEMINI.md does not import @./AGENTS.md"
 
 non_empty_claude=$(grep -v '^[[:space:]]*$' "$PROJECT/CLAUDE.md" | wc -l | tr -d ' ')
-non_empty_gemini=$(grep -v '^[[:space:]]*$' "$PROJECT/GEMINI.md" | wc -l | tr -d ' ')
 [[ "$non_empty_claude" -le 30 ]] || fail "CLAUDE.md adapter too long: $non_empty_claude non-empty lines"
-[[ "$non_empty_gemini" -le 30 ]] || fail "GEMINI.md adapter too long: $non_empty_gemini non-empty lines"
 
 echo "agent-entrypoint synthetic OK"

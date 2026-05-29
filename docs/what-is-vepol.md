@@ -20,7 +20,7 @@ possible.
 ## Vepol is an operating layer for existing agents
 
 Vepol is not a new foundation model. It works through the AI agents you
-already trust: Claude Code, Codex, Gemini CLI, or another CLI-capable
+already trust: Claude Code, Codex, Antigravity CLI, or another CLI-capable
 agent that can read files, run commands, and obey a project contract.
 
 Think of it as the local coordination layer around those agents:
@@ -224,7 +224,7 @@ chronicle; you both refer to the same record.
   local environment
 - People who don't already use a capable AI coding/CLI agent —
   Vepol works *through* the agent's interface (Claude Code, Codex,
-  Gemini CLI, or another configured agent); if you're not in that
+  Antigravity CLI, or another configured agent); if you're not in that
   flow yet, start there first
 - People who prefer their AI to be reactive only — Vepol's whole
   point is initiative

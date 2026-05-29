@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""kb-task — append a task to a project's backlog, optionally create a Calendar event.
+"""kb-task — append a task to a project's kb-board, optionally create a Calendar event.
 
-Phase 1b: this script is now a thin wrapper around `kb-backlog append`. All
-mutations go through the atomic prepared/committed protocol with audit journal,
-so concurrent kb-task / kb-orchestrator-cycle / kb-execute-next writers are race-safe.
+The task board source of truth is `knowledge/backlog.md` in multiline
+`kb-board` format. This wrapper uses `kb-board append`; legacy `kb-backlog`
+writers fail fast on migrated boards.
 
 Usage:
   kb-task "task text"                                           # appends to HUB backlog
@@ -17,17 +17,18 @@ Calendar creation uses `claude -p` with the Google Calendar MCP. Requires:
   - claude CLI available
   - Google Calendar MCP authenticated
 
-Task line format (rendered by kb-backlog append):
-  - [ ] <text> — opened YYYY-MM-DD by <who> [— due: <when>] [— context: <ctx>]
+Task block format is rendered by `kb-board append` under the `## Backlog`
+section unless callers promote it to `Ready`.
 """
 import argparse
 import os
 import pathlib
 import subprocess
 import sys
+import uuid
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
-KB_BACKLOG = HUB / "bin" / "kb-backlog"
+KB_BOARD = HUB / "bin" / "kb-board"
 
 
 def create_calendar_event(task: str, when: str) -> None:
@@ -43,7 +44,7 @@ def create_calendar_event(task: str, when: str) -> None:
     )
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+            ["claude", "-p", prompt],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0:
@@ -57,7 +58,7 @@ def create_calendar_event(task: str, when: str) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Append a task to a project's backlog (via kb-backlog append).")
+    p = argparse.ArgumentParser(description="Append a task to a project's kb-board (via kb-board append).")
     p.add_argument("text", help="Task description (one line)")
     p.add_argument("--project", help="Project slug (omit to target hub-level backlog)")
     p.add_argument("--due", help="Due date/time (any string; 'YYYY-MM-DDTHH:MM' recommended)")
@@ -69,12 +70,25 @@ def main() -> None:
     args = p.parse_args()
 
     slug = args.project if args.project else "hub"
+    backlog_path = HUB / "backlog.md" if slug == "hub" else HUB / "projects" / slug / "backlog.md"
+    plan_item_id = str(uuid.uuid4())
 
-    cmd = [str(KB_BACKLOG), "append", slug, args.text, "--by", args.by]
+    cmd = [
+        str(KB_BOARD),
+        "append",
+        str(backlog_path),
+        args.text,
+        "--plan-item-id",
+        plan_item_id,
+        "--actor",
+        args.by,
+        "--owner",
+        args.by,
+    ]
     if args.due:
-        cmd += ["--due", args.due]
+        cmd += ["--field", f"due={args.due}"]
     if args.context:
-        cmd += ["--context", args.context]
+        cmd += ["--body", args.context]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -83,7 +97,7 @@ def main() -> None:
         sys.exit(result.returncode)
 
     target = f"project '{args.project}'" if args.project else "hub"
-    print(f"✓ Added to {target} backlog (via kb-backlog append)")
+    print(f"✓ Added to {target} board (via kb-board append)")
     print(result.stdout.rstrip())
 
     if args.calendar:

@@ -13,6 +13,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 
 def load_executor():
@@ -84,6 +85,30 @@ def main():
     print("bad-enum")
     status, _, _ = parse_outcome(fake_stdout("bad-enum"))
     assert_(status == "missing", f"bad-enum treated as missing (got {status})")
+
+    print("kb-board detection")
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="kb-exec-board-"))
+    migrated = tmpdir / "backlog.md"
+    migrated.write_text(
+        "# Backlog\n\n"
+        "## Backlog\n\n"
+        "## Ready\n\n"
+        "- [ ] **Run automation**\n"
+        "  plan_item_id: auto-1\n"
+        "  priority: P1\n"
+        "  owner: codex\n"
+        "  created: 2026-05-29\n"
+        "  updated: 2026-05-29\n"
+        "  acceptance: |\n"
+        "    Done.\n"
+        "  body: |\n"
+        "    auto: true\n",
+        encoding="utf-8",
+    )
+    legacy = tmpdir / "legacy.md"
+    legacy.write_text("# Backlog\n\n## Open\n- [ ] auto: true\n", encoding="utf-8")
+    assert_(mod.backlog_uses_kb_board(migrated), "migrated kb-board is detected")
+    assert_(not mod.backlog_uses_kb_board(legacy), "legacy one-line backlog is not treated as kb-board")
 
     print("\nAll agent-contract parse.py fixtures PASSED")
 

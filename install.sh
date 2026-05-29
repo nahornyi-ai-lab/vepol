@@ -201,6 +201,7 @@ else
 fi
 
 mkdir -p "$HUB/_template/knowledge"
+mkdir -p "$HUB/.orchestrator"
 
 # Symlink bin scripts (overwrite — these are managed by repo)
 for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki; do
@@ -211,6 +212,9 @@ done
 # Internal Python packages — symlink directories
 if [[ -d "$VEPOL_DIR/bin/_kb_backlog" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_backlog" "$HUB/bin/_kb_backlog"
+fi
+if [[ -d "$VEPOL_DIR/bin/_kb_board" ]]; then
+  ln -sfn "$VEPOL_DIR/bin/_kb_board" "$HUB/bin/_kb_board"
 fi
 if [[ -d "$VEPOL_DIR/bin/_kb_people" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_people" "$HUB/bin/_kb_people"
@@ -226,6 +230,13 @@ if [[ -d "$VEPOL_DIR/bin/templates" ]]; then
   ln -sfn "$VEPOL_DIR/bin/templates" "$HUB/bin/templates"
 fi
 ok "  bin/ symlinks point at $VEPOL_DIR/bin/"
+
+if [[ -L "$HUB/orchestrator-seed" || ! -e "$HUB/orchestrator-seed" ]]; then
+  ln -sfn "$VEPOL_DIR" "$HUB/orchestrator-seed"
+  ok "  orchestrator-seed pointer: $HUB/orchestrator-seed -> $VEPOL_DIR"
+else
+  warn "  $HUB/orchestrator-seed exists and is not a symlink — leaving it unchanged"
+fi
 
 # Scanner signatures (context-injection detector) — copy so user hub
 # has writable working dir for catalogue updates without touching repo.
@@ -243,7 +254,11 @@ ok "  security/scanner-signatures/ seeded"
 # Templates (always overwrite — schema is canonical)
 cp "$VEPOL_DIR/_template/AGENTS.md" "$HUB/_template/AGENTS.md"
 cp "$VEPOL_DIR/_template/CLAUDE.md" "$HUB/_template/CLAUDE.md"
-cp "$VEPOL_DIR/_template/GEMINI.md" "$HUB/_template/GEMINI.md"
+if [[ -f "$VEPOL_DIR/_template/GEMINI.md" ]]; then
+  cp "$VEPOL_DIR/_template/GEMINI.md" "$HUB/_template/GEMINI.md"
+else
+  rm -f "$HUB/_template/GEMINI.md"
+fi
 cp -R "$VEPOL_DIR/_template/knowledge/." "$HUB/_template/knowledge/"
 ok "  _template/ refreshed"
 
@@ -261,11 +276,13 @@ if [[ ! -f "$HUB/CLAUDE.md" ]]; then
 else
   warn "  $HUB/CLAUDE.md already exists — not overwritten"
 fi
-if [[ ! -f "$HUB/GEMINI.md" ]]; then
+if [[ -f "$VEPOL_DIR/knowledge/GEMINI.md" && ! -f "$HUB/GEMINI.md" ]]; then
   cp "$VEPOL_DIR/knowledge/GEMINI.md" "$HUB/GEMINI.md"
   ok "  $HUB/GEMINI.md installed (Gemini CLI adapter)"
+elif [[ -f "$HUB/GEMINI.md" ]]; then
+  warn "  $HUB/GEMINI.md already exists — legacy adapter left in place"
 else
-  warn "  $HUB/GEMINI.md already exists — not overwritten"
+  ok "  Gemini CLI hub adapter not shipped — AGENTS.md is canonical"
 fi
 
 # Hub-level triad / state files — only if missing
@@ -368,7 +385,7 @@ elif [[ -f "$HOME_DIR/.claude/settings.json" ]]; then
   # python3 (required prereq); atomic write; preserves original mode.
   # ─────────────────────────────────────────
   detect_script="$(cat <<'PYEOF'
-import json, os, re, sys
+import json, os, sys
 p = os.path.expanduser(sys.argv[1])
 try:
     # v2.1: utf-8-sig handles UTF-8 BOM (Gemini concern #2, Codex concern #5a).
@@ -377,11 +394,29 @@ try:
 except Exception as exc:
     print(f"READ_ERR:{exc!r}", end='')
     sys.exit(4)
+def has_jsonc_comment(text):
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '/' and i + 1 < len(text) and text[i + 1] in ('/', '*'):
+                return True
+        i += 1
+    return False
 # v2.1: explicit JSONC pre-scan (Codex concern #5b).
-# Reject //-comments and /*-block-comments; require strict JSON.
-# (Naive but adequate: matches any // or /* anywhere; false positive only
-#  if those tokens appear inside a string, which would itself be unusual.)
-if re.search(r'(^|[^:])//', raw) or '/*' in raw:
+# Reject //-comments and /*-block-comments outside strings; require strict JSON.
+if has_jsonc_comment(raw):
     print("JSONC_ERR:settings.json contains // or /* — strict JSON required; manual fix needed", end='')
     sys.exit(5)
 try:
@@ -401,8 +436,10 @@ print('|'.join(findings), end='')
 sys.exit(0 if not findings else 2)
 PYEOF
 )"
+  set +e
   detect_out=$(python3 -c "$detect_script" "$HOME_DIR/.claude/settings.json" 2>/dev/null)
   detect_rc=$?
+  set -e
   if [[ "$detect_rc" -eq 3 ]] || [[ "$detect_rc" -eq 4 ]]; then
     warn "  $HOME_DIR/.claude/settings.json unparseable (${detect_out})"
     warn "  Skipping C-01 migration — fix the file manually, then re-run install."
@@ -430,11 +467,31 @@ PYEOF
       cp -p "$HOME_DIR/.claude/settings.json" "$snapshot"
       ok "  snapshot: $snapshot"
       migrate_script="$(cat <<'PYEOF'
-import json, os, re, stat, sys, tempfile
+import json, os, stat, sys, tempfile
 src = os.path.expanduser(sys.argv[1])
 with open(src, 'r', encoding='utf-8-sig') as f:
     raw = f.read()
-if re.search(r'(^|[^:])//', raw) or '/*' in raw:
+def has_jsonc_comment(text):
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '/' and i + 1 < len(text) and text[i + 1] in ('/', '*'):
+                return True
+        i += 1
+    return False
+if has_jsonc_comment(raw):
     print(f"JSONC_ERR:{src} contains // or /* — strict JSON required", file=sys.stderr); sys.exit(5)
 data = json.loads(raw)
 changed = []
@@ -471,26 +528,34 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────
-# Step 4. Global ~/.gemini/GEMINI.md
+# Step 4. Optional legacy ~/.gemini/GEMINI.md
 # ─────────────────────────────────────────
-say "Step 4 · Installing global Gemini adapter (~/.gemini/GEMINI.md)"
+say "Step 4 · Checking optional Gemini CLI adapter (~/.gemini/GEMINI.md)"
 mkdir -p "$HOME_DIR/.gemini"
 if [[ -f "$VEPOL_DIR/gemini/GEMINI.md" && ! -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
   sed "s|__HOME__|$HOME_DIR|g" "$VEPOL_DIR/gemini/GEMINI.md" > "$HOME_DIR/.gemini/GEMINI.md"
   ok "  $HOME_DIR/.gemini/GEMINI.md created"
-elif [[ -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
+elif [[ -f "$VEPOL_DIR/gemini/GEMINI.md" && -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
   warn "  $HOME_DIR/.gemini/GEMINI.md already exists — merge $VEPOL_DIR/gemini/GEMINI.md manually"
+elif [[ -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
+  ok "  existing legacy Gemini CLI adapter left unchanged"
 else
-  warn "  $VEPOL_DIR/gemini/GEMINI.md missing — skipped"
+  ok "  Gemini CLI global adapter not shipped — AGENTS.md is canonical"
 fi
 
 # ─────────────────────────────────────────
-# Step 5. init-kb skill
+# Step 5. Claude skills
 # ─────────────────────────────────────────
-say "Step 5 · Installing init-kb skill"
-mkdir -p "$HOME_DIR/.claude/skills/init-kb"
-cp "$VEPOL_DIR/claude/skills/init-kb/SKILL.md" "$HOME_DIR/.claude/skills/init-kb/SKILL.md"
-ok "  init-kb skill ready (use: /init-kb in any project to bootstrap a wiki)"
+say "Step 5 · Installing Claude skills"
+if [[ -d "$VEPOL_DIR/claude/skills" ]]; then
+  for skill_dir in "$VEPOL_DIR"/claude/skills/*; do
+    [[ -d "$skill_dir" && -f "$skill_dir/SKILL.md" ]] || continue
+    skill_name="$(basename "$skill_dir")"
+    mkdir -p "$HOME_DIR/.claude/skills/$skill_name"
+    cp "$skill_dir/SKILL.md" "$HOME_DIR/.claude/skills/$skill_name/SKILL.md"
+    ok "  $skill_name skill ready"
+  done
+fi
 
 # ─────────────────────────────────────────
 # Step 6. Optional · LaunchAgents (opt-in)
@@ -503,6 +568,7 @@ echo "    • cycle launch (twice a day — brief + retro)"
 echo "    • People follow-up reminders (daily at 9:00)"
 
 if ask "Install scheduled tasks?"; then
+  rm -f "$HUB/.orchestrator/launchagents.opted-out"
   LA_DIR="$HOME_DIR/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
   for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle com.knowledge.people-remind; do
@@ -525,6 +591,7 @@ if ask "Install scheduled tasks?"; then
     fi
   done
 else
+  printf 'declined_at=%s\n' "$(date -Iseconds 2>/dev/null || date)" > "$HUB/.orchestrator/launchagents.opted-out"
   ok "  Skipped scheduled tasks (re-run install.sh anytime to enable)"
 fi
 
@@ -595,6 +662,7 @@ echo "  Vepol can auto-capture every Claude Code session into your daily log"
 echo "  via a small open-source companion tool (claude-memory-compiler)."
 
 if ask "Install claude-memory-compiler for automatic session capture?"; then
+  rm -f "$HUB/.orchestrator/memory-compiler.opted-out"
   COMPILER="$HOME_DIR/claude-memory-compiler"
   if [[ ! -d "$COMPILER/.git" ]]; then
     say "  cloning claude-memory-compiler…"
@@ -616,6 +684,8 @@ if ask "Install claude-memory-compiler for automatic session capture?"; then
         || warn "    uv sync failed — run manually later"
     fi
   fi
+else
+  printf 'declined_at=%s\n' "$(date -Iseconds 2>/dev/null || date)" > "$HUB/.orchestrator/memory-compiler.opted-out"
 fi
 
 # ─────────────────────────────────────────
@@ -632,11 +702,17 @@ interaction in under 5 minutes.
 
 INTRO
 
+if [[ -x "$HUB/bin/kb-bootstrap-manifest" ]]; then
+  say "Bootstrapping install manifest…"
+  "$HUB/bin/kb-bootstrap-manifest" --force --seed-path "$VEPOL_DIR" >/dev/null
+  ok "install manifest written"
+fi
+
 # 8a. kb-doctor
 if [[ -x "$HUB/bin/kb-doctor" ]]; then
   say "Running kb-doctor (system health check)…"
   set +e
-  "$HUB/bin/kb-doctor" install-health 2>&1 | tee -a "$LOG" | tail -15
+  "$HUB/bin/kb-doctor" install-health --strict 2>&1 | tee -a "$LOG" | tail -15
   RC=$?
   set -e
   if [[ "$RC" -eq 0 ]]; then
@@ -670,15 +746,31 @@ ${C_INFO}━━━ Read next ━━━${C_OFF}
   ${C_DIM}# Claude Code adapter (loads the canonical contract):${C_OFF}
   $HUB/CLAUDE.md
 
+NEXT
+
+if [[ -f "$HUB/_template/GEMINI.md" ]]; then
+  cat <<NEXT
   ${C_DIM}# Gemini CLI project-context template (if you use Gemini CLI):${C_OFF}
   $HUB/_template/GEMINI.md
 
+NEXT
+fi
+
+cat <<NEXT
   ${C_DIM}# Global Claude Code conventions (your edits stay; managed block updates):${C_OFF}
   $HOME_DIR/.claude/CLAUDE.md
 
+NEXT
+
+if [[ -f "$HOME_DIR/.gemini/GEMINI.md" ]]; then
+  cat <<NEXT
   ${C_DIM}# Global Gemini CLI adapter (loads the canonical contract):${C_OFF}
   $HOME_DIR/.gemini/GEMINI.md
 
+NEXT
+fi
+
+cat <<NEXT
   ${C_DIM}# Methodology pages (if shipped):${C_OFF}
   $VEPOL_DIR/docs/methodology/
 

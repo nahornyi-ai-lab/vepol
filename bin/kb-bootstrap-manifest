@@ -44,12 +44,13 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
       - seed/knowledge/bin/kb-* — managed scripts (excluding .retired and hidden)
       - seed/knowledge/_template/** — managed templates
       - seed/knowledge/AGENTS.md — user-templated hub contract
-      - seed/knowledge/CLAUDE.md — user-templated Claude adapter
-      - seed/knowledge/GEMINI.md — user-templated Gemini adapter
-      - seed/claude/CLAUDE.md — user-templated global Claude config
-      - seed/gemini/GEMINI.md — user-templated global Gemini config
+      - seed/knowledge/CLAUDE.md — user-templated Claude Code adapter
+      - seed/claude/CLAUDE.md — user-templated global Claude Code config
+      - seed/gemini/GEMINI.md — user-templated global Antigravity CLI adapter (legacy `~/.gemini/` dir; loads canonical hub)
       - seed/claude/skills/*/SKILL.md — managed skills
       - seed/launchd/com.knowledge.*.plist.template — managed-templated LaunchAgents
+    Note: project-level GEMINI.md adapter removed 2026-05-22 — Antigravity CLI
+    (`agy`) reads AGENTS.md natively via `agy --add-dir <path>`.
     """
     items: list[dict] = []
     bin_dir = seed / "knowledge" / "bin"
@@ -95,13 +96,8 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
             "source_path": "knowledge/CLAUDE.md",
             "install_path": str(home / "knowledge" / "CLAUDE.md"),
         })
-    if (seed / "knowledge" / "GEMINI.md").is_file():
-        items.append({
-            "artifact_id": "hub-gemini-md",
-            "category": "user-templated",
-            "source_path": "knowledge/GEMINI.md",
-            "install_path": str(home / "knowledge" / "GEMINI.md"),
-        })
+    # Project-level GEMINI.md adapter removed 2026-05-22 (Gemini CLI deprecation
+    # 2026-06-18). Antigravity CLI reads AGENTS.md natively via `agy --add-dir`.
     if (seed / "claude" / "CLAUDE.md").is_file():
         items.append({
             "artifact_id": "global-claude-md",

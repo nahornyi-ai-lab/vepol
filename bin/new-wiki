@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # new-wiki — bootstrap локальной вики в проекте и регистрация в хабе.
-# Создаёт <project>/AGENTS.md, <project>/CLAUDE.md, <project>/GEMINI.md и <project>/knowledge/ со всей структурой,
-# симлинкает knowledge/ в ~/knowledge/projects/<slug> и логирует в хаб.
+# Создаёт <project>/AGENTS.md (canonical), <project>/CLAUDE.md (Claude Code adapter)
+# и <project>/knowledge/ со всей структурой, симлинкает knowledge/ в
+# ~/knowledge/projects/<slug> и логирует в хаб.
+# Antigravity CLI (`agy`) читает project AGENTS.md нативно через `agy --add-dir <path>` —
+# отдельный GEMINI.md adapter не создаётся (Gemini CLI deprecation 2026-06-18).
 #
 # Usage: new-wiki <path-to-project> [slug] [category]
 #   category: lab | order | pet | personal (по умолчанию — personal)
@@ -32,6 +35,7 @@ mkdir -p "$PROJECT_PATH/knowledge/raw/assets"
 mkdir -p "$PROJECT_PATH/knowledge/sources"
 mkdir -p "$PROJECT_PATH/knowledge/daily"
 mkdir -p "$PROJECT_PATH/knowledge/reports"
+mkdir -p "$PROJECT_PATH/knowledge/agents"
 : > "$PROJECT_PATH/knowledge/daily/.gitkeep"
 : > "$PROJECT_PATH/knowledge/reports/.gitkeep"
 
@@ -52,8 +56,11 @@ render() {
 
 render "$TEMPLATE/AGENTS.md"            "$PROJECT_PATH/AGENTS.md"
 render "$TEMPLATE/CLAUDE.md"            "$PROJECT_PATH/CLAUDE.md"
+# Project-level GEMINI.md adapter removed 2026-05-22 — Antigravity CLI reads
+# AGENTS.md natively via `agy --add-dir <path>`. Legacy template guarded for
+# backward compatibility with old `~/knowledge/_template/` checkouts.
 if [[ -f "$TEMPLATE/GEMINI.md" ]]; then
-  render "$TEMPLATE/GEMINI.md"          "$PROJECT_PATH/GEMINI.md"
+  echo "  ⚠ legacy $TEMPLATE/GEMINI.md found — skipping (deprecated 2026-05-22)"
 fi
 render "$TEMPLATE/knowledge/README.md"  "$PROJECT_PATH/knowledge/README.md"
 render "$TEMPLATE/knowledge/index.md"   "$PROJECT_PATH/knowledge/index.md"
@@ -63,6 +70,11 @@ render "$TEMPLATE/knowledge/backlog.md"      "$PROJECT_PATH/knowledge/backlog.md
 render "$TEMPLATE/knowledge/escalations.md"  "$PROJECT_PATH/knowledge/escalations.md"
 render "$TEMPLATE/knowledge/incidents.md"    "$PROJECT_PATH/knowledge/incidents.md"
 render "$TEMPLATE/knowledge/strategies.md"   "$PROJECT_PATH/knowledge/strategies.md"
+# Agent card example (agent-card-schema Stage 3 contract, 2026-05-12).
+# Project's first agent copies _example.md → agent-card.md and fills it.
+if [[ -f "$TEMPLATE/knowledge/agents/_example.md" ]]; then
+  render "$TEMPLATE/knowledge/agents/_example.md" "$PROJECT_PATH/knowledge/agents/_example.md"
+fi
 
 # Phase 2: ship the canonical report template + .orchestration.yaml so this
 # project participates in the orchestration cycle once `cycle_enabled` flips.

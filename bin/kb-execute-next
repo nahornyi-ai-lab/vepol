@@ -72,6 +72,18 @@ def resolve_project(slug, project_path_override):
     _err(f"error: cannot resolve slug '{slug}' (no symlink at {link}, no --project-path)")
 
 
+def backlog_uses_kb_board(backlog_path):
+    """Return True when backlog.md is the multiline kb-board format."""
+    try:
+        text = pathlib.Path(backlog_path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    has_board_sections = bool(re.search(r"^##\s+Ready\s*$", text, re.MULTILINE))
+    has_task_blocks = bool(re.search(r"^-\s*\[[ xX>~]\]\s+\*\*.+\*\*\s*$", text, re.MULTILINE))
+    has_plan_ids = bool(re.search(r"^\s{2}plan_item_id\s*:", text, re.MULTILINE))
+    return has_board_sections and has_task_blocks and has_plan_ids
+
+
 def parse_backlog(backlog_path):
     """Return all `- [ ]` task dicts from `## Open` section."""
     if not backlog_path.exists():
@@ -363,8 +375,7 @@ def run_live(slug, project, backlog_path, task, prompt, timeout):
                      "--timeout", str(timeout)]
         subprocess_timeout = timeout + 30
     else:
-        spawn_cmd = ["claude", "-p", "--add-dir", str(project),
-                     "--dangerously-skip-permissions", prompt]
+        spawn_cmd = ["claude", "-p", "--add-dir", str(project), prompt]
         subprocess_timeout = timeout
 
     child_env = os.environ.copy()
@@ -525,6 +536,14 @@ def main():
 
     project = resolve_project(args.slug, args.project_path)
     backlog_path = project / "knowledge" / "backlog.md"
+
+    if backlog_uses_kb_board(backlog_path):
+        _err(
+            "error: kb-execute-next legacy executor is disabled for migrated "
+            "kb-board files; use kb-board claim/request-review/close until "
+            "executor v2 is ported.",
+            code=2,
+        )
 
     # CR-Phase5-CR5 fix: run kb-backlog recover BEFORE parsing the backlog.
     # Without this, a dangling X2-X3 xfer crash leaves an open auto:true

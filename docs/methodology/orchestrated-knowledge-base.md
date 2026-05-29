@@ -70,7 +70,7 @@ extends it on seven axes:
    cadence — the plan and its lifecycle are materialized as files,
    not held in memory.
 6. **Multi-orchestrator symmetry.** Multiple AI agents (Claude Code,
-   Codex, Gemini CLI, future CLI-capable agents) work against the
+   Codex, Antigravity CLI, future CLI-capable agents) work against the
    same knowledge base; no
    single point of failure; significant plans get cross-reviewed by
    another agent (see [`cross-agent-review.md`](cross-agent-review.md)).
@@ -150,7 +150,7 @@ delegated; everyone reads incidents to avoid repeating mistakes.
 
 ## Cross-orchestrator symmetry
 
-Vepol can host more than one AI agent (Claude Code, Codex, Gemini CLI,
+Vepol can host more than one AI agent (Claude Code, Codex, Antigravity CLI,
 and future CLI-capable agents). The discipline keeping them coherent:
 
 - **One substrate.** `~/knowledge/` plus per-project `knowledge/`.

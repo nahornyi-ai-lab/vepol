@@ -1917,14 +1917,42 @@ INSTALL_HEALTH_REQUIRED_BINS = ("node", "python3", "rg", "gh", "uv", "bun", "jq"
 # candidate per Codex pass concern (`~/knowledge/.claude/settings.json`).
 # Missing paths are skipped silently.
 # ──────────────────────────────────────────────────────────────────────
+def _ih_settings_template_scan_paths(seed: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    candidates: list[tuple[str, pathlib.Path]] = [
+        ("seed-template", seed / "claude" / "settings.json.template"),
+    ]
+
+    env_template = os.environ.get("KB_DOCTOR_SETTINGS_TEMPLATE")
+    if env_template:
+        candidates.append(("env-template", pathlib.Path(env_template).expanduser()))
+
+    cwd = pathlib.Path.cwd()
+    local_roots = [cwd]
+    try:
+        local_roots.extend(sorted(path for path in cwd.iterdir() if path.is_dir()))
+    except OSError:
+        pass
+    for root in local_roots:
+        candidates.append((f"cwd-template:{root.name}", root / "claude" / "settings.json.template"))
+
+    seen: set[str] = set()
+    deduped: list[tuple[str, pathlib.Path]] = []
+    for label, path in candidates:
+        key = str(path.expanduser().absolute())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, path))
+    return deduped
+
+
 def _ih_settings_scan_paths(home: pathlib.Path, seed: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
     candidates: list[tuple[str, pathlib.Path]] = [
         ("live",                 home / ".claude" / "settings.json"),
-        ("seed-template",        seed / "claude" / "settings.json.template"),
-        ("vepol-prep-template",  home / "vepol-dev" / "vepol-prep" / "claude" / "settings.json.template"),
         ("hub-local",            home / "knowledge" / ".claude" / "settings.json"),
         ("project-local",        pathlib.Path.cwd() / ".claude" / "settings.json"),
     ]
+    candidates.extend(_ih_settings_template_scan_paths(seed))
     # v2.1 registry walk: iterate ~/knowledge/projects/<slug> symlinks.
     # Each entry points at <project>/knowledge; its parent is <project> root.
     # Check <project>/.claude/settings.json (NOT <project>/knowledge/.claude/).
@@ -1998,6 +2026,32 @@ def _ih_sha256(path: pathlib.Path) -> str | None:
     return "sha256:" + h.hexdigest()
 
 
+def _ih_launchagent_disabled_evidence(home: pathlib.Path, label: str) -> str | None:
+    """Return evidence when a LaunchAgent is intentionally disabled.
+
+    The only currently approved disabled LaunchAgent is
+    `com.knowledge.orchestrator-cycle`, which is held down until scanner v2 and
+    promotion evidence pass. Missing arbitrary LaunchAgents remain P0.
+    """
+    if label != "com.knowledge.orchestrator-cycle":
+        return None
+    disabled_dir = home / "Library" / "LaunchAgents.disabled"
+    disabled_files = sorted(disabled_dir.glob(f"{label}.plist.disabled-*"))
+    if not disabled_files:
+        return None
+    log_text = read_text(HUB / "log.md")
+    if "disabled | kb-orchestrator-cycle" not in log_text:
+        return None
+    return f"disabled_path={disabled_files[-1]} log_marker=disabled|kb-orchestrator-cycle"
+
+
+def _ih_optional_opt_out_evidence(feature: str) -> str | None:
+    marker = HUB / ".orchestrator" / f"{feature}.opted-out"
+    if marker.is_file():
+        return f"opt_out_marker={marker}"
+    return None
+
+
 def _ih_check_manifest(home: pathlib.Path, seed: pathlib.Path) -> tuple[list[Finding], dict | None]:
     findings: list[Finding] = []
     manifest_path = _ih_manifest_path()
@@ -2035,8 +2089,9 @@ def _ih_check_manifest(home: pathlib.Path, seed: pathlib.Path) -> tuple[list[Fin
     return findings, data
 
 
-def _ih_check_entries(manifest: dict) -> list[Finding]:
+def _ih_check_entries(manifest: dict, home: pathlib.Path | None = None) -> list[Finding]:
     findings: list[Finding] = []
+    home = home or _ih_home()
     files = manifest.get("files") or {}
     for art_id, entry in files.items():
         if not isinstance(entry, dict):
@@ -2073,6 +2128,27 @@ def _ih_check_entries(manifest: dict) -> list[Finding]:
                     evidence=f"{hash_field}={value!r}",
                 ))
         if entry.get("installed_hash") is None:
+            install_path = pathlib.Path(entry.get("install_path", ""))
+            disabled_evidence = None
+            if art_id.startswith("launchd-"):
+                disabled_evidence = _ih_launchagent_disabled_evidence(home, install_path.stem)
+            if disabled_evidence:
+                findings.append(finding_with_key(
+                    "install-health:launchagent-disabled", "hub", install_path.stem,
+                    str(install_path), "info",
+                    f"{install_path.stem} intentionally disabled pending scanner v2/promotion evidence",
+                    evidence=disabled_evidence,
+                ))
+                continue
+            opt_out_evidence = _ih_optional_opt_out_evidence("launchagents") if art_id.startswith("launchd-") else None
+            if opt_out_evidence:
+                findings.append(finding_with_key(
+                    "install-health:optional-opt-out", "hub", install_path.stem,
+                    str(install_path), "info",
+                    f"{install_path.stem} not installed because LaunchAgents were declined",
+                    evidence=opt_out_evidence,
+                ))
+                continue
             findings.append(finding_with_key(
                 "install-health:installed-hash-null", "hub", art_id,
                 entry.get("install_path", art_id), "P0",
@@ -2082,6 +2158,17 @@ def _ih_check_entries(manifest: dict) -> list[Finding]:
             continue
         install_path = pathlib.Path(entry.get("install_path", ""))
         if not install_path.is_file():
+            disabled_evidence = None
+            if art_id.startswith("launchd-"):
+                disabled_evidence = _ih_launchagent_disabled_evidence(home, install_path.stem)
+            if disabled_evidence:
+                findings.append(finding_with_key(
+                    "install-health:launchagent-disabled", "hub", install_path.stem,
+                    str(install_path), "info",
+                    f"{install_path.stem} intentionally disabled pending scanner v2/promotion evidence",
+                    evidence=disabled_evidence,
+                ))
+                continue
             findings.append(finding_with_key(
                 "install-health:install-path-missing", "hub", art_id,
                 str(install_path), "P0",
@@ -2253,8 +2340,7 @@ def _ih_check_settings_bypass(home: pathlib.Path, seed: pathlib.Path) -> list[Fi
                 f"{label}:{key_repr}", str(path), "P0",
                 (f"{label} {path} carries legacy bypass key "
                  f"{key_repr}={unsafe_value!r} at line {line_no}. "
-                 f"Remediation: {hint}. See "
-                 f"vepol-dev/knowledge/decisions/security-model-2026-05-22.md C-01."),
+                 f"Remediation: {hint}. See security-model C-01."),
                 evidence=f"path={path} key={key_repr} value={unsafe_value!r} line={line_no}",
             ))
     return findings
@@ -2410,9 +2496,29 @@ def _ih_check_launchagents(home: pathlib.Path, manifest: dict | None) -> list[Fi
             continue
         if not art_id.startswith("launchd-"):
             continue
+        if entry.get("installed_hash") is None:
+            continue
         plist_path = pathlib.Path(entry.get("install_path", ""))
         label = plist_path.stem  # e.g. com.knowledge.planner
         if not plist_path.is_file():
+            disabled_evidence = _ih_launchagent_disabled_evidence(home, label)
+            if disabled_evidence:
+                findings.append(finding_with_key(
+                    "install-health:launchagent-disabled", "hub", label,
+                    str(plist_path), "info",
+                    f"LaunchAgent {label} intentionally disabled pending scanner v2/promotion evidence",
+                    evidence=disabled_evidence,
+                ))
+                continue
+            opt_out_evidence = _ih_optional_opt_out_evidence("launchagents")
+            if opt_out_evidence:
+                findings.append(finding_with_key(
+                    "install-health:optional-opt-out", "hub", label,
+                    str(plist_path), "info",
+                    f"LaunchAgent {label} not installed because scheduled tasks were declined",
+                    evidence=opt_out_evidence,
+                ))
+                continue
             findings.append(finding_with_key(
                 "install-health:launchagent-missing", "hub", label,
                 str(plist_path), "P0",
@@ -2443,6 +2549,13 @@ def _ih_check_memory_compiler(home: pathlib.Path) -> list[Finding]:
     findings: list[Finding] = []
     cmc_dir = home / "claude-memory-compiler"
     if not cmc_dir.is_dir():
+        opt_out_evidence = _ih_optional_opt_out_evidence("memory-compiler")
+        if opt_out_evidence:
+            return [finding(
+                "install-health:optional-opt-out", "hub", str(cmc_dir), "info",
+                "claude-memory-compiler not installed because session capture was declined",
+                evidence=opt_out_evidence,
+            )]
         findings.append(finding(
             "install-health:memory-compiler-missing", "hub", str(cmc_dir), "P1",
             "claude-memory-compiler clone missing — SessionEnd / PreCompact hooks will fail",
@@ -2615,6 +2728,47 @@ def _ih_version_matches(version: str, pattern: str) -> bool:
     return True
 
 
+def _ih_check_runtime_bypass_flags(home: pathlib.Path, seed: pathlib.Path) -> list[Finding]:
+    """C-01 runtime guard: no Claude channel/LaunchAgent bypass flags."""
+    findings: list[Finding] = []
+    runtime_scripts = (
+        "kb-channels-start",
+        "kb-task",
+        "kb-orchestrator-run",
+        "kb-execute-next",
+        "kb-telegram-poll.retired",
+    )
+    candidates: list[tuple[str, pathlib.Path]] = []
+    for script in runtime_scripts:
+        candidates.append((f"seed-{script}", seed / "bin" / script))
+        candidates.append((f"live-{script}", HUB / "bin" / script))
+    launch_agents = home / "Library" / "LaunchAgents"
+    if launch_agents.is_dir():
+        for plist in sorted(launch_agents.glob("com.knowledge*.plist")):
+            candidates.append((f"launchagent:{plist.stem}", plist))
+    seen: set[pathlib.Path] = set()
+    for label, path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not path.is_file():
+            continue
+        text = read_text(path)
+        if "--dangerously-skip-permissions" not in text and "dangerously-skip-permissions" not in text:
+            continue
+        findings.append(finding_with_key(
+            "install-health:runtime-bypass-flag", "hub", label,
+            str(path), "P0",
+            f"{label} contains a Claude runtime bypass flag",
+            evidence="remove --dangerously-skip-permissions; rely on settings allowlist and explicit approvals",
+        ))
+    return findings
+
+
 def install_health_check() -> list[Finding]:
     home = _ih_home()
     seed = _ih_seed_path()
@@ -2622,11 +2776,12 @@ def install_health_check() -> list[Finding]:
     manifest_findings, manifest = _ih_check_manifest(home, seed)
     findings.extend(manifest_findings)
     if manifest:
-        findings.extend(_ih_check_entries(manifest))
+        findings.extend(_ih_check_entries(manifest, home=home))
     findings.extend(_ih_check_seed_git(seed, manifest))
     findings.extend(_ih_check_version(seed, manifest))
     findings.extend(_ih_check_settings(home))
     findings.extend(_ih_check_settings_bypass(home, seed))   # C-01 wiring
+    findings.extend(_ih_check_runtime_bypass_flags(home, seed))  # C-01 runtime wiring
     findings.extend(_ih_check_launchagents(home, manifest))
     findings.extend(_ih_check_memory_compiler(home))
     findings.extend(_ih_check_binaries(home))
@@ -2935,13 +3090,14 @@ def fetch_allowlist_check() -> list[Finding]:
                 "PreToolUse Bash hook does not reference kb-curl-allowlist-guard.",
                 "add a PreToolUse Bash hook pointing at the guard script",
             ))
-    seed = pathlib.Path("/Users/macbook/vepol-dev/vepol-prep/claude/settings.json.template")
-    if seed.exists():
+    for label, seed in _ih_settings_template_scan_paths(_ih_seed_path()):
+        if not seed.exists():
+            continue
         seed_text = seed.read_text(encoding="utf-8", errors="replace")
         if re.search(r'"WebFetch"', seed_text) or re.search(r'"Bash\(curl:\*\)"', seed_text):
             findings.append(finding(
                 "fetch-allowlist:seed-wildcard", "hub", seed, "P0",
-                "Seed template still grants wildcard fetch/curl permission.",
+                f"Settings template {label} still grants wildcard fetch/curl permission.",
                 "mirror the live deny-by-default allowlist into the template",
             ))
     return findings

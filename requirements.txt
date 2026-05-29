@@ -6,7 +6,9 @@
 #
 # Modules that need these:
 #   - People  → python-frontmatter, click, PyYAML, jellyfish
+#   - Daily NotebookLM research → notebooklm-py (CLI command: notebooklm)
 #   - Daily-plan generator → standard library only (no extras)
+#   - Evolution Loop → jsonschema, PyYAML
 #
 # External-source ingestion (calendar, mail, chat, etc.) goes through
 # the MCP host via `claude -p`. Vepol modules do NOT link against
@@ -19,3 +21,5 @@ python-frontmatter>=1.1,<2.0   # People — markdown+YAML frontmatter parsing
 click>=8.1,<9.0                # People — CLI framework for kb-contact, kb-calendar-sync, kb-people-remind
 PyYAML>=6.0,<7.0               # People — _index.yaml read/write
 jellyfish>=1.0,<2.0            # People — Jaro-Winkler string distance for soft-signal dedup
+notebooklm-py>=0.3.4,<0.4      # Daily research audio — NotebookLM CLI
+jsonschema>=4.20,<5.0          # Evolution Loop — mutation proposal JSON Schema validation

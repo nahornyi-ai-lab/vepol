@@ -29,6 +29,14 @@ echo "=== claim drift detection (token + content_hash, CR1-B4) ==="
 bash kb-backlog/claim-drift.sh > /dev/null && pass "claim-drift.sh" || { fail "claim-drift.sh"; exit 1; }
 
 echo
+echo "=== kb-board single-source markdown contract ==="
+bash kb-board/run.sh > /dev/null && pass "kb-board/run.sh (29 contract tests)" || { fail "kb-board/run.sh"; exit 1; }
+
+echo
+echo "=== kb-search board smoke ==="
+bash kb-search/smoke.sh > /dev/null && pass "kb-search/smoke.sh" || { fail "kb-search/smoke.sh"; exit 1; }
+
+echo
 echo "=== audit-recovery (F-CR-1..F-CR-4) ==="
 python3 audit-recovery/crash.py > /dev/null && pass "crash.py (4 fixtures)" || { fail "crash.py"; exit 1; }
 
@@ -85,12 +93,20 @@ echo "=== Daily-plan generator v0.1 (E2E-1..E2E-15) ==="
 python3 daily-plan-gen/fixtures.py > /dev/null && pass "daily-plan-gen/fixtures.py" || { fail "daily-plan-gen"; exit 1; }
 
 echo
+echo "=== Evolution Loop v0-minimal fixtures ==="
+python3 evolution/fixtures.py > /dev/null && pass "evolution/fixtures.py" || { fail "evolution"; exit 1; }
+
+echo
 echo "=== Phase 6 bootstrap acceptance (synthetic 3-project end-to-end) ==="
 python3 bootstrap/synthetic.py > /dev/null && pass "bootstrap/synthetic.py" || { fail "bootstrap"; exit 1; }
 
 echo
+echo "=== Installer idempotency smoke ==="
+bash install/idempotency.sh > /dev/null && pass "install/idempotency.sh" || { fail "install/idempotency.sh"; exit 1; }
+
+echo
 echo "=== Phase 8 kb-doctor periodic checks ==="
-python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (6 fixtures)" || { fail "phase8"; exit 1; }
+python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (7 fixtures)" || { fail "phase8"; exit 1; }
 
 echo
 echo "=== ALL Phase 1b tests passed ==="

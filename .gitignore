@@ -42,13 +42,12 @@ credentials*.json
 # User overlay (must NEVER appear in this repo — that's the whole point).
 # Exceptions: the canonical hub schema files, which `install.sh` copies
 # to `~/knowledge/` on the user's machine. `AGENTS.md` is the canonical
-# vendor-neutral contract; `CLAUDE.md` and `GEMINI.md` are thin runtime
-# adapters. The schema itself is documentation; only the user's runtime
-# KB content stays out.
+# vendor-neutral contract; `CLAUDE.md` is the thin Claude Code adapter.
+# (Project-level `GEMINI.md` adapter removed 2026-05-22 — Antigravity CLI
+# reads AGENTS.md natively via `agy --add-dir`.)
 knowledge/*
 !knowledge/AGENTS.md
 !knowledge/CLAUDE.md
-!knowledge/GEMINI.md
 .kb-ignore
 
 # Maintainer-only: runtime blocklist generated locally for the staging mirror

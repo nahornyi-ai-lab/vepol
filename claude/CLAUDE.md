@@ -11,5 +11,5 @@ Runtime notes for Claude Code:
 
 - Treat `__HOME__/knowledge/` as the global source of truth.
 - Treat each project `knowledge/` directory as durable project state.
-- Runtime-native files such as `CLAUDE.md` and `GEMINI.md` are adapters only; `AGENTS.md` wins on conflict unless the user says otherwise.
+- Runtime-native files such as `CLAUDE.md` are adapters only; `AGENTS.md` wins on conflict unless the user says otherwise. Antigravity CLI (`agy`) reads `AGENTS.md` natively via `agy --add-dir <path>`.
 - Keep Claude-specific behavior here only when it cannot live in `AGENTS.md`.

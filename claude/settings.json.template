@@ -271,6 +271,5 @@
     }
   },
   "effortLevel": "high",
-  "skipDangerousModePermissionPrompt": true,
   "theme": "light-daltonized"
 }

@@ -400,7 +400,7 @@ def build_claude_command(
     session: dict,
     resume_key: str | None,
 ) -> list[str]:
-    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions", "--model", DEFAULT_CLAUDE_MODEL]
+    cmd = ["claude", "-p", prompt, "--model", DEFAULT_CLAUDE_MODEL]
     for path in add_dirs:
         cmd.extend(["--add-dir", path])
     if resume_key:

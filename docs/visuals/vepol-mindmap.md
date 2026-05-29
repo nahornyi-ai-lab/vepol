@@ -17,7 +17,7 @@ mindmap
       User Overlay &lpar;~/knowledge/&rpar;
       Claude Code &lpar;CLI agent&rpar;
       Codex &lpar;CLI agent&rpar;
-      Gemini CLI &lpar;reviewer / CLI agent&rpar;
+      Antigravity CLI &lpar;reviewer / CLI agent&rpar;
       Future CLI-capable agents
       Knowledge-base Hub
     Knowledge Structure

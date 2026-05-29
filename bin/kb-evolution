@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""kb-evolution — v0-minimal Evolution Loop runtime helpers."""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from _kb_evolution import ledger, policy, proposals, scaffold, signals  # noqa: E402
+
+
+def _knowledge_path(value: str | None) -> pathlib.Path:
+    if value:
+        return pathlib.Path(value).expanduser().resolve()
+    cwd = pathlib.Path.cwd()
+    if (cwd / "knowledge").is_dir():
+        return (cwd / "knowledge").resolve()
+    return cwd.resolve()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Evolution Loop v0-minimal helpers")
+    parser.add_argument("--knowledge-path", help="Path to a project knowledge/ directory")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="Create knowledge/evolution scaffold")
+
+    ps = sub.add_parser("signal", help="Append pending evolution signal")
+    ps.add_argument("--id", required=True, dest="signal_id")
+    ps.add_argument("--source", required=True)
+    ps.add_argument("--surface", required=True)
+    ps.add_argument("--summary", required=True)
+
+    pv = sub.add_parser("validate-proposal", help="Validate proposal frontmatter")
+    pv.add_argument("path")
+
+    pl = sub.add_parser("parse-ledger", help="Strict-parse mutations.md")
+
+    pa = sub.add_parser("append-entry", help="Append one JSON ledger entry")
+    pa.add_argument("entry_json", help="JSON object or @path")
+    pa.add_argument("--actor", default="reviewer-capability")
+
+    ppol = sub.add_parser("check-policy", help="Check proposal apply policy")
+    ppol.add_argument("proposal")
+    ppol.add_argument("--evaluator", required=True, help="evaluator identity")
+    ppol.add_argument("--scanner-available", action="store_true")
+    ppol.add_argument("--hitl-approved", action="store_true")
+
+    args = parser.parse_args()
+    knowledge = _knowledge_path(args.knowledge_path)
+
+    try:
+        if args.cmd == "init":
+            scaffold.ensure_evolution_tree(knowledge)
+            print(json.dumps({"status": "ok", "knowledge_path": str(knowledge)}, ensure_ascii=False))
+            return 0
+        if args.cmd == "signal":
+            print(json.dumps(signals.append_signal(
+                knowledge,
+                signal_id=args.signal_id,
+                source=args.source,
+                surface=args.surface,
+                summary=args.summary,
+            ), ensure_ascii=False))
+            return 0
+        if args.cmd == "validate-proposal":
+            data = proposals.validate_proposal_file(pathlib.Path(args.path))
+            print(json.dumps({"status": "ok", "proposal_id": data["proposal_id"]}, ensure_ascii=False))
+            return 0
+        if args.cmd == "parse-ledger":
+            entries = ledger.parse_ledger(knowledge / "evolution" / "mutations.md")
+            print(json.dumps({"status": "ok", "entries": len(entries)}, ensure_ascii=False))
+            return 0
+        if args.cmd == "append-entry":
+            raw = args.entry_json
+            if raw.startswith("@"):
+                raw = pathlib.Path(raw[1:]).read_text(encoding="utf-8")
+            entry = json.loads(raw)
+            print(json.dumps(ledger.append_entry(knowledge, entry, actor=args.actor), ensure_ascii=False))
+            return 0
+        if args.cmd == "check-policy":
+            proposal = proposals.validate_proposal_file(pathlib.Path(args.proposal))
+            evaluator = {
+                "identity": args.evaluator,
+                "sahoo": {"drift_check": "pass", "invariant_check": "pass", "regression_check": "pass"},
+                "conflict_check": "pass",
+            }
+            result = policy.validate_apply_request(
+                knowledge,
+                proposal,
+                evaluator=evaluator,
+                scanner_available=args.scanner_available,
+                hitl_approved=args.hitl_approved,
+            )
+            print(json.dumps(result.__dict__, ensure_ascii=False))
+            return 0 if result.allowed else 2
+    except Exception as exc:
+        print(f"kb-evolution: {exc}", file=sys.stderr)
+        return 1
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -10,8 +10,8 @@ _(1–3 предложения: что это, зачем, для кого, в �
 
 ```
 {{PROJECT_SLUG}}/
-├── AGENTS.md                # этот файл
-├── GEMINI.md                # Gemini CLI adapter → AGENTS.md
+├── AGENTS.md                # этот файл (canonical; читается Codex/Claude Code/Antigravity CLI)
+├── CLAUDE.md                # Claude Code adapter → AGENTS.md (≤30 строк)
 ├── knowledge/               # ВСЯ вика проекта (изолирована от кода)
 │   ├── README.md            # короткое описание
 │   ├── index.md             # каталог страниц

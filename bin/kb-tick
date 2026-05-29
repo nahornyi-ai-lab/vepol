@@ -114,12 +114,68 @@ def main() -> None:
     # Brief — only mark fired on rc==0 so a crash retries on next tick
     # rather than silently swallowing the day's brief.
     if not plan.get("brief_fired") and now_hm >= plan["brief_hm"]:
+        # arXiv digest pre-fetch — failure-isolated, never blocks brief.
+        # Spec: ~/knowledge/concepts/daily-arxiv-ai-digest.md (acceptance #5).
+        try:
+            subprocess.run(
+                [str(HUB / "bin" / "kb-arxiv-pull")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+        except Exception as e:
+            log(f"kb-arxiv-pull failed: {e!r}; brief continues")
         rc = fire("kb-brief")
         if rc == 0:
             plan["brief_fired"] = True
             save_plan(plan)
         else:
             log(f"brief rc={rc}, brief_fired NOT set; will retry next tick")
+
+    # Optional daily arXiv NotebookLM report. Disabled by default because the
+    # product-level daily research loop below is the single default audio.
+    if (
+        os.environ.get("KB_ARXIV_NOTEBOOKLM_ENABLE") == "1"
+        and not plan.get("arxiv_notebooklm_fired")
+        and now_hm >= plan["brief_hm"]
+    ):
+        try:
+            proc = subprocess.run(
+                [str(HUB / "bin" / "kb-arxiv-notebooklm"), "--date", today],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=900,
+                check=False,
+            )
+            log(f"kb-arxiv-notebooklm completed rc={proc.returncode}")
+            if proc.returncode == 0:
+                plan["arxiv_notebooklm_fired"] = True
+                save_plan(plan)
+            else:
+                log("arxiv_notebooklm_fired NOT set; will retry next tick")
+        except Exception as e:
+            log(f"kb-arxiv-notebooklm failed: {e!r}; will retry next tick")
+
+    # Daily topic research → NotebookLM. This is the default one-audio-per-day
+    # product loop; it is independent from the Telegram brief.
+    if not plan.get("daily_research_fired") and now_hm >= plan["brief_hm"]:
+        try:
+            proc = subprocess.run(
+                [str(HUB / "bin" / "kb-daily-research"), "--date", today],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1200,
+                check=False,
+            )
+            log(f"kb-daily-research completed rc={proc.returncode}")
+            if proc.returncode == 0:
+                plan["daily_research_fired"] = True
+                save_plan(plan)
+            else:
+                log("daily_research_fired NOT set; will retry next tick")
+        except Exception as e:
+            log(f"kb-daily-research failed: {e!r}; will retry next tick")
 
     # Retro — same retry-on-failure semantics. Note: on most days
     # kb-orchestrator-cycle (20:45 cron) marks retro_fired=true before this

@@ -34,7 +34,7 @@ that infrastructure.
 
 Vepol is not a new foundation model and does not try to replace the
 agents you already use. It is a local operating layer for **ready-made
-CLI-capable AI agents**: Claude Code, Codex, Gemini CLI, or any future
+CLI-capable AI agents**: Claude Code, Codex, Antigravity CLI, or any future
 agent that can read files, run commands, and follow a written protocol.
 
 The agent supplies the reasoning and tool use. Vepol supplies the shared
@@ -42,9 +42,11 @@ filesystem, markdown knowledge base, scheduler, review gates, logs,
 incidents, backlog, and handoff rules that let those agents work as one
 long-running partner instead of isolated chat sessions.
 
-Agent-specific files such as `CLAUDE.md` and `GEMINI.md` are adapters:
-they point each CLI agent at the same shared operating contract and KB
-discipline instead of becoming separate rulebooks.
+Agent-specific files such as `CLAUDE.md` are adapters: they point each
+CLI agent at the same shared operating contract and KB discipline
+instead of becoming separate rulebooks. Antigravity CLI (`agy`) reads
+`AGENTS.md` natively via `agy --add-dir <path>` and needs no project
+adapter.
 
 This matters because you keep optionality. If one provider is rate-limited,
 too expensive, weak on a task, or unavailable, another configured agent can
@@ -57,6 +59,10 @@ any single model's private memory.
   tasks, deadlines, what got done yesterday — and writes a short brief.
   Not "what do you want to do?" — "this is what's worth doing today,
   given what I know about your work."
+- **Researches one useful topic every morning.** Vepol picks a topic from
+  your active project, creates a NotebookLM notebook, imports web research,
+  and generates a Russian audio recap: what it found, how it applies to the
+  project, what to ignore, and what to do next.
 - **Runs your routine in the background.** Tasks marked low-judgment
   (`auto: true`) — drafting follow-ups, refreshing research, updating the
   project registry — Vepol picks up and executes without prompting. By
@@ -87,7 +93,7 @@ any single model's private memory.
 
 ![Autonomy growth — Day 1 to Month 6](docs/visuals/vepol-autonomy-growth.png)
 
-## What's shipped in v0.1.0
+## What's shipped in v0.2.0
 
 The behaviour above is delivered through a small set of modules. Each
 ships a CLI, a markdown schema agents read natively, and at minimum
@@ -103,6 +109,15 @@ unit tests. The list grows release by release; see
   plan for tomorrow from your open backlog at the end of evening
   retro. You confirm overnight; the morning dispatch turns the
   approved plan into per-project work.
+- **Task board** — `kb-board` makes `knowledge/backlog.md` the
+  markdown-native task board for agents: Backlog, Ready, In Progress,
+  Blocked, Review, Done, and Cancelled, with ID-first claim/review/close
+  operations and no external database.
+- **Daily research** — `kb-daily-research` runs one topic per day
+  through NotebookLM web research and generates a Russian audio overview.
+  Topic is automatic by default; pin it with
+  `kb-daily-research --set-topic "..."`, or return to auto-selection with
+  `kb-daily-research --auto-topic`.
 - **Multi-bot agent runtime** — a Telegram-based supervisor that
   gives each project agent its own bot identity while starting
   compute only on demand. It routes mentions, queues work per
@@ -192,7 +207,7 @@ The full breakdown:
 
 You don't install Vepol by hand — your AI agent does. The tested
 happy path today is Claude Code, or Codex on a machine where the
-Claude CLI is available. Gemini CLI and other agents can participate
+Claude CLI is available. Antigravity CLI and other agents can participate
 as reviewers/workers once configured, because the handoff contract is
 file-based. Start by telling your agent:
 
@@ -215,10 +230,10 @@ cd ~/vepol
 ./install.sh
 ```
 
-The installer detects what you have (Claude Code, Node, Bun, optionally
-Codex and Gemini CLI), reports what's missing with exact install commands,
-and sets up the rest. It does **not** auto-install package managers — that
-decision stays with you.
+The installer detects what you have (Claude Code, Node, Bun, NotebookLM CLI,
+optionally Codex and Antigravity CLI), reports what's missing with exact
+install commands, and sets up the rest. It does **not** auto-install package
+managers — that decision stays with you.
 
 > **Heads up if you already have `~/knowledge/` or `~/.claude/`
 > from another system:** the installer will not overwrite your
@@ -238,6 +253,9 @@ kb-demo brief          # see what a synthesized brief looks like
 ```
 
 That's the value loop. Methodology comes after, when you want it.
+For the daily NotebookLM research loop, authenticate once with
+`notebooklm login && notebooklm status`. The default topic is automatic; use
+`kb-daily-research --set-topic "..."` only when you want to steer it.
 
 ## Status
 
@@ -292,13 +310,14 @@ the tool.
 
 | Tool | Required | Why |
 |---|---|---|
-| macOS 13+ | Yes (v0.1) | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.1 MCP/setup host and default orchestrator |
+| macOS 13+ | Yes (v0.2) | launchd, paths, brew defaults |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.2 MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
 | [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review / alternate orchestrator |
-| [Gemini CLI](https://google-gemini.github.io/gemini-cli/docs/get-started/) | Recommended | Third-opinion review / quorum |
+| [Antigravity CLI](https://google-gemini.github.io/antigravity-cli/docs/get-started/) | Recommended | Third-opinion review / quorum |
+| [NotebookLM CLI](https://github.com/teng-lin/notebooklm-py) | Recommended | Daily Russian research notebook/audio |
 | Telegram bot | Optional | Brief / retro channel |
 | [claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) | Optional | Auto-capture sessions |
 
@@ -345,7 +364,7 @@ We accept PRs. Before opening one, please:
    for non-trivial changes — write the spec before the code
 2. For architectural changes, ask for cross-agent review (we will run
    the spec through configured independent agents such as Claude Code,
-   Codex, and Gemini CLI)
+   Codex, and Antigravity CLI)
 3. Use the issue templates in `.github/ISSUE_TEMPLATE/`
 
 See `CONTRIBUTING.md` (when published) for the full process.
@@ -355,7 +374,7 @@ See `CONTRIBUTING.md` (when published) for the full process.
 - **Andrej Karpathy** for the [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) that gave us the initial pattern
 - **Genrich Altshuller** for TRIZ and the substance-field model that gives Vepol its name
 - **Sentry** for [FSL](https://fsl.software/) — a license model that's commercial-friendly without being permanently restrictive
-- **Anthropic, OpenAI, and Google** for Claude Code, Codex, and Gemini CLI — ready-made agents Vepol can coordinate
+- **Anthropic, OpenAI, and Google** for Claude Code, Codex, and Antigravity CLI — ready-made agents Vepol can coordinate
 
 ## Reach out
 

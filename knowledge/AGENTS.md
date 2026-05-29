@@ -14,11 +14,11 @@ Telegram user mention token (`at` sign + bot username, for example `user_<role>_
 2. **Wiki (knowledge)** — markdown, который LLM пишет и поддерживает.
    - **Локальная вика проекта**: `<project>/knowledge/` — физически живёт внутри проекта, рядом с кодом проекта.
    - **Глобальные категории хаба**: `~/knowledge/{concepts,people,companies,solutions}/` — то, что пересекает проекты.
-3. **Схема (Universal Agent Entrypoint, 2026-05-19)** — правила:
+3. **Схема (Universal Agent Entrypoint, 2026-05-19; Antigravity CLI rollout 2026-05-21)** — правила:
    - **Canonical, vendor-neutral**: `~/knowledge/AGENTS.md` (этот файл) — hub-level контракт; `<project>/AGENTS.md` — project overlay со специфичными правилами. Полная политика живёт здесь, не в runtime-файлах.
-   - **Adapter files (тонкие, ≤ 30 строк)**: `CLAUDE.md` (Claude Code), `GEMINI.md` (Gemini CLI), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, через `read: AGENTS.md`). Каждый — bootloader, который только указывает на канонический `AGENTS.md` и держит **только** runtime-specific caveats. Не отдельная политика.
+   - **Adapter files (тонкие, ≤ 30 строк)**: `CLAUDE.md` (Claude Code), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, через `read: AGENTS.md`). Каждый — bootloader, который только указывает на канонический `AGENTS.md` и держит **только** runtime-specific caveats. Не отдельная политика. **Antigravity CLI (`agy`)** читает project `AGENTS.md` нативно при запуске с `--add-dir <path>` (verified 2026-05-22 marker-test: agy v1.0.0 с `--add-dir` pre-loads и `AGENTS.md`, и `GEMINI.md` из указанной директории в системный промпт через cascadeManager; без `--add-dir` — workspace игнорируется, грузится только global `~/.gemini/GEMINI.md`). Для удобства — shell-функция `agy-here() { /Users/macbook/.local/bin/agy --add-dir "$PWD" "$@"; }` в `~/.zshrc`. Project `GEMINI.md` adapter избыточен (canonical AGENTS.md загружается так же), удалены 2026-05-21.
    - **Identity layer (отдельный артефакт)**: `<project>/knowledge/agents/agent-card.md` — карточка роли проекта. Не заменяет AGENTS.md, дополняет.
-   - **Полная спецификация** rollout'а — `vepol-dev/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Раскатано 2026-05-19, guard — `kb-doctor agent-entrypoint --strict`.
+   - **Полная спецификация** rollout'а — `vepol-dev/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Раскатано 2026-05-19. Migration Gemini CLI → Antigravity CLI (`agy`) — `vepol-dev/knowledge/decisions/antigravity-cli-migration-2026-05-21.md` (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18). Guard — `kb-doctor agent-entrypoint --strict`.
 
 ## Структура хаба
 
@@ -48,7 +48,7 @@ Telegram user mention token (`at` sign + bot username, for example `user_<role>_
 ```
 <project>/
 ├── AGENTS.md                # локальная схема (наследует ~/knowledge/AGENTS.md)
-├── GEMINI.md                # Gemini CLI adapter → AGENTS.md
+├── CLAUDE.md                # Claude Code adapter → AGENTS.md (≤30 строк)
 ├── knowledge/               # ВСЁ wiki-содержание — изолировано от кода
 │   ├── README.md            # 1–2 предложения: что это, в каком статусе
 │   ├── index.md             # каталог страниц
@@ -61,16 +61,32 @@ Telegram user mention token (`at` sign + bot username, for example `user_<role>_
 │   ├── raw/                 # immutable источники
 │   │   └── assets/          # картинки (Obsidian Web Clipper)
 │   ├── sources/             # саммари по каждому raw-документу
-│   ├── agents/              # одна карточка проекта: agent-card.md (общая для Claude Code / Codex / Gemini CLI / любого будущего runtime; identity привязана к роли проекта, не к вендору)
+│   ├── agents/              # одна карточка проекта: agent-card.md (общая для Claude Code / Codex / Antigravity CLI / любого будущего runtime; identity привязана к роли проекта, не к вендору)
 │   └── <категории>/         # специфичные для проекта: icp/, offers/, channels/, …
 └── <code-dirs>/             # site/, … — код проекта, лежит сиблингами к knowledge/
 ```
 
-**`backlog.md` / `escalations.md` / `incidents.md`** — обязательная триада координации. Мастер-описание формата и правил разграничения живёт в этом `AGENTS.md`; runtime-native файлы (`CLAUDE.md`, `GEMINI.md`) только адаптеры к нему.
+**`backlog.md` / `escalations.md` / `incidents.md`** — обязательная триада координации. Мастер-описание формата и правил разграничения живёт в этом `AGENTS.md`; runtime-native файлы (`CLAUDE.md` и др.) только адаптеры к нему.
+
+### Task board protocol
+
+`backlog.md` is the task board and the only task-state source of truth. It uses multiline `kb-board` task blocks under exact status sections:
+
+`Backlog` → `Ready` → `In Progress` → `Review` → `Done`, with side states `Blocked` and `Cancelled`.
+
+Rules:
+
+- Use `~/knowledge/bin/kb-board` for all task mutations. Do not manually edit task status/claim fields.
+- Legacy `kb-backlog` is read/legacy-only after migration and fail-fast exits for mutations on multiline boards.
+- Claiming a task moves `Ready` to `In Progress` and mints `claim_owner`, `claim_id`, `claim_expires_at`.
+- Long work must heartbeat about every 5 minutes: `kb-board heartbeat <backlog.md> --plan-item-id <id> --claim-id <claim_id> --actor <agent>`.
+- Finish through `Review`: `request-review` preserves claim provenance; `close` checks the same `claim_id`.
+- `Review` is the testing/verification state; do not create separate `Testing` or `Verification` sections.
+- Run `kb-board check <backlog.md>` before ending substantive board work.
 
 **`strategies.md`** — «куда двигаемся и почему» + проверяемые гипотезы о собственной работе агента. Обновляется самим проектом (не хабом): раз в неделю через skill `agent-review` (когда он появится), или при значимом pivot'е. Формат — в `_template/knowledge/strategies.md`. Конвенция лога для стратегии/гипотез/экспериментов: `## [YYYY-MM-DD] strategy | <project> | ...`, `## [YYYY-MM-DD] hypothesis | <project> | ...`, `## [YYYY-MM-DD] experiment | <project> | start|result | ...`.
 
-**`agents/`** — карточка роли проекта. Полная схема, имя файла, поведение при старте сессии, иерархия project→baseline→generic, multi-orchestrator edit protocol — в разделе [«Agent self-identification»](#agent-self-identification) ниже. Короткая версия: **один файл `agent-card.md` на проект**, идентичность привязана к роли (а не к runtime), runtime-различия (Claude Code / Codex / Gemini CLI) живут в секции `## Operating notes` внутри карточки.
+**`agents/`** — карточка роли проекта. Полная схема, имя файла, поведение при старте сессии, иерархия project→baseline→generic, multi-orchestrator edit protocol — в разделе [«Agent self-identification»](#agent-self-identification) ниже. Короткая версия: **один файл `agent-card.md` на проект**, идентичность привязана к роли (а не к runtime), runtime-различия (Claude Code / Codex / Antigravity CLI) живут в секции `## Operating notes` внутри карточки.
 
 **Ключевое правило**: всё, что LLM пишет или читает как «знание», живёт внутри `knowledge/`. Всё, что является рабочим кодом/контентом/артефактом — сиблинги к `knowledge/`.
 
@@ -83,7 +99,8 @@ Telegram user mention token (`at` sign + bot username, for example `user_<role>_
 ### Canonical vs adapter
 
 - **Canonical** = `AGENTS.md` (hub + project). Vendor-neutral, держит **всю** общую политику. Любая runtime читает это и подчиняется.
-- **Adapter** = runtime-native файл (`CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.clinerules/`, `.aider.conf.yml`, …). Тонкий bootloader: ссылается на канонический `AGENTS.md` и содержит **только** runtime-specific caveats. **Не** отдельная политика и **не** дубль AGENTS.md.
+- **Adapter** = runtime-native файл (`CLAUDE.md`, `.github/copilot-instructions.md`, `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.clinerules/`, `.aider.conf.yml`, …). Тонкий bootloader: ссылается на канонический `AGENTS.md` и содержит **только** runtime-specific caveats. **Не** отдельная политика и **не** дубль AGENTS.md.
+- **Antigravity CLI (`agy`)** — project-level adapter не нужен: canonical `AGENTS.md` загружается нативно через `agy --add-dir <path>` (verified 2026-05-22). Стандартный запуск — `agy-here` shell-function = `agy --add-dir "$PWD"`. Global `~/.gemini/GEMINI.md` остаётся как fallback для запусков без `--add-dir`.
 
 ### Adapter contract
 
@@ -95,7 +112,7 @@ Adapter валиден только если:
 - Не дублирует большие блоки политики из AGENTS.md.
 - **≤ 30 непустых строк.** Хард-кап, без escape-hatch.
 
-Required adapters прямо сейчас: `CLAUDE.md`, `GEMINI.md`. Опциональные (создаются только когда соответствующий runtime реально используется в проекте): Copilot / Cursor / Windsurf / Cline / Aider — список выше.
+Required adapters прямо сейчас: `CLAUDE.md`. Опциональные (создаются только когда соответствующий runtime реально используется в проекте): Copilot / Cursor / Windsurf / Cline / Aider — список выше. **Antigravity CLI (`agy`)** не требует project-level adapter — читает project `AGENTS.md` нативно через `agy --add-dir <path>` (canonical). Legacy `GEMINI.md` adapter удалён 2026-05-21 (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18; agy унаследовал GEMINI.md loader, но дублировать его при наличии AGENTS.md бессмысленно).
 
 ### Precedence (6 уровней)
 
@@ -105,8 +122,8 @@ Required adapters прямо сейчас: `CLAUDE.md`, `GEMINI.md`. Опцио�
 2. Nearest subdirectory `AGENTS.md`.
 3. Project root `AGENTS.md`.
 4. Hub `~/knowledge/AGENTS.md`.
-5. Runtime adapter caveats (`CLAUDE.md`, `GEMINI.md`, …).
-6. Personal/global vendor defaults (`~/.claude/CLAUDE.md`, `~/.config/codex/AGENTS.md`, etc.).
+5. Runtime adapter caveats (`CLAUDE.md`, …).
+6. Personal/global vendor defaults (`~/.claude/CLAUDE.md`, `~/.config/codex/AGENTS.md`, `~/.gemini/GEMINI.md` для Antigravity CLI, etc.).
 
 **KB wins**: durable KB-факты (`~/knowledge/`, `<project>/knowledge/`) **всегда** побеждают transient runtime memory. Если recall из памяти runtime конфликтует с тем, что написано в файлах — доверяем файлам и обновляем/удаляем устаревшую память.
 
@@ -144,10 +161,10 @@ Acceptance — ответ должен содержать все эти подс
 
 `kb-doctor agent-entrypoint --strict` — детерминированный лит-чек. Проверяет:
 
-- Adapter существует для enabled runtime в проекте.
+- Adapter существует для enabled runtime в проекте (сейчас — только `CLAUDE.md` required).
 - Adapter ≤ 30 строк.
 - Adapter ссылается на канонический `AGENTS.md`.
-- Нет bare `@`-токенов, которые Gemini может принять за file import.
+- Нет bare `@`-токенов в `~/.gemini/GEMINI.md` и любых файлах, которые читает Antigravity CLI — bare at-sign + identifier интерпретируется как file import.
 - Нет дубликатов политики между AGENTS.md и адаптером.
 
 Запускается локально и в `kb-doctor` cron-проходе. **Любой свежий P0/P1 — блокер на merge / запись в log.md `rollout completed`.**
@@ -159,14 +176,15 @@ Acceptance — ответ должен содержать все эти подс
 | Adapter drift | Runtime-файл растёт в отдельную политику | `kb-doctor agent-entrypoint`: adapter-line-cap + content-check |
 | Double-load | `CLAUDE.md` и `AGENTS.md` дублируют одни и те же длинные правила | Adapter contract: не дублировать; политика только в AGENTS.md |
 | Missing hub master | Project-файлы ссылаются на `~/knowledge/AGENTS.md`, а его нет | Hub-AGENTS.md создан 2026-05-19; doctor проверяет наличие |
-| Gemini at-sign import false positive | Bare at-sign + identifier в AGENTS.md интерпретируется как file import | doctor: regex на bare at-sign-токены вне code-fence; экранировать как `` `@`-mention `` |
+| Antigravity at-sign import false positive | Bare at-sign + identifier в `~/.gemini/GEMINI.md` или любом файле, читаемом `agy`, интерпретируется как file import (наследие от Gemini CLI) | doctor: regex на bare at-sign-токены вне code-fence; экранировать как `` `@`-mention `` |
+| Antigravity skips workspace context | `agy` запущен без `--add-dir` → workspace `AGENTS.md`/`GEMINI.md` игнорируется (verified 2026-05-22, `workspaceDirs=[]` в логе) | Всегда запускать через `agy-here` (alias на `agy --add-dir "$PWD"`); канонический hub доступен через `~/.gemini/GEMINI.md` import как fallback |
 | Seed/install drift | Live hub OK, но fresh installs ставят старую `CLAUDE.md`-centric схему | `~/knowledge/_template/`, `vepol-prep/_template/`, `install.sh`, `kb-seed-sync`, `kb-bootstrap-manifest` — все покрыты тестами |
 | Silent non-loading | Runtime поддерживает AGENTS.md только в некоторых режимах/версиях | clean-session probe при онбординге; incident при провале |
 | Precedence ambiguity | Nested файлы или global memory конфликтуют с project rules | Шесть уровней precedence выше; KB wins при конфликте с runtime memory |
 
 ## Параллельная оркестрация
 
-Хаб допускает **нескольких оркестраторов одновременно**: Claude Code, Codex, Gemini CLI и будущие CLI-агенты работают не как отдельные «умы», а как разные интерфейсы к **одной и той же** knowledge-системе.
+Хаб допускает **нескольких оркестраторов одновременно**: Claude Code, Codex, Antigravity CLI (`agy`) и будущие CLI-агенты работают не как отдельные «умы», а как разные интерфейсы к **одной и той же** knowledge-системе.
 
 Из этого следуют жёсткие правила:
 
@@ -175,6 +193,12 @@ Acceptance — ответ должен содержать все эти подс
 - Любой агент после значимой работы обязан оставить след в той же системе: `log.md` для событий и решений, `state.md` для изменившегося статуса, тематические страницы для нового знания, `incidents.md` для поломок и ручных обходов.
 - Если у конкретного инструмента нет автоматических хуков SessionStart/SessionEnd, агент компенсирует это вручную. Отсутствие автоматики не освобождает от дисциплины памяти.
 - Цель — **zero split-brain**: любой второй оркестратор должен уметь продолжить работу только по файлам, без доступа к прошлому чату.
+
+## Cross-Orchestrator CLI Launch Matrix
+
+Любой project agent на этой машине должен знать, что Vepol уже умеет запускать локальные CLI-инструменты: Claude Code, Codex, Antigravity CLI (`agy`), OpenCode, Grok и NotebookLM. Перед ответом «не могу запустить другого агента/инструмент» агент обязан открыть [`~/knowledge/solutions/cli-agent-runtime-launch.md`](solutions/cli-agent-runtime-launch.md), проверить локальный binary/smoke probe и выбрать подходящий launcher из матрицы.
+
+Короткое правило: Claude Code — MCP/skills/project execution; Codex — adversarial review/code diagnosis; Antigravity — Gemini-family independent pass with `--add-dir`; OpenCode/Grok — current/social/Grok-backed research; direct Grok — explicit Grok pass; NotebookLM — production recap/audio/artifacts after synthesis. Для delegated research prompt должен требовать durable write-back в `knowledge/sources/` или `knowledge/reports/`, а не возвращать знание только в чат.
 
 ## Agent self-identification
 
@@ -188,7 +212,7 @@ Acceptance — ответ должен содержать все эти подс
 <project>/knowledge/agents/agent-card.md   # фиксированное имя
 ```
 
-- **Одна карточка на проект, не одна на runtime.** Идентичность привязана к роли в проекте, исполнителей может быть несколько (Claude Code, Codex, Gemini CLI, любой будущий runtime).
+- **Одна карточка на проект, не одна на runtime.** Идентичность привязана к роли в проекте, исполнителей может быть несколько (Claude Code, Codex, Antigravity CLI, любой будущий runtime).
 - Runtime-различия, если важны, идут в `## Operating notes` внутри карточки. Никаких отдельных per-runtime файлов.
 - В `index.md` проекта появляется секция `## Agents` с одной ссылкой на `agents/agent-card.md`.
 - `AGENTS.md` проекта **не дублирует** карточку — даёт одно-два предложения и ссылается.
@@ -231,7 +255,7 @@ Acceptance — ответ должен содержать все эти подс
 Расширение `frontmatter.boundaries` — почему именно эти границы и что делать вместо.
 
 ## Operating notes
-Опциональная. Где живут state/log/incidents, проектные привычки, **runtime-specific notes** (что доступно Claude Code, что — Codex, что — Gemini CLI). Если нечего сказать — секция опускается.
+Опциональная. Где живут state/log/incidents, проектные привычки, **runtime-specific notes** (что доступно Claude Code, что — Codex, что — Antigravity CLI). Если нечего сказать — секция опускается.
 ```
 
 Контракт: заголовок секции — ровно `## <Name>`, без суффиксов («(детально)», «(опц.)»). Пометки про опциональность — в теле, не в заголовке. Lint-тест: `^## (Self-introduction|Specialization|Skills|Subagents|Boundaries)$`.
@@ -379,7 +403,7 @@ Acceptance — ответ должен содержать все эти подс
 ```
 
 Что делает:
-1. Создаёт в проекте `AGENTS.md`, `GEMINI.md` (из `_template/`) и `knowledge/` со всей структурой (`README.md`, `index.md`, `log.md`, `state.md`, `raw/assets/`, `sources/`).
+1. Создаёт в проекте `AGENTS.md`, `CLAUDE.md` (из `_template/`) и `knowledge/` со всей структурой (`README.md`, `index.md`, `log.md`, `state.md`, `raw/assets/`, `sources/`).
 2. Добавляет симлинк `~/knowledge/projects/<slug>` → `<project>/knowledge`.
 3. Вписывает строчку в лог хаба.
 4. Просит вручную обновить `registry.md` (описание, статус).
@@ -396,7 +420,7 @@ Vault открывается **на уровне `~/knowledge/`**. Благод�
 
 ## Auto-capture сессий (claude-memory-compiler)
 
-В проектах, где уже есть `<project>/knowledge/log.md`, Codex, Claude Code, Gemini CLI сессии **автоматически захватываются** через [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
+В проектах, где уже есть `<project>/knowledge/log.md`, Codex и Claude Code сессии **автоматически захватываются** через [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler). Antigravity CLI (`agy`) хука пока не имеет — после стабилизации экосистемы (curl-installed v1.0.0 from 2026-05-19) добавить аналогичный adapter:
 
 **SessionStart** — хук `~/knowledge/bin/kb-session-start` читает `README.md`, `state.md`, `index.md`, последние 80 строк `log.md` и последние `daily/YYYY-MM-DD.md`, отдаёт как `additionalContext` в новую сессию. Claude начинает работу, уже «помня» контекст проекта.
 
@@ -451,45 +475,19 @@ knowledge/
 - При росте >100 источников — подключить [qmd](https://github.com/tobi/qmd) (BM25+vector над markdown).
 - **Phase 2 для compiler:** подключить `compile.py` для генерации `concepts/`, `connections/`, `qa/` когда daily-captures накопятся и станет ясно, что конкретно хочется компилировать. Потребует кастомизации промпта чтобы не переписывать user's `index.md`.
 
-## Research via Grok (chrome-devtools-mcp)
+## Important research quorum
 
-При research-задачах, где **ценен first-party доступ к X (Twitter) и Reddit** — обсуждения, мнения комьюнити, sentiment, свежие реакции — открывай `https://grok.com/` через MCP-сервер `chrome-devtools`, подключённый к **живому пользовательскому Chrome**, где человек уже залогинен в Grok. Grok первоначально настроен на X+Reddit и читает их живьём; обычные web-tool'ы туда не дотягиваются.
+Для важных ресерчей используй quorum-pipeline: независимые pass-ы четырёх локальных оркестраторов — **Claude Code + Codex + Antigravity CLI (`agy`) + opencode** (grok-4.3 backend). opencode даёт native X/Reddit live feed через Grok — MCP chrome-devtools не требуется. Каноническая процедура: `~/knowledge/concepts/important-research-quorum-pipeline.md`.
 
-### Important research quorum
-
-Для важных ресерчей используй quorum-pipeline: независимые pass-ы Claude Code + Codex + Gemini CLI когда доступны, **обязательный Grok pass через Chrome DevTools**, затем KB-синтез и только после этого NotebookLM audio. Каноническая процедура: `~/knowledge/concepts/important-research-quorum-pipeline.md`.
-
-Каждый pass пишет durable note в `knowledge/sources/`; итоговый synthesis — в `knowledge/reports/`. NotebookLM — финальный production step для audio, не замена research quorum. Если Grok недоступен, important research blocked/degraded и требует явного waiver пользователя.
+Каждый pass пишет durable note в `knowledge/sources/<topic>-<agent>-<date>.md` (4 файла); итоговый synthesis — в `knowledge/reports/<topic>-<date>.md` с явными agreement/disagreement/confidence. NotebookLM — финальный production step для русского пересказа (структура: «Что нашли», «Что это меняет», «Как применить в Vepol», «Что не брать», «Следующие действия»). Если opencode недоступен, important research degraded — fallback на chrome-devtools-mcp как emergency.
 
 **Когда вызывать:**
-- «что обсуждают про X», «что говорят в комьюнити», «какие реакции на Y»
+- «что обсуждают про X», «что говорят в комьюнии», «какие реакции на Y»
 - любая research-задача с упоминанием X/Twitter/Reddit
 - когда нужна актуальность (последние дни/недели)
+- когда нужен независимый 4-й голос (opencode) для сложных решений
 
 **Когда НЕ вызывать:**
 - ответ есть в коде / документации / git history
 - технический вопрос без community-сентимент-компонента
 - быстрый факт, на который хватит обычного web search
-
-**Connection rule (исправлено 2026-05-19):**
-
-- Не использовать Codex in-app browser для Grok research.
-- Не позволять `chrome-devtools-mcp` запускать новый Chrome/default profile. Новый profile вроде `~/.cache/chrome-devtools-mcp/chrome-profile*` не содержит пользовательского Grok-login и может получить `x.ai` block page: "Sorry, you have been blocked".
-- Использовать уже живой пользовательский Chrome, где человек руками залогинен в `https://grok.com/`.
-- `chrome-devtools-mcp` должен подключаться к этому Chrome через `--autoConnect` (validated on this machine) или через `--browserUrl http://127.0.0.1:9222` когда `/json/version` реально отдаёт DevTools discovery JSON, а не создавать отдельный browser profile.
-- Целевая поверхность всегда `https://grok.com/`, не прямой `x.ai`.
-
-**Recipe (валидирован 2026-05-19 на Chrome 148):**
-
-Пользователь один раз включает remote debugging — `chrome://inspect/#remote-debugging` → галка «Allow remote debugging for this browser instance» → сервер слушает `127.0.0.1:9222`. После этого:
-
-1. Убедись, что MCP args содержат `--autoConnect` или working `--browserUrl http://127.0.0.1:9222`. Для Claude/Codex/Gemini предпочтительный config на этой машине: `npx -y chrome-devtools-mcp` с актуальной npm-версией, `--autoConnect` и `--experimentalPageIdRouting`.
-2. Smoke: `lsof -nP -iTCP:9222 -sTCP:LISTEN` должен показать `Google Chrome`, а MCP Inspector `tools/call list_pages` через `chrome-devtools-mcp` с `--autoConnect` должен увидеть `https://grok.com/`. Не полагайся только на `/json/version`: у текущего Chrome remote-debug endpoint он отдаёт `404`, из-за чего `--browserUrl` падает, хотя `--autoConnect` работает.
-3. `navigate_page` → `https://grok.com/` (идемпотентно).
-4. `take_snapshot` → найди composer в a11y tree. На grok.com он может быть `textbox "Ask Grok anything"` или `generic value="..."`; всегда работай по свежему snapshot.
-5. `fill` с найденным `uid` и текстом промпта.
-6. `take_snapshot` ещё раз → submit-кнопка появляется только когда React state видит текст.
-7. `click` по submit uid или `requestSubmit()` только если UI-кнопка не экспонируется.
-8. Подожди 15-60 сек (long thinking — 6s+ только Grok'овский CoT). `evaluate_script` → `document.querySelectorAll('[data-testid="assistant-message"]')` → последний `.textContent`. Стрипай CoT-prefix `/^Размышление на протяжении \d+\s*s/` (русск.) или `/^Thinking for \d+\s*s/` (англ.).
-
-**Архив:** старый локальный Chrome-extension prototype + MCP-bridge был superseded этим recipe — chrome-devtools-mcp решает ту же задачу через trusted Puppeteer events, отдельный bridge в pipeline не нужен. Prototype оставлен только как architectural reference + DOM-probe knowledge о grok.com selectors.

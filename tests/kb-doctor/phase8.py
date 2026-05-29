@@ -10,6 +10,8 @@ Verifies all 4 Phase 8 subcommands work on synthetic sandbox setups:
 from __future__ import annotations
 
 import datetime as dt
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
@@ -278,6 +280,208 @@ def f_seed_content_audit():
     shutil.rmtree(sb)
 
 
+def f_install_health_settings_bypass():
+    """Regression guard for C-01 settings bypass keys.
+
+    The live rollout was blocked by `skipDangerousModePermissionPrompt: true`
+    appearing in both live and template settings. Pin both unsafe keys in an
+    isolated synthetic home/seed pair so future install-health changes cannot
+    silently stop detecting them.
+    """
+    print("install-health settings bypass: unsafe keys → P0; safe keys → clean")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-settings-bypass-"))
+    home = sb / "home"
+    seed = sb / "seed"
+    live = home / ".claude" / "settings.json"
+    tmpl = seed / "claude" / "settings.json.template"
+    live.parent.mkdir(parents=True)
+    tmpl.parent.mkdir(parents=True)
+    live.write_text(
+        json.dumps({
+            "permissions": {"defaultMode": "bypassPermissions"},
+            "skipDangerousModePermissionPrompt": True,
+        }),
+        encoding="utf-8",
+    )
+    tmpl.write_text(
+        json.dumps({"skipDangerousModePermissionPrompt": True}),
+        encoding="utf-8",
+    )
+
+    findings = mod._ih_check_settings_bypass(home, seed)
+    ids = "\n".join(f.id for f in findings)
+    assert_("settings-bypass-legacy" in ids, "unsafe settings keys are detected")
+    assert_(sum(1 for f in findings if f.severity == "P0") >= 2, "unsafe settings are P0")
+
+    live.write_text(
+        json.dumps({
+            "permissions": {"defaultMode": "default"},
+            "skipDangerousModePermissionPrompt": False,
+        }),
+        encoding="utf-8",
+    )
+    tmpl.write_text(json.dumps({"skipDangerousModePermissionPrompt": False}), encoding="utf-8")
+    findings = mod._ih_check_settings_bypass(home, seed)
+    assert_(not findings, "safe settings produce no bypass findings")
+    shutil.rmtree(sb)
+
+
+def f_install_health_orchestrator_cycle_disabled_state():
+    """Regression guard for the scanner-v2 cliff.
+
+    The prod rollout intentionally disables `com.knowledge.orchestrator-cycle`
+    until scanner v2 is approved. `install-health` must not force us to restore
+    an unsafe scheduled LaunchAgent just to clear P0; it should recognize the
+    reviewed disabled-state evidence.
+    """
+    print("install-health orchestrator-cycle disabled state: reviewed disable → no P0")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_disabled", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_disabled", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-orch-disabled-"))
+    mod.HUB = sb
+    home = sb / "home"
+    active_plist = home / "Library" / "LaunchAgents" / "com.knowledge.orchestrator-cycle.plist"
+    disabled_dir = home / "Library" / "LaunchAgents.disabled"
+    disabled_dir.mkdir(parents=True)
+    (disabled_dir / "com.knowledge.orchestrator-cycle.plist.disabled-20260529-203540").write_text(
+        "<plist></plist>\n",
+        encoding="utf-8",
+    )
+    (sb / "log.md").write_text(
+        "## [2026-05-29] disabled | kb-orchestrator-cycle | verified launchd/cron disabled\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "files": {
+            "launchd-orchestrator-cycle": {
+                "category": "managed-templated",
+                "source_path": "launchd/com.knowledge.orchestrator-cycle.plist.template",
+                "install_path": str(active_plist),
+                "source_hash": "sha256:" + "0" * 64,
+                "installed_hash": "sha256:" + "1" * 64,
+            }
+        }
+    }
+
+    findings = mod._ih_check_entries(manifest, home=home)
+    findings.extend(mod._ih_check_launchagents(home, manifest))
+    ids = "\n".join(f.id for f in findings)
+    assert_("launchagent-disabled" in ids, "disabled state is reported as informational")
+    assert_(not any(f.severity == "P0" for f in findings), "reviewed disabled state has no P0")
+
+    manifest["files"]["launchd-orchestrator-cycle"]["installed_hash"] = None
+    findings = mod._ih_check_entries(manifest, home=home)
+    ids = "\n".join(f.id for f in findings)
+    assert_("launchagent-disabled" in ids, "disabled state also tolerates manifest refresh with null installed_hash")
+    assert_(not any(f.severity == "P0" for f in findings), "null installed_hash is not P0 for reviewed disabled LaunchAgent")
+    shutil.rmtree(sb)
+
+
+def f_install_health_optional_feature_opt_out():
+    """Fresh install with optional features declined should be health-clean."""
+    print("install-health optional opt-out: missing optional features → info, not P0/P1")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_optional", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_optional", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-optional-optout-"))
+    mod.HUB = sb / "knowledge"
+    mod.HUB.mkdir(parents=True)
+    (mod.HUB / ".orchestrator").mkdir()
+    (mod.HUB / ".orchestrator" / "launchagents.opted-out").write_text("declined\n", encoding="utf-8")
+    (mod.HUB / ".orchestrator" / "memory-compiler.opted-out").write_text("declined\n", encoding="utf-8")
+
+    home = sb / "home"
+    plist = home / "Library" / "LaunchAgents" / "com.knowledge.tick.plist"
+    manifest = {
+        "files": {
+            "launchd-tick": {
+                "category": "managed-templated",
+                "source_path": "launchd/com.knowledge.tick.plist.template",
+                "install_path": str(plist),
+                "source_hash": "sha256:" + "0" * 64,
+                "installed_hash": None,
+            }
+        }
+    }
+
+    findings = mod._ih_check_entries(manifest, home=home)
+    findings.extend(mod._ih_check_launchagents(home, manifest))
+    findings.extend(mod._ih_check_memory_compiler(home))
+    ids = "\n".join(f.id for f in findings)
+    id_list = [f.id for f in findings]
+    assert_("optional-opt-out" in ids, "optional opt-out is reported")
+    assert_(len(id_list) == len(set(id_list)), "optional opt-out findings are not duplicated")
+    assert_(not any(f.severity in {"P0", "P1"} for f in findings), "optional opt-out has no P0/P1")
+    shutil.rmtree(sb)
+
+
+def f_install_health_runtime_bypass_flags():
+    """Runtime launch flags must not reintroduce bypass mode."""
+    print("install-health runtime bypass flags: channel/launchd flag → P0")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_runtime_bypass", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_runtime_bypass", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-runtime-bypass-"))
+    home = sb / "home"
+    seed = sb / "seed"
+    mod.HUB = sb / "knowledge"
+    (seed / "bin").mkdir(parents=True)
+    (mod.HUB / "bin").mkdir(parents=True)
+    launch_agents = home / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True)
+    (seed / "bin" / "kb-channels-start").write_text(
+        "exec claude --channels x --dangerously-skip-permissions\n",
+        encoding="utf-8",
+    )
+    (mod.HUB / "bin" / "kb-channels-start").write_text(
+        "exec claude --channels x\n",
+        encoding="utf-8",
+    )
+    (launch_agents / "com.knowledge.channel-telegram.plist").write_text(
+        "<string>--dangerously-skip-permissions</string>\n",
+        encoding="utf-8",
+    )
+
+    findings = mod._ih_check_runtime_bypass_flags(home, seed)
+    ids = "\n".join(f.id for f in findings)
+    assert_("runtime-bypass-flag" in ids, "runtime bypass flag is detected")
+    assert_(sum(1 for f in findings if f.severity == "P0") >= 2, "runtime bypass flags are P0")
+
+    (seed / "bin" / "kb-channels-start").write_text("exec claude --channels x\n", encoding="utf-8")
+    (launch_agents / "com.knowledge.channel-telegram.plist").write_text("<plist></plist>\n", encoding="utf-8")
+    findings = mod._ih_check_runtime_bypass_flags(home, seed)
+    assert_(not findings, "safe runtime launch surfaces produce no bypass findings")
+    shutil.rmtree(sb)
+
+
 def main():
     f_decompose_staleness()
     f_report_quality()
@@ -285,6 +489,10 @@ def main():
     f_seed_docs_drift()
     f_channel_instances()
     f_seed_content_audit()
+    f_install_health_settings_bypass()
+    f_install_health_orchestrator_cycle_disabled_state()
+    f_install_health_optional_feature_opt_out()
+    f_install_health_runtime_bypass_flags()
     print("\nAll Phase 8 fixtures PASSED")
 
 

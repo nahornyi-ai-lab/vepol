@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""kb-daily-research — one daily topic research report via NotebookLM."""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+CONFIG_PATH = HUB / "personal" / "daily-research.yaml"
+REPORTS = HUB / "reports"
+ORCH = HUB / ".orchestrator"
+LOG = HUB / "logs" / "daily-research.log"
+
+MAX_ATTEMPTS_DEFAULT = 3
+
+
+DEFAULT_CONFIG = {
+    "enabled": "true",
+    "focus_project": "auto",
+    "mode": "auto",
+    "topic_override": "",
+    "language": "ru",
+    "research_mode": "deep",
+    "max_attempts": str(MAX_ATTEMPTS_DEFAULT),
+}
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def today_iso() -> str:
+    return dt.date.today().isoformat()
+
+
+def log(msg: str) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"[{now_iso()}] daily-research: {msg}\n")
+
+
+def atomic_write(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def rel(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(HUB))
+    except ValueError:
+        return str(path)
+
+
+def load_config() -> dict[str, str]:
+    if not CONFIG_PATH.is_file():
+        write_config(DEFAULT_CONFIG.copy())
+    cfg = DEFAULT_CONFIG.copy()
+    for raw in CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        if val in ('""', "''"):
+            val = ""
+        elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        if key:
+            cfg[key] = val
+    return cfg
+
+
+def write_config(cfg: dict[str, str]) -> None:
+    merged = DEFAULT_CONFIG.copy()
+    merged.update({k: str(v) for k, v in cfg.items()})
+    lines = [
+        "# Vepol daily research configuration.",
+        "# Change topic_override to pin a topic; clear it for auto-topic.",
+    ]
+    for key in ("enabled", "focus_project", "mode", "topic_override", "language", "research_mode", "max_attempts"):
+        val = merged.get(key, "")
+        if val == "":
+            lines.append(f'{key}: ""')
+        else:
+            lines.append(f"{key}: {val}")
+    atomic_write(CONFIG_PATH, "\n".join(lines) + "\n")
+
+
+def resolve_notebooklm_bin() -> str:
+    configured = os.environ.get("KB_NOTEBOOKLM_BIN", "").strip()
+    if configured:
+        return configured
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    user_bin = pathlib.Path.home() / ".local" / "bin" / "notebooklm"
+    if user_bin.exists():
+        return str(user_bin)
+    return "notebooklm"
+
+
+NOTEBOOKLM_BIN = resolve_notebooklm_bin()
+
+
+def packet_path(date_iso: str) -> pathlib.Path:
+    return REPORTS / f"daily-research-notebooklm-brief-{date_iso}.md"
+
+
+def audio_path(date_iso: str) -> pathlib.Path:
+    return REPORTS / f"daily-research-audio-{date_iso}.mp3"
+
+
+def manifest_path(date_iso: str) -> pathlib.Path:
+    return ORCH / f"daily-research-{date_iso}.json"
+
+
+def lock_path(date_iso: str) -> pathlib.Path:
+    return ORCH / f"daily-research-{date_iso}.lock"
+
+
+def short_topic(topic: str) -> str:
+    s = re.sub(r"[^A-Za-zА-Яа-я0-9 _.-]+", "", topic).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s[:70] or "Vepol research"
+
+
+def project_path(slug: str) -> pathlib.Path:
+    if slug == "hub":
+        return HUB
+    direct = HUB / "projects" / slug
+    return direct
+
+
+def resolve_focus_project(cfg: dict[str, str]) -> str:
+    configured = cfg.get("focus_project", "auto").strip()
+    if configured and configured.lower() not in {"auto", "default"}:
+        return configured
+
+    projects_dir = HUB / "projects"
+    if projects_dir.is_dir():
+        for child in sorted(projects_dir.iterdir(), key=lambda p: p.name):
+            if (child / "backlog.md").is_file() or (child / "state.md").is_file():
+                return child.name
+    return "hub"
+
+
+def read_text(path: pathlib.Path, limit: int = 5000) -> str:
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")[:limit]
+
+
+def choose_topic(cfg: dict[str, str]) -> tuple[str, str, str, str]:
+    slug = resolve_focus_project(cfg)
+    override = cfg.get("topic_override", "").strip()
+    if override:
+        return override, "override", "topic_override from personal/daily-research.yaml", slug
+
+    p = project_path(slug)
+    backlog = read_text(p / "backlog.md", limit=12000)
+    state = read_text(p / "state.md", limit=4000)
+    log_text = read_text(p / "log.md", limit=6000)
+
+    high_signal = re.compile(
+        r"(Spec:|Research:|PRIORITY|P0|Vepol|NotebookLM|agent|runtime|KB|safety|security|MCP)",
+        re.IGNORECASE,
+    )
+    for raw in backlog.splitlines():
+        line = raw.strip()
+        if not line.startswith("- [ ]"):
+            continue
+        if high_signal.search(line):
+            topic = re.sub(r"^- \[ \]\s*", "", line)
+            topic = re.split(r"\s+—\s+opened\b", topic, maxsplit=1)[0]
+            return topic.strip(), "backlog", f"selected high-signal open backlog item from {slug}", slug
+
+    for raw in state.splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and high_signal.search(line):
+            return f"How to advance this Vepol state: {line[:180]}", "state", f"selected state line from {slug}", slug
+
+    if log_text.strip():
+        return (
+            "What should Vepol research next to improve as a daily AI research companion",
+            "log-fallback",
+            f"no high-signal backlog item; recent log exists for {slug}",
+            slug,
+        )
+    return (
+        "How to improve Vepol as a local Markdown-first AI orchestrator and daily research companion",
+        "fallback",
+        f"no readable high-signal project material for {slug}",
+        slug,
+    )
+
+
+def load_manifest(path: pathlib.Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"status": "failed", "attempts": MAX_ATTEMPTS_DEFAULT, "error": f"manifest parse failed: {exc}"}
+
+
+def save_manifest(path: pathlib.Path, manifest: dict[str, Any]) -> None:
+    atomic_write(path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+def parse_json(stdout: str) -> Any:
+    text = stdout.strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def run_notebooklm(args: list[str], timeout: int = 300) -> Any:
+    proc = subprocess.run(
+        [NOTEBOOKLM_BIN, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"notebooklm {' '.join(args[:3])} rc={proc.returncode}: "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    if "--json" in args:
+        return parse_json(proc.stdout)
+    return proc.stdout
+
+
+def pick_id(data: Any, *keys: str) -> str:
+    if isinstance(data, dict):
+        for key in keys:
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                return val
+        for val in data.values():
+            found = pick_id(val, *keys)
+            if found:
+                return found
+    if isinstance(data, list):
+        for item in data:
+            found = pick_id(item, *keys)
+            if found:
+                return found
+    return ""
+
+
+def render_packet(date_iso: str, topic: str, selection_source: str, rationale: str, focus: str) -> str:
+    return f"""# Ежедневный research для Vepol — {date_iso}
+
+## Тема
+
+{topic}
+
+## Почему выбрана
+
+- focus_project: `{focus}`
+- selection_source: `{selection_source}`
+- rationale: {rationale}
+
+## Контекст Vepol
+
+Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, и daily product-learning loop.
+
+## Инструкция для NotebookLM
+
+Сделай русский аудиообзор как практический research recap для Vepol.
+
+Обязательная структура смысла:
+
+1. Что нашли: 3–5 главных выводов из web research.
+2. Как применить в Vepol: какие продуктовые, runtime, KB, UX или safety изменения стоит рассмотреть.
+3. Что не брать: что выглядит привлекательным, но сейчас не подходит.
+4. Следующие действия: 2–4 конкретных follow-up для backlog/spec/research.
+
+Не пересказывай источники по очереди. Синтезируй, но не выдумывай факты сверх найденных источников.
+"""
+
+
+def already_completed(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
+    return manifest.get("status") == "completed" and audio.is_file() and audio.stat().st_size > 0
+
+
+def acquire_lock(date_iso: str):
+    ORCH.mkdir(parents=True, exist_ok=True)
+    path = lock_path(date_iso)
+    fh = path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    fh.write(f"pid={os.getpid()} started_at={now_iso()}\n")
+    fh.flush()
+    return fh
+
+
+def run(date_iso: str, force: bool = False) -> int:
+    lock_fh = acquire_lock(date_iso)
+    if lock_fh is None:
+        log(f"{date_iso}: another daily research run is active; exiting")
+        return 0
+    try:
+        return _run_locked(date_iso, force=force)
+    finally:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+def _run_locked(date_iso: str, force: bool = False) -> int:
+    cfg = load_config()
+    if cfg.get("enabled", "true").lower() not in ("true", "1", "yes"):
+        log(f"{date_iso}: disabled by config")
+        return 0
+
+    max_attempts = int(cfg.get("max_attempts") or MAX_ATTEMPTS_DEFAULT)
+    packet = packet_path(date_iso)
+    audio = audio_path(date_iso)
+    mpath = manifest_path(date_iso)
+    manifest = load_manifest(mpath)
+
+    if not force and already_completed(manifest, audio):
+        log(f"{date_iso}: already completed; audio={audio}")
+        return 0
+    if not force and int(manifest.get("attempts") or 0) >= max_attempts and manifest.get("status") == "failed":
+        log(f"{date_iso}: retry cap reached; not calling NotebookLM")
+        return 0
+
+    topic, selection_source, rationale, focus_project = choose_topic(cfg)
+    manifest.update({
+        "date": date_iso,
+        "status": manifest.get("status") or "started",
+        "attempts": int(manifest.get("attempts") or 0) + 1,
+        "last_attempt_at": now_iso(),
+        "topic": topic,
+        "selection_source": selection_source,
+        "selection_rationale": rationale,
+        "focus_project": focus_project,
+        "research_mode": cfg.get("research_mode", "deep"),
+        "language": cfg.get("language", "ru"),
+        "packet_path": rel(packet),
+        "audio_path": rel(audio),
+        "error": None,
+    })
+    save_manifest(mpath, manifest)
+
+    try:
+        atomic_write(packet, render_packet(date_iso, topic, selection_source, rationale, focus_project))
+        manifest["status"] = "packet_written"
+        save_manifest(mpath, manifest)
+
+        title = f"Vepol daily research {date_iso} — {short_topic(topic)}"
+        created = run_notebooklm(["create", title, "--json"], timeout=120)
+        notebook_id = pick_id(created, "id", "notebook_id")
+        if not notebook_id:
+            raise RuntimeError(f"could not parse notebook id: {created!r}")
+        manifest["notebook_id"] = notebook_id
+        manifest["notebook_title"] = title
+        manifest["status"] = "notebook_created"
+        save_manifest(mpath, manifest)
+
+        src = run_notebooklm(["source", "add", str(packet), "-n", notebook_id, "--json"], timeout=180)
+        source_id = pick_id(src, "source_id", "id")
+        if source_id:
+            manifest["context_source_id"] = source_id
+            save_manifest(mpath, manifest)
+            run_notebooklm(["source", "wait", source_id, "-n", notebook_id, "--timeout", "180", "--json"], timeout=240)
+
+        query = (
+            f"{topic}. Focus on practical implications for local AI agents, "
+            "knowledge bases, RAG, evaluation, autonomy, safety, and product design."
+        )
+        run_notebooklm(
+            [
+                "source",
+                "add-research",
+                query,
+                "-n",
+                notebook_id,
+                "--from",
+                "web",
+                "--mode",
+                cfg.get("research_mode", "deep") or "deep",
+                "--import-all",
+            ],
+            timeout=900,
+        )
+        manifest["status"] = "research_imported"
+        save_manifest(mpath, manifest)
+
+        prompt = (
+            "Сделай короткий русский аудиообзор daily research для Vepol: "
+            "что нашли, как применить в Vepol, что не брать, следующие действия."
+        )
+        generated = run_notebooklm(
+            [
+                "generate",
+                "audio",
+                "-n",
+                notebook_id,
+                "--format",
+                "brief",
+                "--length",
+                "short",
+                "--language",
+                cfg.get("language", "ru") or "ru",
+                "--wait",
+                "--retry",
+                "2",
+                "--json",
+                prompt,
+            ],
+            timeout=720,
+        )
+        artifact_id = pick_id(generated, "artifact_id", "id", "task_id")
+        if artifact_id:
+            manifest["artifact_id"] = artifact_id
+        manifest["status"] = "audio_requested"
+        save_manifest(mpath, manifest)
+
+        run_notebooklm(["download", "audio", "-n", notebook_id, "--latest", "--force", str(audio)], timeout=180)
+        if not audio.is_file() or audio.stat().st_size == 0:
+            raise RuntimeError(f"audio download did not create {audio}")
+        manifest["status"] = "completed"
+        manifest["error"] = None
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: completed notebook={notebook_id} topic={topic!r}")
+        return 0
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["error"] = str(exc)
+        manifest["last_attempt_at"] = now_iso()
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: failed attempt {manifest.get('attempts')}: {exc}")
+        return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run one daily Vepol research topic through NotebookLM.")
+    parser.add_argument("--date", default=today_iso(), help="Date in YYYY-MM-DD.")
+    parser.add_argument("--force", action="store_true", help="Regenerate even if completed.")
+    parser.add_argument("--set-topic", help="Pin daily research topic until changed.")
+    parser.add_argument("--auto-topic", action="store_true", help="Clear topic override and return to auto-topic.")
+    args = parser.parse_args()
+
+    if args.set_topic is not None:
+        cfg = load_config()
+        cfg["topic_override"] = args.set_topic.strip()
+        cfg["mode"] = "override" if cfg["topic_override"] else "auto"
+        write_config(cfg)
+        return 0
+
+    if args.auto_topic:
+        cfg = load_config()
+        cfg["topic_override"] = ""
+        cfg["mode"] = "auto"
+        write_config(cfg)
+        return 0
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+        print(f"invalid --date: {args.date}", file=sys.stderr)
+        return 2
+    return run(args.date, force=args.force)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

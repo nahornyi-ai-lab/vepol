@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-HUB="${KNOWLEDGE_HUB:-$HOME/knowledge}"
+HUB="${KB_HUB:-${KNOWLEDGE_HUB:-$HOME/knowledge}}"
 
 if [[ $# -lt 1 ]]; then
   cat >&2 <<EOF
@@ -55,7 +55,7 @@ if [[ -n "$PROJECT_FILTER" ]]; then
   fi
 else
   # Хаб-уровневые файлы и папки
-  for f in CLAUDE.md registry.md index.md log.md; do
+  for f in AGENTS.md CLAUDE.md registry.md index.md log.md state.md backlog.md escalations.md incidents.md strategies.md; do
     [[ -f "$HUB/$f" ]] && ROOTS+=("$HUB/$f")
   done
   for d in concepts people companies solutions raw; do
@@ -77,11 +77,11 @@ fi
 
 # Выбор движка: ripgrep → grep
 if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then
-  exec rg --follow --type md --color=always --heading --line-number "$QUERY" "${ROOTS[@]}"
+  exec rg --follow --type md --color=always --with-filename --heading --line-number "$QUERY" "${ROOTS[@]}"
 else
   # macOS BSD grep: -R следует симлинкам, --include фильтрует расширение, -n номера строк
   # --color=always для цвета даже в pipe; || true чтобы не падать если нет совпадений
-  grep -R --include='*.md' --color=always -n "$QUERY" "${ROOTS[@]}" 2>/dev/null || {
+  grep -R --include='*.md' --color=always -H -n "$QUERY" "${ROOTS[@]}" 2>/dev/null || {
     ec=$?
     if [[ $ec -eq 1 ]]; then
       echo "нет совпадений по запросу: $QUERY" >&2

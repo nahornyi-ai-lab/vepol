@@ -464,7 +464,7 @@ Bot FAQ ещё не переписан под 10.0 (lag доки). Актуал�
 - **LaunchAgent**: `~/Library/LaunchAgents/com.knowledge.multibot-supervisor.plist`, KeepAlive=true, RunAtLoad=true, ThrottleInterval=30. Env: `TG_API_ID`, `TG_API_HASH`, `KB_HUB=~/knowledge`.
 - **ClaudeAdapter**: тонкий asyncio wrapper над **existing** `kb-spawn-project` (subprocess call с `--prompt-file <tmp>` + `--cwd <agent.workdir>` + `--timeout`). НЕ reimplement аргументной логики claude -p — переиспользуем `kb-spawn-project` как is.
 - **CodexAdapter**: subprocess wrapper над `codex exec` (нет existing tooling — пишем сами).
-- **Future adapters**: Gemini CLI / other CLI agents use the same conceptual slot, but are not a Phase 1 runtime adapter until registry + spawn tests support them.
+- **Future adapters**: Antigravity CLI / other CLI agents use the same conceptual slot, but are not a Phase 1 runtime adapter until registry + spawn tests support them.
 - **`kb-rebuild-agents`** реализуется как **subcommand** существующего `kb-rebuild-registry --agents` (одинаковый mechanism source → derived, разные output files). Не новый отдельный бинарь.
 
 ## 17. Open implementation questions

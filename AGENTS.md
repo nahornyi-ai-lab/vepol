@@ -39,6 +39,12 @@ provides the shared markdown knowledge base, scheduler, review
 gates, logs, incidents, backlog, and handoff discipline that keep
 those agents working as one durable partner.
 
+The task board is markdown-native. `knowledge/backlog.md` is the
+single source of truth and is mutated through `kb-board`, not
+through a database or legacy one-line writer. The universal statuses
+are `Backlog`, `Ready`, `In Progress`, `Blocked`, `Review`, `Done`,
+and `Cancelled`; `Review` is the verification state.
+
 The architecture (which you will install): user's `~/knowledge/`
 holds all knowledge as markdown files; this repo's `bin/` provides
 the CLI scripts that operate on it; `claude/CLAUDE.md` becomes
@@ -101,9 +107,21 @@ Run prerequisite detection. Required:
 Recommended (the system works without these but loses features):
 
 - Codex (macOS app or CLI binary `codex`) — for cross-agent review
-- Gemini CLI (binary `gemini`) — for third-opinion reviews / quorum
+- Antigravity CLI (binary `agy`) — for third-opinion reviews / quorum
+- NotebookLM CLI (binary `notebooklm`) — for daily Russian research notebooks/audio
 - `uv` — for the optional session capture integration
 - `jq` — for nicer output formatting
+
+Task-board commands after install:
+
+```bash
+~/knowledge/bin/kb-board check ~/knowledge/projects/<slug>/backlog.md
+~/knowledge/bin/kb-board append ~/knowledge/projects/<slug>/backlog.md "<title>" --status Ready --plan-item-id <id> --actor <agent>
+~/knowledge/bin/kb-board claim ~/knowledge/projects/<slug>/backlog.md --plan-item-id <id> --actor <agent>
+~/knowledge/bin/kb-board heartbeat ~/knowledge/projects/<slug>/backlog.md --plan-item-id <id> --claim-id <claim_id> --actor <agent>
+~/knowledge/bin/kb-board request-review ~/knowledge/projects/<slug>/backlog.md --plan-item-id <id> --claim-id <claim_id> --actor <agent>
+~/knowledge/bin/kb-board close ~/knowledge/projects/<slug>/backlog.md --plan-item-id <id> --claim-id <claim_id> --outcome closed --actor <agent>
+```
 
 If anything required is missing:
 
@@ -172,6 +190,10 @@ The installer reports what failed clearly. Common cases:
   boot or in nested user sessions. The plist is still created
   correctly; suggest manual `launchctl load <plist>` or running
   install.sh again later.
+- **NotebookLM CLI missing or unauthenticated.** Daily research audio
+  will not run until the user installs `notebooklm-py` and completes
+  Google OAuth: `pipx install notebooklm-py`, then
+  `notebooklm login && notebooklm status`.
 - **claude-memory-compiler clone fails.** This is optional —
   warn but don't block.
 
@@ -208,6 +230,9 @@ install complete. Common P1 issues at first run:
 - **claude-memory-compiler not installed.** Either install it (if
   the user wants auto-capture) or document the user's decision
   to skip.
+- **NotebookLM CLI missing or not authenticated.** Install/authenticate it
+  if the user wants daily research audio; otherwise document that the
+  NotebookLM loop is intentionally disabled.
 
 ### 1.7 Run the first-run aha sequence
 

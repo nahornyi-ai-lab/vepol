@@ -33,32 +33,33 @@ For each target item:
 
 1. Decide which of your direct children it lands in.
 2. If the target is for THIS project (not a descendant): close the
-   marker as `[x] decomposed: handled inline by {{SLUG}} on {{DATE}}`
-   and add a regular open task to your own backlog via:
+   marker through `request-review` + `close` and add a regular Ready
+   task to your own board via:
    ```
-   kb-backlog append {{SLUG}} "<task body>" --plan-item-id <uuid> --cycle-source-id <uuid>
+   kb-board append "$HOME/knowledge/projects/{{SLUG}}/backlog.md" "<task body>" --status Ready --plan-item-id <uuid> --field cycle_source_id=<uuid>
    ```
 3. If the target is for a direct child:
-   - **Leaf child**: `kb-backlog append <child-slug> "<task body>" --plan-item-id ... --cycle-source-id ...`
+   - **Leaf child**: `kb-board append "$HOME/knowledge/projects/<child-slug>/backlog.md" "<task body>" --status Ready --plan-item-id ... --field cycle_source_id=...`
      (carried-item handling — open/closed/parent-moved/duplicate — is the
      hub-side concern; you just append).
    - **Intermediate child** with multiple descendant targets: append ONE
      `decompose:` marker to that child's backlog, listing the relevant
      plan_item_ids; the cycle will spawn the child to expand.
-4. After all targets are dispatched, close YOUR marker line:
+4. After all targets are dispatched, close YOUR marker task:
    ```
-   kb-backlog close {{SLUG}} --line {{DECOMPOSE_LINENO}} --claim-id <token-from-claim> --outcome closed
+   kb-board request-review "$HOME/knowledge/projects/{{SLUG}}/backlog.md" --plan-item-id <marker-plan-item-id> --claim-id <token-from-claim>
+   kb-board close "$HOME/knowledge/projects/{{SLUG}}/backlog.md" --plan-item-id <marker-plan-item-id> --claim-id <token-from-claim> --outcome closed
    ```
-   (You'll need to claim it first: `kb-backlog claim {{SLUG}} --line {{DECOMPOSE_LINENO}}`)
+   (You'll need to claim it first: `kb-board claim "$HOME/knowledge/projects/{{SLUG}}/backlog.md" --plan-item-id <marker-plan-item-id>`)
 
 ## Rules
 
-- Use ONLY the `kb-backlog` CLI for backlog mutations. Never edit
-  backlog.md by hand.
-- Each `kb-backlog append` MUST include `--plan-item-id` and
-  `--cycle-source-id` so re-runs are idempotent.
+- Use ONLY the `kb-board` CLI for backlog mutations. Never edit
+  backlog.md task blocks by hand.
+- Each `kb-board append` MUST include `--plan-item-id` and
+  `--field cycle_source_id=<uuid>` so re-runs are idempotent.
 - If a plan_item_id already has an open row in the target backlog,
-  `kb-backlog append` will skip with `status: skipped`. That's expected
+  `kb-board append` will skip with `status: skipped`. That's expected
   — the hub-side carried-item logic handles updates separately.
 - Don't escalate unless you're truly blocked. Most "I don't know which
   child handles this" cases mean: pick the most plausible direct child,

@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 
 # Make `from _kb_backlog import ...` work when this script is invoked from any cwd.
@@ -79,6 +80,31 @@ def _add_view_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--done", action="store_true", help="Only done (recent 20)")
     p.add_argument("--project", help="Filter by project slug")
     p.add_argument("--hub-only", action="store_true", help="Only hub-level backlog")
+
+
+MULTILINE_BOARD_RE = re.compile(r"^##\s+(Backlog|Ready|In Progress|Blocked|Review|Cancelled)\s*$", re.MULTILINE)
+LEGACY_MUTATING_COMMANDS = {"append", "update", "stamp", "tombstone", "claim", "close", "revert"}
+
+
+def _fail_if_multiline_board(cmd: str, args: argparse.Namespace) -> None:
+    """Prevent the old one-line writer from mutating a migrated kb-board file."""
+    slugs: list[str] = []
+    if cmd in LEGACY_MUTATING_COMMANDS and hasattr(args, "slug"):
+        slugs.append(args.slug)
+    elif cmd == "xfer":
+        slugs.extend([args.src, args.dst])
+    if not slugs:
+        return
+    for slug in slugs:
+        path = ops.resolve_backlog_path(slug)
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if MULTILINE_BOARD_RE.search(text):
+            print(
+                "fail-fast: legacy kb-backlog writer disabled for multiline kb-board; "
+                "use kb-board for task mutations.",
+                file=sys.stderr,
+            )
+            raise SystemExit(64)
 
 
 def main() -> int:
@@ -201,6 +227,8 @@ def main() -> int:
 
     cmd = args.cmd
     try:
+        _fail_if_multiline_board(cmd, args)
+
         if cmd == "list":
             return view.run_view(args)
 

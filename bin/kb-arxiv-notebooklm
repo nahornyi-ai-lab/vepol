@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""kb-arxiv-notebooklm — turn the daily arXiv snapshot into a Russian NotebookLM report.
+
+Reads sources/arxiv-ai-research-snapshot-<DATE>.md, writes a Russian source
+packet under reports/, uploads it to a monthly NotebookLM notebook, generates
+audio for the daily source, downloads the mp3, and keeps a resumable manifest.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+SOURCES = HUB / "sources"
+REPORTS = HUB / "reports"
+ORCH = HUB / ".orchestrator"
+LOG = HUB / "logs" / "arxiv-notebooklm.log"
+
+MAX_ATTEMPTS = int(os.environ.get("KB_ARXIV_NOTEBOOKLM_MAX_ATTEMPTS", "3"))
+
+
+def resolve_notebooklm_bin() -> str:
+    configured = os.environ.get("KB_NOTEBOOKLM_BIN", "").strip()
+    if configured:
+        return configured
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    user_bin = pathlib.Path.home() / ".local" / "bin" / "notebooklm"
+    if user_bin.exists():
+        return str(user_bin)
+    return "notebooklm"
+
+
+NOTEBOOKLM_BIN = resolve_notebooklm_bin()
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def today_iso() -> str:
+    return dt.date.today().isoformat()
+
+
+def log(msg: str) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"[{now_iso()}] arxiv-notebooklm: {msg}\n")
+
+
+def rel(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(HUB))
+    except ValueError:
+        return str(path)
+
+
+def snapshot_path(date_iso: str) -> pathlib.Path:
+    return SOURCES / f"arxiv-ai-research-snapshot-{date_iso}.md"
+
+
+def packet_path(date_iso: str) -> pathlib.Path:
+    return REPORTS / f"arxiv-ai-research-notebooklm-brief-{date_iso}.md"
+
+
+def audio_path(date_iso: str) -> pathlib.Path:
+    return REPORTS / f"arxiv-ai-research-audio-{date_iso}.mp3"
+
+
+def manifest_path(date_iso: str) -> pathlib.Path:
+    return ORCH / f"arxiv-notebooklm-{date_iso}.json"
+
+
+def notebook_title(date_iso: str) -> str:
+    return f"Vepol daily AI research {date_iso[:7]}"
+
+
+def source_title(date_iso: str) -> str:
+    return f"arXiv AI daily Vepol recap {date_iso}"
+
+
+def atomic_write(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def load_manifest(path: pathlib.Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"status": "failed", "attempts": MAX_ATTEMPTS, "error": f"manifest parse failed: {exc}"}
+
+
+def save_manifest(path: pathlib.Path, manifest: dict[str, Any]) -> None:
+    atomic_write(path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+def total_kept(snapshot_text: str) -> int:
+    match = re.search(r"(?m)^total_kept:\s*(\d+)\s*$", snapshot_text)
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+def parse_json(stdout: str) -> Any:
+    text = stdout.strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def run_notebooklm(args: list[str], timeout: int = 180) -> Any:
+    proc = subprocess.run(
+        [NOTEBOOKLM_BIN, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"notebooklm {' '.join(args[:3])} rc={proc.returncode}: "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    if "--json" in args:
+        return parse_json(proc.stdout)
+    return proc.stdout
+
+
+def pick_id(data: Any, *keys: str) -> str:
+    if isinstance(data, dict):
+        for key in keys:
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                return val
+        for val in data.values():
+            found = pick_id(val, *keys)
+            if found:
+                return found
+    if isinstance(data, list):
+        for item in data:
+            found = pick_id(item, *keys)
+            if found:
+                return found
+    return ""
+
+
+def render_packet(date_iso: str, snapshot_text: str) -> str:
+    return f"""# Ежедневный AI research для Vepol — {date_iso}
+
+## Контекст
+
+Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, digital-clone workflows. Этот источник нужен для русского NotebookLM-пересказа ежедневного arXiv AI snapshot.
+
+## Инструкция для NotebookLM
+
+Сделай русский аудиообзор как практический research recap для Vepol, не как пересказ списка статей.
+
+Обязательная структура смысла:
+
+1. Что нашли: 3–5 главных сигналов дня.
+2. Как применить в Vepol: какие идеи могут улучшить KB, agent runtime, RAG, evaluation, autonomy, safety или UX.
+3. Что не брать: что выглядит модно, но не подходит Vepol сейчас.
+4. Следующие действия: 2–4 конкретных follow-up для backlog/spec/research.
+
+Не выдумывай результаты сверх abstract-ов. Если статья релевантна только косвенно, так и скажи.
+
+## Source snapshot
+
+{snapshot_text}
+"""
+
+
+def ensure_notebook(manifest: dict[str, Any]) -> str:
+    existing = manifest.get("notebook_id")
+    if isinstance(existing, str) and existing:
+        return existing
+
+    env_notebook = os.environ.get("KB_ARXIV_NOTEBOOK_ID", "").strip()
+    if env_notebook:
+        manifest["notebook_id"] = env_notebook
+        return env_notebook
+
+    title = manifest["notebook_title"]
+    data = run_notebooklm(["list", "--json"], timeout=60)
+    for nb in data.get("notebooks", []) if isinstance(data, dict) else []:
+        if nb.get("title") == title and nb.get("id"):
+            manifest["notebook_id"] = nb["id"]
+            return nb["id"]
+
+    created = run_notebooklm(["create", title, "--json"], timeout=120)
+    nbid = pick_id(created, "id", "notebook_id")
+    if not nbid:
+        raise RuntimeError(f"could not parse notebook id from create output: {created!r}")
+    manifest["notebook_id"] = nbid
+    return nbid
+
+
+def already_done(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
+    return manifest.get("status") == "completed" and audio.is_file() and audio.stat().st_size > 0
+
+
+def recover_downloaded_audio(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
+    return (
+        audio.is_file()
+        and audio.stat().st_size > 0
+        and bool(manifest.get("notebook_id"))
+        and bool(manifest.get("source_id"))
+    )
+
+
+def run(date_iso: str, force: bool = False) -> int:
+    snap = snapshot_path(date_iso)
+    packet = packet_path(date_iso)
+    audio = audio_path(date_iso)
+    mpath = manifest_path(date_iso)
+
+    manifest = load_manifest(mpath)
+    if not force and already_done(manifest, audio):
+        log(f"{date_iso}: already completed; audio={audio}")
+        return 0
+    if not force and recover_downloaded_audio(manifest, audio):
+        manifest["status"] = "completed"
+        manifest["error"] = None
+        manifest["last_attempt_at"] = now_iso()
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: recovered completed state from existing audio={audio}")
+        return 0
+    if not force and manifest.get("status") == "skipped_empty":
+        log(f"{date_iso}: already skipped_empty")
+        return 0
+    if not force and int(manifest.get("attempts") or 0) >= MAX_ATTEMPTS and manifest.get("status") == "failed":
+        log(f"{date_iso}: retry cap reached; not calling NotebookLM")
+        return 0
+    if not snap.is_file():
+        manifest.update({
+            "date": date_iso,
+            "status": "failed",
+            "attempts": int(manifest.get("attempts") or 0) + 1,
+            "last_attempt_at": now_iso(),
+            "notebook_title": notebook_title(date_iso),
+            "source_title": source_title(date_iso),
+            "packet_path": rel(packet),
+            "audio_path": rel(audio),
+            "error": f"snapshot missing: {snap}",
+        })
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: snapshot missing: {snap}")
+        return 2
+
+    snapshot_text = snap.read_text(encoding="utf-8")
+    base = {
+        "date": date_iso,
+        "status": manifest.get("status") or "started",
+        "attempts": int(manifest.get("attempts") or 0),
+        "last_attempt_at": now_iso(),
+        "notebook_title": notebook_title(date_iso),
+        "notebook_id": manifest.get("notebook_id"),
+        "source_title": source_title(date_iso),
+        "source_id": manifest.get("source_id"),
+        "artifact_id": manifest.get("artifact_id"),
+        "packet_path": rel(packet),
+        "audio_path": rel(audio),
+        "error": None,
+    }
+    manifest.update({k: v for k, v in base.items() if v is not None})
+
+    if total_kept(snapshot_text) == 0:
+        manifest["status"] = "skipped_empty"
+        manifest["last_attempt_at"] = now_iso()
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: snapshot empty; skipped NotebookLM")
+        return 0
+
+    manifest["attempts"] = int(manifest.get("attempts") or 0) + 1
+    manifest["last_attempt_at"] = now_iso()
+    save_manifest(mpath, manifest)
+
+    try:
+        atomic_write(packet, render_packet(date_iso, snapshot_text))
+        manifest["status"] = "packet_written"
+        save_manifest(mpath, manifest)
+
+        nbid = ensure_notebook(manifest)
+        manifest["status"] = "notebook_ready"
+        save_manifest(mpath, manifest)
+
+        if not manifest.get("source_id"):
+            added = run_notebooklm(
+                [
+                    "source",
+                    "add",
+                    str(packet),
+                    "-n",
+                    nbid,
+                    "--title",
+                    manifest["source_title"],
+                    "--json",
+                ],
+                timeout=180,
+            )
+            source_id = pick_id(added, "source_id", "id")
+            if not source_id:
+                raise RuntimeError(f"could not parse source id from add output: {added!r}")
+            manifest["source_id"] = source_id
+            manifest["status"] = "source_uploaded"
+            save_manifest(mpath, manifest)
+
+        run_notebooklm(
+            ["source", "wait", manifest["source_id"], "-n", nbid, "--timeout", "180", "--json"],
+            timeout=240,
+        )
+        manifest["status"] = "source_ready"
+        save_manifest(mpath, manifest)
+
+        prompt = (
+            "Сделай короткий русский аудиообзор ежедневного AI research для Vepol: "
+            "что нашли, как применить в Vepol, что не брать, следующие действия."
+        )
+        generated = run_notebooklm(
+            [
+                "generate",
+                "audio",
+                "-n",
+                nbid,
+                "-s",
+                manifest["source_id"],
+                "--format",
+                "brief",
+                "--length",
+                "short",
+                "--language",
+                "ru",
+                "--wait",
+                "--retry",
+                "2",
+                "--json",
+                prompt,
+            ],
+            timeout=720,
+        )
+        artifact_id = pick_id(generated, "artifact_id", "id", "task_id")
+        if artifact_id:
+            manifest["artifact_id"] = artifact_id
+        manifest["status"] = "audio_requested"
+        save_manifest(mpath, manifest)
+
+        download_args = ["download", "audio", "-n", nbid, "--latest", "--force", str(audio)]
+        run_notebooklm(download_args, timeout=180)
+        if not audio.is_file() or audio.stat().st_size == 0:
+            raise RuntimeError(f"audio download did not create {audio}")
+        manifest["status"] = "completed"
+        manifest["error"] = None
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: completed notebook={nbid} source={manifest.get('source_id')} audio={audio}")
+        return 0
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["error"] = str(exc)
+        manifest["last_attempt_at"] = now_iso()
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: failed attempt {manifest.get('attempts')}: {exc}")
+        return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate daily arXiv NotebookLM report.")
+    parser.add_argument("--date", default=today_iso(), help="Date in YYYY-MM-DD (default: today).")
+    parser.add_argument("--force", action="store_true", help="Regenerate even if manifest/audio already exists.")
+    args = parser.parse_args()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+        print(f"invalid --date: {args.date}", file=sys.stderr)
+        return 2
+    return run(args.date, force=args.force)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

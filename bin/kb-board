@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""kb-board — structural CLI for the multiline single-source board."""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from _kb_board import check as check_mod, fmt as fmt_mod  # noqa: E402
+
+
+def _jsonable(value):
+    if dataclasses.is_dataclass(value):
+        return dataclasses.asdict(value)
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    return value
+
+
+def _emit(value, json_out: bool) -> None:
+    if json_out:
+        print(json.dumps(_jsonable(value), ensure_ascii=False, indent=2))
+    else:
+        if hasattr(value, "ok"):
+            print("ok" if value.ok else "failed")
+            for err in value.errors:
+                print(f"{err.code}: {err.message}")
+        else:
+            print(value)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="kb-board")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_check = sub.add_parser("check", help="Validate a board file")
+    p_check.add_argument("path")
+    p_check.add_argument("--json", action="store_true", dest="json_out")
+
+    p_fmt = sub.add_parser("fmt", help="Format a board file")
+    p_fmt.add_argument("path")
+    p_fmt.add_argument("--check", action="store_true", dest="check_only")
+    p_fmt.add_argument("--write", action="store_true")
+    p_fmt.add_argument("--json", action="store_true", dest="json_out")
+
+    p_migrate = sub.add_parser("migrate", help="Migrate a legacy one-line board")
+    p_migrate.add_argument("path")
+    p_migrate.add_argument("--owner", default="unassigned")
+    p_migrate.add_argument("--now")
+    p_migrate.add_argument("--write", action="store_true")
+    p_migrate.add_argument("--json", action="store_true", dest="json_out")
+
+    p_hash = sub.add_parser("hash", help="Print a task content hash")
+    p_hash.add_argument("path")
+    p_hash.add_argument("--plan-item-id", required=True)
+    p_hash.add_argument("--json", action="store_true", dest="json_out")
+
+    p_list = sub.add_parser("list", help="List tasks from a board file")
+    p_list.add_argument("path")
+    p_list.add_argument("--all", action="store_true")
+    p_list.add_argument("--status")
+    p_list.add_argument("--json", action="store_true", dest="json_out")
+
+    p_append = sub.add_parser("append", help="Append a task to Backlog or Ready")
+    p_append.add_argument("path")
+    p_append.add_argument("title")
+    p_append.add_argument("--plan-item-id", required=True)
+    p_append.add_argument("--priority", default="P2")
+    p_append.add_argument("--owner", default="unassigned")
+    p_append.add_argument("--status", default="Backlog", choices=["Backlog", "Ready"])
+    p_append.add_argument("--actor", default="self")
+    p_append.add_argument("--acceptance", default="Task is complete when its requested outcome is delivered.")
+    p_append.add_argument("--body", default="")
+    p_append.add_argument("--field", action="append", default=[], help="Extra metadata key=value (repeatable)")
+    p_append.add_argument("--now")
+    p_append.add_argument("--json", action="store_true", dest="json_out")
+
+    p_claim = sub.add_parser("claim", help="Move Ready task to In Progress")
+    p_claim.add_argument("path")
+    p_claim.add_argument("--plan-item-id", required=True)
+    p_claim.add_argument("--actor", default="executor")
+    p_claim.add_argument("--now")
+    p_claim.add_argument("--json", action="store_true", dest="json_out")
+
+    p_ready = sub.add_parser("ready", help="Move Backlog or Blocked task to Ready")
+    p_ready.add_argument("path")
+    p_ready.add_argument("--plan-item-id", required=True)
+    p_ready.add_argument("--actor", default="executor")
+    p_ready.add_argument("--reason")
+    p_ready.add_argument("--now")
+    p_ready.add_argument("--json", action="store_true", dest="json_out")
+
+    p_heartbeat = sub.add_parser("heartbeat", help="Extend an In Progress claim lease")
+    p_heartbeat.add_argument("path")
+    p_heartbeat.add_argument("--plan-item-id", required=True)
+    p_heartbeat.add_argument("--claim-id", required=True)
+    p_heartbeat.add_argument("--actor", default="executor")
+    p_heartbeat.add_argument("--now")
+    p_heartbeat.add_argument("--json", action="store_true", dest="json_out")
+
+    p_progress = sub.add_parser("progress", help="Update task metadata/content fields")
+    p_progress.add_argument("path")
+    p_progress.add_argument("--plan-item-id", required=True)
+    p_progress.add_argument("--actor", default="executor")
+    p_progress.add_argument("--field", action="append", default=[], help="Metadata key=value update (repeatable)")
+    p_progress.add_argument("--now")
+    p_progress.add_argument("--json", action="store_true", dest="json_out")
+
+    p_sweep = sub.add_parser("sweep", help="Move expired In Progress claims back to Ready")
+    p_sweep.add_argument("path")
+    p_sweep.add_argument("--actor", default="sweeper")
+    p_sweep.add_argument("--now")
+    p_sweep.add_argument("--json", action="store_true", dest="json_out")
+
+    p_review = sub.add_parser("request-review", help="Move In Progress task to Review")
+    p_review.add_argument("path")
+    p_review.add_argument("--plan-item-id", required=True)
+    p_review.add_argument("--claim-id", required=True)
+    p_review.add_argument("--actor", default="executor")
+    p_review.add_argument("--now")
+    p_review.add_argument("--json", action="store_true", dest="json_out")
+
+    p_close = sub.add_parser("close", help="Move Review task to Done")
+    p_close.add_argument("path")
+    p_close.add_argument("--plan-item-id", required=True)
+    p_close.add_argument("--claim-id", required=True)
+    p_close.add_argument("--actor", default="executor")
+    p_close.add_argument("--outcome", default="closed")
+    p_close.add_argument("--now")
+    p_close.add_argument("--json", action="store_true", dest="json_out")
+
+    args = parser.parse_args()
+    path = pathlib.Path(args.path)
+    text = path.read_text(encoding="utf-8")
+
+    if args.cmd == "check":
+        result = check_mod.check_board_text(text)
+        _emit(result, args.json_out)
+        return 0 if result.ok else 1
+
+    if args.cmd == "fmt":
+        formatted = fmt_mod.format_board_text(text)
+        changed = formatted != text
+        if args.check_only:
+            payload = {"ok": not changed, "changed": changed}
+            _emit(payload, args.json_out)
+            return 1 if changed else 0
+        if args.write:
+            path.write_text(formatted, encoding="utf-8")
+            payload = {"ok": True, "changed": changed}
+            _emit(payload, args.json_out)
+            return 0
+        print(formatted, end="")
+        return 0
+
+    if args.cmd == "migrate":
+        from _kb_board import migrate as migrate_mod
+        migrated = migrate_mod.migrate_text(text, owner=args.owner, now=args.now)
+        if args.write:
+            path.write_text(migrated, encoding="utf-8")
+            _emit({"ok": True, "written": str(path)}, args.json_out)
+        else:
+            print(migrated, end="")
+        return 0
+
+    if args.cmd in {"hash", "list", "append", "claim", "ready", "heartbeat", "progress", "sweep", "request-review", "close"}:
+        from _kb_board.hashing import content_hash
+        from _kb_board.model import TaskBlock
+        from _kb_board.mutation import _parse_now, _write_atomic, mutate_file
+        from _kb_board.parsing import parse_board
+
+        def find_task(board, plan_item_id):
+            for task in board.tasks:
+                if task.fields.get("plan_item_id") == plan_item_id:
+                    return task
+            raise SystemExit(f"plan_item_id not found: {plan_item_id}")
+
+        board = parse_board(text)
+
+        if args.cmd == "hash":
+            task = find_task(board, args.plan_item_id)
+            payload = {"plan_item_id": args.plan_item_id, "content_hash": content_hash(task)}
+            _emit(payload, args.json_out)
+            return 0
+
+        if args.cmd == "list":
+            rows = []
+            for task in board.tasks:
+                if args.status and task.status != args.status:
+                    continue
+                if not args.all and task.status in {"Done", "Cancelled"}:
+                    continue
+                rows.append({
+                    "status": task.status,
+                    "marker": task.marker,
+                    "plan_item_id": task.fields.get("plan_item_id"),
+                    "title": task.title,
+                    "claim_owner": task.fields.get("claim_owner"),
+                    "claim_id": task.fields.get("claim_id"),
+                })
+            _emit(rows, args.json_out)
+            if not args.json_out:
+                for row in rows:
+                    print(f"{row['status']}: {row['plan_item_id']} — {row['title']}")
+            return 0
+
+        if args.cmd == "append":
+            from _kb_board.locks import acquire_file_lock
+            lock_path = path.with_name(path.name + ".lock")
+            with acquire_file_lock(lock_path, timeout_s=30.0):
+                locked_text = path.read_text(encoding="utf-8") if path.exists() else ""
+                board = parse_board(locked_text)
+                now = _parse_now(args.now)
+                created = now.date().isoformat()
+                extra_fields = {}
+                for item in args.field:
+                    if "=" not in item:
+                        raise SystemExit(f"--field expects key=value, got {item!r}")
+                    key, value = item.split("=", 1)
+                    extra_fields[key.strip()] = value.strip()
+                cycle_source_id = extra_fields.get("cycle_source_id")
+                for existing in board.tasks:
+                    if existing.fields.get("plan_item_id") == args.plan_item_id:
+                        _emit({"ok": True, "status": "skipped", "reason": "plan_item_id exists", "plan_item_id": args.plan_item_id}, args.json_out)
+                        return 5
+                    if cycle_source_id and existing.fields.get("cycle_source_id") == cycle_source_id and existing.status not in {"Done", "Cancelled"}:
+                        _emit({"ok": True, "status": "skipped", "reason": "cycle_source_id exists", "cycle_source_id": cycle_source_id}, args.json_out)
+                        return 5
+                fields = {
+                    "plan_item_id": args.plan_item_id,
+                    "priority": args.priority,
+                    "owner": args.owner,
+                    "created": created,
+                    "updated": created,
+                    "acceptance": args.acceptance,
+                    "body": args.body or f"Opened by {args.actor}.",
+                }
+                fields.update(extra_fields)
+                board.sections.setdefault(args.status, []).append(
+                    TaskBlock(title=args.title, status=args.status, marker="[ ]", fields=fields)
+                )
+                candidate = fmt_mod.format_board(board)
+                result = check_mod.check_board_text(candidate)
+                if not result.ok:
+                    _emit(result, args.json_out)
+                    return 1
+                _write_atomic(path, candidate)
+            _emit({"ok": True, "status": "appended", "plan_item_id": args.plan_item_id}, args.json_out)
+            return 0
+
+        if args.cmd == "claim":
+            task = find_task(board, args.plan_item_id)
+            result = mutate_file(
+                path=path,
+                op="claim",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                expected_content_hash=content_hash(task),
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd == "ready":
+            task = find_task(board, args.plan_item_id)
+            result = mutate_file(
+                path=path,
+                op="ready",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                expected_content_hash=content_hash(task),
+                reason=args.reason,
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd == "heartbeat":
+            result = mutate_file(
+                path=path,
+                op="heartbeat",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                claim_id=args.claim_id,
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd == "progress":
+            if not args.field:
+                raise SystemExit("progress requires at least one --field key=value")
+            updates = {}
+            for item in args.field:
+                if "=" not in item:
+                    raise SystemExit(f"--field expects key=value, got {item!r}")
+                key, value = item.split("=", 1)
+                updates[key.strip()] = value.strip()
+            task = find_task(board, args.plan_item_id)
+            result = mutate_file(
+                path=path,
+                op="progress",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                expected_content_hash=content_hash(task),
+                updates=updates,
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd == "sweep":
+            from _kb_board.lease import sweep_expired_file
+            changed = sweep_expired_file(path=path, actor=args.actor, now=args.now)
+            _emit({"ok": True, "status": "swept", "changed": changed}, args.json_out)
+            return 0
+
+        if args.cmd == "request-review":
+            task = find_task(board, args.plan_item_id)
+            result = mutate_file(
+                path=path,
+                op="request-review",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                claim_id=args.claim_id,
+                expected_content_hash=content_hash(task),
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd == "close":
+            task = find_task(board, args.plan_item_id)
+            result = mutate_file(
+                path=path,
+                op="close",
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                claim_id=args.claim_id,
+                expected_content_hash=content_hash(task),
+                outcome=args.outcome,
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
