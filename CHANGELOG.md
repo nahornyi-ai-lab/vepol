@@ -16,6 +16,16 @@ upgrading.
 
 No changes yet.
 
+## [0.2.1] — 2026-05-29
+
+Patch release after the public `v0.2.0` smoke.
+
+### Fixed
+- Removed the mandatory `jsonschema` runtime import from the Evolution Loop
+  proposal validator. The validator now uses a small stdlib checker, so
+  `./tests/run-all.sh` passes from a fresh public clone without first running
+  `pip install -r requirements.txt`.
+
 ## [0.2.0] — 2026-05-29
 
 Second public release candidate. This release moves Vepol's task workflow to
@@ -202,10 +212,11 @@ commercial use, professional services to clients, modifications, and
 non-competing forks. Restricted for competing products or services
 made available to others (hosted SaaS substituting for Vepol, branded
 resale). Each release auto-converts to MIT on its second anniversary:
-v0.1.0 converts on **2028-05-02** and v0.2.0 converts on
+v0.1.0 converts on **2028-05-02** and v0.2.x converts on
 **2028-05-29**. See `LICENSE` and `COMMERCIAL.md` for the authoritative
 wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nahornyi-ai-lab/vepol/releases/tag/v0.1.0

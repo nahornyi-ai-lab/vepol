@@ -93,7 +93,7 @@ any single model's private memory.
 
 ![Autonomy growth — Day 1 to Month 6](docs/visuals/vepol-autonomy-growth.png)
 
-## What's shipped in v0.2.0
+## What's shipped in v0.2.1
 
 The behaviour above is delivered through a small set of modules. Each
 ships a CLI, a markdown schema agents read natively, and at minimum
@@ -310,8 +310,8 @@ the tool.
 
 | Tool | Required | Why |
 |---|---|---|
-| macOS 13+ | Yes (v0.2) | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.2 MCP/setup host and default orchestrator |
+| macOS 13+ | Yes (v0.2.1) | launchd, paths, brew defaults |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.2.1 MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
