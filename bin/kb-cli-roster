@@ -18,14 +18,15 @@
 # Usage:
 #   kb-cli-roster [--out <file>] [--ensure] [--ttl <sec>] [--registry <file>] [--print]
 #     --out <file>      Where to write the cheatsheet. Default: print to stdout.
-#     --ensure          No-op if <out> exists, is newer than the registry, and is
-#                       younger than TTL. Otherwise (re)generate. Cheap fast path
-#                       for the SessionStart hook (20s budget).
-#     --ttl <sec>       Max age before --ensure regenerates anyway. Default 86400.
+#     --ensure          Always re-detect (cheap: a few command -v/test -x checks),
+#                       but only rewrite <out> if the content actually changed.
+#                       This keeps the roster fresh the instant a CLI is installed
+#                       or removed — there is NO time-based cache, so installed
+#                       state can never go stale — while avoiding pointless rewrites.
 #     --registry <f>    Registry path. Default ~/knowledge/.orchestrator/cli-tools.tsv.
 #     --print           Also echo the cheatsheet to stdout (even with --out).
 #
-# Exit: 0 on success (or ensure-skip). Non-zero only on bad args / unreadable registry.
+# Exit: 0 on success. Non-zero only on bad args / unreadable registry.
 set -euo pipefail
 
 HUB="${KB_HUB:-$HOME/knowledge}"
@@ -33,14 +34,13 @@ REGISTRY="$HUB/.orchestrator/cli-tools.tsv"
 MATRIX="$HUB/solutions/cli-agent-runtime-launch.md"
 OUT=""
 ENSURE=0
-TTL=86400
 PRINT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
     --ensure) ENSURE=1; shift ;;
-    --ttl) TTL="$2"; shift 2 ;;
+    --ttl) shift 2 ;;   # accepted for backward compat; ignored (no time-based cache)
     --registry) REGISTRY="$2"; shift 2 ;;
     --print) PRINT=1; shift ;;
     -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -53,17 +53,9 @@ if [[ ! -f "$REGISTRY" ]]; then
   exit 3
 fi
 
-# --ensure fast path: skip if fresh enough.
-if [[ $ENSURE -eq 1 && -n "$OUT" && -f "$OUT" ]]; then
-  if [[ "$OUT" -nt "$REGISTRY" ]]; then
-    now=$(date +%s)
-    mtime=$(stat -f %m "$OUT" 2>/dev/null || stat -c %Y "$OUT" 2>/dev/null || echo 0)
-    if (( now - mtime < TTL )); then
-      [[ $PRINT -eq 1 ]] && cat "$OUT"
-      exit 0
-    fi
-  fi
-fi
+# No time-based cache: detection always runs below (it is cheap), so the roster
+# can never show stale installed/not-installed state. --ensure only governs
+# whether an unchanged file is rewritten (see the write section).
 
 # Detect one candidate: path-like (contains /) -> executable test; bare name -> PATH lookup.
 is_installed() {
@@ -144,10 +136,17 @@ build() {
 content="$(build)"
 
 if [[ -n "$OUT" ]]; then
-  mkdir -p "$(dirname "$OUT")"
-  tmp="$(mktemp "${OUT}.XXXXXX")"
-  printf '%s\n' "$content" > "$tmp"
-  mv -f "$tmp" "$OUT"
+  # --ensure: skip the write only when the freshly-detected content is identical
+  # to what's already on disk (avoids needless rewrites/mtime churn). Detection
+  # already ran, so this never serves stale state.
+  if [[ $ENSURE -eq 1 && -f "$OUT" && "$(cat "$OUT")" == "$content" ]]; then
+    :
+  else
+    mkdir -p "$(dirname "$OUT")"
+    tmp="$(mktemp "${OUT}.XXXXXX")"
+    printf '%s\n' "$content" > "$tmp"
+    mv -f "$tmp" "$OUT"
+  fi
   [[ $PRINT -eq 1 ]] && printf '%s\n' "$content"
 else
   printf '%s\n' "$content"
