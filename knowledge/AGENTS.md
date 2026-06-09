@@ -301,7 +301,7 @@ Acceptance — ответ должен содержать все эти подс
 
 ## Development Loop
 
-Единый процесс для **любого** агента (Claude Code / Codex / Antigravity / любой будущий) при новой разработке. Канон — [`vepol-prep/docs/methodology/development-loop.md`](https://github.com/nahornyi-ai-lab/vepol/blob/main/docs/methodology/development-loop.md); тут — компакт, которому агенты следуют нативно из этого файла. Claude-скилл `vepol-develop` — тонкий адаптер на этот же процесс.
+Единый процесс для **любого** агента (Claude Code / Codex / Antigravity / любой будущий) при новой разработке. Канон — [`vepol-prep/docs/methodology/development-loop.md`](https://github.com/nahornyi-ai-lab/vepol/blob/main/docs/methodology/development-loop.md); тут — компакт, которому агенты следуют нативно из этого файла. Claude-скилл `development-loop` — тонкий адаптер на этот же процесс.
 
 0. **Scope + Definition of Done.** Классифицировать работу и записать что значит «done» (acceptance + как проверим). *Trivial* (опечатка/док, bump зависимости, один файл, blast radius=0) → пропустить фазы 1 и 4, строка `research | skipped | trivial` в `log.md`, но всё равно верифицировать. *Non-trivial* (>~30 мин, новая фича/зависимость/инфра, cross-subsystem, трудно откатить, security/licensing/публичное) → полный loop.
 1. **Research-first (reuse-or-build).** Найти что уже есть для переиспользования/копирования (KB, другие проекты, мир). Фан-аут на агентов **только для реально независимых вопросов** (`grok` — когда нужен текущий X/Reddit). Запись: `candidates / decision: reuse|adapt|build / why`. Не строить то, что есть.

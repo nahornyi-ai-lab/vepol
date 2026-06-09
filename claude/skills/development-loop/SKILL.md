@@ -1,5 +1,5 @@
 ---
-name: vepol-develop
+name: development-loop
 description: Use when starting any new development — a feature, a non-trivial or hard-to-undo change, infrastructure, or anything touching security/licensing/public artifacts. Runs Vepol's development loop. Skip only for trivial single-file/doc fixes (leave a one-line `research | skipped | trivial` note and still verify).
 ---
 
