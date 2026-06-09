@@ -17,6 +17,8 @@ C_OK=$'\033[1;32m'; C_INFO=$'\033[1;36m'; C_WARN=$'\033[1;33m'; C_DIM=$'\033[2m'
 
 LIST_ONLY=0
 [[ "${1:-}" == "--list" ]] && LIST_ONLY=1
+# Honor the installer's non-interactive contract: never prompt / auto-install.
+[[ "${VEPOL_NONINTERACTIVE:-0}" == "1" ]] && LIST_ONLY=1
 
 # name | detect (bare name or abs path) | what-for | install hint | auto-install cmd (empty = manual only)
 TOOLS=(

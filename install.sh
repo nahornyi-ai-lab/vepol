@@ -214,7 +214,11 @@ if [[ -f "$VEPOL_DIR/bin/cli-tools.tsv" ]]; then
   ok "  agent CLI registry: $HUB/.orchestrator/cli-tools.tsv"
 fi
 if [[ -x "$VEPOL_DIR/bin/kb-cli-offer" ]]; then
-  bash "$VEPOL_DIR/bin/kb-cli-offer" || true   # fail-safe: never blocks install
+  # --list: detect-only, non-interactive — prints each agent CLI + its install
+  # command, never prompts and never auto-installs (honors the installer's
+  # detect-only contract). The user installs what they want; kb-cli-roster then
+  # uses whatever is present.
+  bash "$VEPOL_DIR/bin/kb-cli-offer" --list || true
 fi
 if [[ -x "$HUB/bin/kb-cli-roster" ]]; then
   # KB_HUB pins the registry lookup to THIS install's hub (not a stray ~/knowledge).
