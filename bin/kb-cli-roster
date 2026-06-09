@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# kb-cli-roster — generate the per-machine "agent CLI cheatsheet".
+#
+# Reads a declarative registry (~/knowledge/.orchestrator/cli-tools.tsv) of agent
+# CLIs, detects which are actually installed on THIS machine, and writes a short
+# cheatsheet (.active-roster.md) that kb-session-start injects into every agent's
+# startup context — so any agent knows which CLIs exist and when to reach for each,
+# without the human prompting it.
+#
+# Design constraints (owner + codex review):
+#   - NO version numbers anywhere. Detection is installed-or-not, NO live auth probes
+#     (keeps it <100ms; auth/empty-output failures are handled by the matrix link).
+#   - Registry is declarative: detection logic lives HERE, never as shell in the data
+#     file (a data file with shell snippets = arbitrary code on every startup).
+#   - Atomic write (temp + rename) so parallel spawned agents never read a half file.
+#   - Extensible: add a future CLI = one registry line with a known `kind`.
+#
+# Usage:
+#   kb-cli-roster [--out <file>] [--ensure] [--ttl <sec>] [--registry <file>] [--print]
+#     --out <file>      Where to write the cheatsheet. Default: print to stdout.
+#     --ensure          No-op if <out> exists, is newer than the registry, and is
+#                       younger than TTL. Otherwise (re)generate. Cheap fast path
+#                       for the SessionStart hook (20s budget).
+#     --ttl <sec>       Max age before --ensure regenerates anyway. Default 86400.
+#     --registry <f>    Registry path. Default ~/knowledge/.orchestrator/cli-tools.tsv.
+#     --print           Also echo the cheatsheet to stdout (even with --out).
+#
+# Exit: 0 on success (or ensure-skip). Non-zero only on bad args / unreadable registry.
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+REGISTRY="$HUB/.orchestrator/cli-tools.tsv"
+MATRIX="$HUB/solutions/cli-agent-runtime-launch.md"
+OUT=""
+ENSURE=0
+TTL=86400
+PRINT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) OUT="$2"; shift 2 ;;
+    --ensure) ENSURE=1; shift ;;
+    --ttl) TTL="$2"; shift 2 ;;
+    --registry) REGISTRY="$2"; shift 2 ;;
+    --print) PRINT=1; shift ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "kb-cli-roster: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "kb-cli-roster: registry not found: $REGISTRY" >&2
+  exit 3
+fi
+
+# --ensure fast path: skip if fresh enough.
+if [[ $ENSURE -eq 1 && -n "$OUT" && -f "$OUT" ]]; then
+  if [[ "$OUT" -nt "$REGISTRY" ]]; then
+    now=$(date +%s)
+    mtime=$(stat -f %m "$OUT" 2>/dev/null || stat -c %Y "$OUT" 2>/dev/null || echo 0)
+    if (( now - mtime < TTL )); then
+      [[ $PRINT -eq 1 ]] && cat "$OUT"
+      exit 0
+    fi
+  fi
+fi
+
+# Detect one candidate: path-like (contains /) -> executable test; bare name -> PATH lookup.
+is_installed() {
+  local candidates="$1" cand expanded
+  IFS=':' read -ra _cands <<< "$candidates"
+  for cand in "${_cands[@]}"; do
+    cand="$(echo "$cand" | sed 's/^ *//;s/ *$//')"
+    [[ -z "$cand" ]] && continue
+    expanded="${cand/#\$HOME/$HOME}"
+    if [[ "$expanded" == */* ]]; then
+      [[ -x "$expanded" ]] && return 0
+    else
+      command -v "$expanded" >/dev/null 2>&1 && return 0
+    fi
+  done
+  return 1
+}
+
+# Parse registry into parallel arrays.
+names=(); whens=(); installed=(); fallback_of=()
+while IFS= read -r line; do
+  line="${line%%$'\r'}"
+  [[ -z "${line// }" ]] && continue
+  [[ "${line#\#}" != "$line" ]] && continue   # comment
+  IFS='|' read -ra f <<< "$line"
+  (( ${#f[@]} < 4 )) && continue
+  name="$(echo "${f[0]}" | sed 's/^ *//;s/ *$//')"
+  kind="$(echo "${f[1]}" | sed 's/^ *//;s/ *$//')"
+  cands="$(echo "${f[2]}" | sed 's/^ *//;s/ *$//')"
+  when="$(echo "${f[3]}" | sed 's/^ *//;s/ *$//')"
+  fb=""
+  if (( ${#f[@]} >= 5 )); then
+    extra="$(echo "${f[4]}" | sed 's/^ *//;s/ *$//')"
+    [[ "$extra" == fallback-of:* ]] && fb="$(echo "${extra#fallback-of:}" | sed 's/^ *//;s/ *$//')"
+  fi
+  names+=("$name"); whens+=("$when"); fallback_of+=("$fb")
+  if is_installed "$cands"; then installed+=("1"); else installed+=("0"); fi
+done < "$REGISTRY"
+
+# Build cheatsheet.
+build() {
+  echo "## Инструменты этой машины — зови сам, когда подходит"
+  echo "_(сгенерировано kb-cli-roster; отражает что реально установлено сейчас)_"
+  local missing=()
+  for i in "${!names[@]}"; do
+    # Skip pure-fallback tools from the main list; surface them only as a fallback note.
+    if [[ -n "${fallback_of[$i]}" ]]; then continue; fi
+    if [[ "${installed[$i]}" == "1" ]]; then
+      echo "- ${names[$i]} — ${whens[$i]}"
+    else
+      missing+=("${names[$i]}")
+    fi
+  done
+  # Fallback tools: note them only when their primary is missing but the fallback is present.
+  for i in "${!names[@]}"; do
+    local fb="${fallback_of[$i]}"
+    [[ -z "$fb" ]] && continue
+    if [[ "${installed[$i]}" == "1" ]]; then
+      # find primary index
+      local pj="" prim_installed=0
+      for j in "${!names[@]}"; do
+        if [[ "${names[$j]}" == "$fb" ]]; then pj="$j"; prim_installed="${installed[$j]}"; fi
+      done
+      if [[ "$prim_installed" != "1" ]]; then
+        echo "- ${names[$i]} — ${whens[$i]} (${fb} не установлен → бери ${names[$i]})"
+      fi
+      # installed fallback + primary present -> silently omit (available as backup, no need to advertise)
+    else
+      missing+=("${names[$i]}")   # genuinely not installed
+    fi
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "Не установлено (не зови): ${missing[*]}."
+  fi
+  echo "Правило: инструмент может требовать логина; если вызов упал или вернул пусто — это сбой, не «нет результата». Точные вызовы/флаги: ${MATRIX}."
+}
+
+content="$(build)"
+
+if [[ -n "$OUT" ]]; then
+  mkdir -p "$(dirname "$OUT")"
+  tmp="$(mktemp "${OUT}.XXXXXX")"
+  printf '%s\n' "$content" > "$tmp"
+  mv -f "$tmp" "$OUT"
+  [[ $PRINT -eq 1 ]] && printf '%s\n' "$content"
+else
+  printf '%s\n' "$content"
+fi

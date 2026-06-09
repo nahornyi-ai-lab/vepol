@@ -1,0 +1,20 @@
+# cli-tools — declarative registry of agent CLIs available to orchestrators.
+# Read by kb-cli-roster, which writes the per-machine cheatsheet (.active-roster.md)
+# injected into every agent's startup context.
+#
+# Format (pipe-delimited):  name | kind | candidates | when-text
+#   kind = which-any   -> installed if ANY candidate (command name) resolves on PATH
+#   kind = path-any    -> installed if ANY candidate (abs path or name) is executable
+#   candidates         -> colon-separated list; $HOME is expanded; tried in order
+#   when-text          -> one short line: WHEN an agent should reach for this tool
+#
+# Add a future CLI (deepseek/kimi/qwen/...) = append ONE line with a known kind.
+# NO version numbers anywhere. NO shell snippets — detection logic lives in kb-cli-roster.
+# fallback-of: <name>  in column 5 marks this tool as a backup for another (optional).
+
+claude     | which-any | claude                              | писать/править код и исполнять (скиллы, интеграции, запуск проекта)
+codex      | which-any | codex                               | анализ, планирование, консервативное второе мнение, большие ресёрчи, куски кода
+agy        | path-any  | $HOME/.local/bin/agy:agy            | независимое мнение, ловит нюансы, что упустили codex и claude (зови: agy --add-dir "$PWD")
+grok       | path-any  | $HOME/.grok/bin/grok:grok           | что пишут в соцсетях сейчас; дерзкий, современный, без догм и цензуры
+notebooklm | path-any  | $HOME/.local/bin/notebooklm:notebooklm | аудио/видео-пересказ для человека
+opencode   | path-any  | $HOME/.opencode/bin/opencode:opencode | запасной, если grok недоступен (умеет любые модели) | fallback-of: grok

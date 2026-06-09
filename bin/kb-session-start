@@ -61,18 +61,37 @@ Do NOT run init-kb automatically — wait for the user to ask or indicate they w
   exit 0
 fi
 
-python3 - "$PROJECT" "$HUB_MODE" <<'PY'
+# CLI roster — refresh the per-machine "agent CLI cheatsheet" (cheap: --ensure no-ops
+# unless stale) and inject it so every agent knows which CLIs exist and when to use each.
+if [[ "$HUB_MODE" == "1" ]]; then
+  ROSTER="$PROJECT/.active-roster.md"
+else
+  ROSTER="$PROJECT/knowledge/.active-roster.md"
+fi
+if [[ -x "$HOME/knowledge/bin/kb-cli-roster" ]]; then
+  "$HOME/knowledge/bin/kb-cli-roster" --ensure --out "$ROSTER" >/dev/null 2>&1 || true
+fi
+
+python3 - "$PROJECT" "$HUB_MODE" "$ROSTER" <<'PY'
 import json, sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 p = Path(sys.argv[1])
 hub_mode = sys.argv[2] == "1"
+roster_path = sys.argv[3] if len(sys.argv) > 3 else ""
 k = p if hub_mode else p / "knowledge"
 parts = []
 
 today = datetime.now(timezone.utc).astimezone()
 parts.append(f"## Today\n{today.strftime('%A, %B %d, %Y')}")
+
+# Agent CLI roster — what's installed on this machine + when to use each.
+# Injected early (right after Today) so it survives the 20k context cap.
+if roster_path:
+    rf = Path(roster_path)
+    if rf.exists():
+        parts.append(rf.read_text(encoding='utf-8').strip())
 
 for name, label in [
     ("README.md", "Project README"),

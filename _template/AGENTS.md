@@ -39,6 +39,10 @@ _(перечислить, какие подпапки в `knowledge/` имеют
 - **С подтверждением:** изменения в code-dirs проекта, создание новых категорий в `knowledge/`, удаление страниц.
 - **Никогда:** трогать `knowledge/raw/`, пушить в git без команды, удалять чужие файлы вне `knowledge/`.
 
+## Cross-orchestrator CLI launch
+
+Агенты на этой машине могут запускать локальные CLI (Claude Code, Codex, Antigravity `agy`, Grok, OpenCode, NotebookLM) через shared matrix: [`~/knowledge/solutions/cli-agent-runtime-launch.md`](~/knowledge/solutions/cli-agent-runtime-launch.md). **Живой ростер** — какие из них реально установлены здесь и когда какой звать — в `knowledge/.active-roster.md` (автогенерится `kb-cli-roster`, инжектится в каждую Claude/Codex-сессию; оркестраторы без хука читают файл сами). Без версий, gitignored.
+
 ## Метрики проекта
 
 _(какие цифры меряем, откуда они приходят, как часто обновляются → см. `knowledge/metrics/` если есть)_

@@ -156,11 +156,8 @@ if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
   warn "    These enable extras (cross-agent review, session auto-capture, etc.)"
   warn "    Install: brew install ${OPTIONAL_MISSING[*]}"
 fi
-if ! command -v gemini >/dev/null 2>&1; then
-  warn "  Optional tool missing: gemini"
-  warn "    Enables third-opinion reviews / quorum"
-  warn "    Install: npm install -g @google/gemini-cli"
-fi
+# Agent CLIs (codex/agy/grok/notebooklm/opencode) are OFFERED in Step 2, after the
+# hub is scaffolded — Vepol uses whichever you install and never blocks on them.
 
 # Python 3.10+ for People module + future Python-side tooling
 if command -v python3 >/dev/null 2>&1; then
@@ -209,6 +206,21 @@ for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki; do
   scriptname="$(basename "$script")"
   ln -sf "$script" "$HUB/bin/$scriptname"
 done
+# Agent CLI roster — install the declarative registry, offer the optional agent
+# CLIs, and generate the per-machine cheatsheet that agents read at startup.
+mkdir -p "$HUB/.orchestrator"
+if [[ -f "$VEPOL_DIR/bin/cli-tools.tsv" ]]; then
+  cp "$VEPOL_DIR/bin/cli-tools.tsv" "$HUB/.orchestrator/cli-tools.tsv"
+  ok "  agent CLI registry: $HUB/.orchestrator/cli-tools.tsv"
+fi
+if [[ -x "$VEPOL_DIR/bin/kb-cli-offer" ]]; then
+  bash "$VEPOL_DIR/bin/kb-cli-offer" || true   # fail-safe: never blocks install
+fi
+if [[ -x "$HUB/bin/kb-cli-roster" ]]; then
+  "$HUB/bin/kb-cli-roster" --out "$HUB/.active-roster.md" >/dev/null 2>&1 || true
+  ok "  agent CLI roster generated (agents now know which CLIs are installed)"
+fi
+
 # Internal Python packages — symlink directories
 if [[ -d "$VEPOL_DIR/bin/_kb_backlog" ]]; then
   ln -sfn "$VEPOL_DIR/bin/_kb_backlog" "$HUB/bin/_kb_backlog"

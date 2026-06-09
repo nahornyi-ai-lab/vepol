@@ -198,7 +198,9 @@ Acceptance — ответ должен содержать все эти подс
 
 Любой project agent на этой машине должен знать, что Vepol уже умеет запускать локальные CLI-инструменты: Claude Code, Codex, Antigravity CLI (`agy`), OpenCode, Grok и NotebookLM. Перед ответом «не могу запустить другого агента/инструмент» агент обязан открыть [`~/knowledge/solutions/cli-agent-runtime-launch.md`](solutions/cli-agent-runtime-launch.md), проверить локальный binary/smoke probe и выбрать подходящий launcher из матрицы.
 
-Короткое правило: Claude Code — MCP/skills/project execution; Codex — adversarial review/code diagnosis; Antigravity — Gemini-family independent pass with `--add-dir`; OpenCode/Grok — current/social/Grok-backed research; direct Grok — explicit Grok pass; NotebookLM — production recap/audio/artifacts after synthesis. Для delegated research prompt должен требовать durable write-back в `knowledge/sources/` или `knowledge/reports/`, а не возвращать знание только в чат.
+Короткое правило: Claude Code — MCP/skills/project execution; Codex — adversarial review/code diagnosis; Antigravity — Gemini-family independent pass with `--add-dir`; Grok CLI — canonical current/social/X/Reddit research pass and explicit Grok pass; OpenCode — non-canonical fallback/legacy surface only; NotebookLM — production recap/audio/artifacts after synthesis. Для delegated research prompt должен требовать durable write-back в `knowledge/sources/` или `knowledge/reports/`, а не возвращать знание только в чат.
+
+**Живой ростер CLI (per-machine).** Какие из этих инструментов реально установлены на ЭТОЙ машине и когда какой звать — в автогенерируемом файле `knowledge/.active-roster.md` (для хаба — `~/knowledge/.active-roster.md`). Его собирает `kb-cli-roster` из декларативного реестра `~/knowledge/.orchestrator/cli-tools.tsv` и инжектит в каждую Claude/Codex-сессию через SessionStart-хук. Оркестраторы без хука (agy и др.) читают `.active-roster.md` напрямую при старте. Файл негит (под `knowledge/` ignore) — git-churn нет. Добавить будущий CLI = одна строка в реестре. Полные вызовы/флаги — в матрице выше.
 
 ## Agent self-identification
 
@@ -477,15 +479,15 @@ knowledge/
 
 ## Important research quorum
 
-Для важных ресерчей используй quorum-pipeline: независимые pass-ы четырёх локальных оркестраторов — **Claude Code + Codex + Antigravity CLI (`agy`) + opencode** (grok-4.3 backend). opencode даёт native X/Reddit live feed через Grok — MCP chrome-devtools не требуется. Каноническая процедура: `~/knowledge/concepts/important-research-quorum-pipeline.md`.
+Для важных ресерчей используй quorum-pipeline: независимые pass-ы четырёх локальных оркестраторов — **Claude Code + Codex + Antigravity CLI (`agy`) + Grok CLI**. Grok-pass запускается через `$HOME/.grok/bin/grok`, не через OpenCode, и prompt обязан явно просить проверить текущие X/Twitter и Reddit discussion/signals. Каноническая процедура: `~/knowledge/concepts/important-research-quorum-pipeline.md`.
 
-Каждый pass пишет durable note в `knowledge/sources/<topic>-<agent>-<date>.md` (4 файла); итоговый synthesis — в `knowledge/reports/<topic>-<date>.md` с явными agreement/disagreement/confidence. NotebookLM — финальный production step для русского пересказа (структура: «Что нашли», «Что это меняет», «Как применить в Vepol», «Что не брать», «Следующие действия»). Если opencode недоступен, important research degraded — fallback на chrome-devtools-mcp как emergency.
+Каждый pass пишет durable note в `knowledge/sources/<topic>-<agent>-<date>.md` (4 файла); итоговый synthesis — в `knowledge/reports/<topic>-<date>.md` с явными agreement/disagreement/confidence. NotebookLM — финальный production step для русского пересказа (структура: «Что нашли», «Что это меняет», «Как применить в Vepol», «Что не брать», «Следующие действия»). Если Grok CLI недоступен, important research degraded; chrome-devtools-mcp или OpenCode допустимы только как emergency fallback с явной записью о деградации.
 
 **Когда вызывать:**
 - «что обсуждают про X», «что говорят в комьюнии», «какие реакции на Y»
 - любая research-задача с упоминанием X/Twitter/Reddit
 - когда нужна актуальность (последние дни/недели)
-- когда нужен независимый 4-й голос (opencode) для сложных решений
+- когда нужен независимый 4-й голос (Grok CLI) для сложных решений
 
 **Когда НЕ вызывать:**
 - ответ есть в коде / документации / git history
