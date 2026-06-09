@@ -86,6 +86,10 @@ if [[ "$(uname)" != "Darwin" ]]; then
   die "Vepol v0.1 supports macOS only. Linux support is on the roadmap."
 fi
 OS_VER="$(sw_vers -productVersion 2>/dev/null || echo 'unknown')"
+OS_MAJ="${OS_VER%%.*}"
+if [[ "$OS_MAJ" =~ ^[0-9]+$ && "$OS_MAJ" -lt 13 ]]; then
+  die "Vepol needs macOS 13 (Ventura) or newer — detected $OS_VER."
+fi
 ok "  macOS $OS_VER detected"
 
 # Required tools
@@ -96,25 +100,42 @@ for cmd in git claude node bun rg; do
   fi
 done
 
-# bash 5+ (macOS ships 3.2 by default)
+# bash 5+ (macOS ships 3.2 by default). Check the bash on PATH (what hooks run)
+# as well as the common Homebrew locations; take the highest major found.
 USER_BASH_MAJ=0
-if [[ -x /opt/homebrew/bin/bash ]]; then
-  USER_BASH_MAJ=$(/opt/homebrew/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)
-elif [[ -x /usr/local/bin/bash ]]; then
-  USER_BASH_MAJ=$(/usr/local/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)
-fi
+for cand in "$(command -v bash 2>/dev/null)" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+  [[ -n "$cand" && -x "$cand" ]] || continue
+  maj=$("$cand" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)
+  [[ "$maj" =~ ^[0-9]+$ ]] && (( maj > USER_BASH_MAJ )) && USER_BASH_MAJ=$maj
+done
 if [[ "$USER_BASH_MAJ" -lt 5 ]]; then
   MISSING+=("bash-5+")
 fi
 
-# Node 18+
+# Node 18+ — probe defensively (a broken `node` must not abort under set -e).
 NODE_OK=1
 if command -v node >/dev/null 2>&1; then
-  NODE_MAJ=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
-  if [[ -n "${NODE_MAJ:-}" && "$NODE_MAJ" -lt 18 ]]; then
-    warn "  node version is $NODE_MAJ — Vepol needs 18 or higher"
+  NODE_MAJ=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1 || true)
+  if [[ ! "${NODE_MAJ:-}" =~ ^[0-9]+$ || "$NODE_MAJ" -lt 18 ]]; then
     NODE_OK=0
   fi
+fi
+
+# Bun 1+
+BUN_OK=1
+if command -v bun >/dev/null 2>&1; then
+  BUN_MAJ=$(bun --version 2>/dev/null | cut -d. -f1 || true)
+  if [[ ! "${BUN_MAJ:-}" =~ ^[0-9]+$ || "$BUN_MAJ" -lt 1 ]]; then
+    BUN_OK=0
+  fi
+fi
+
+# Python 3.10+ is REQUIRED — the SessionStart hook (kb-session-start) needs it.
+PY_OK=1
+if command -v python3 >/dev/null 2>&1; then
+  PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)' 2>/dev/null || echo 0)
+else
+  PY_OK=0
 fi
 
 # Optional tools
@@ -125,10 +146,14 @@ for cmd in codex uv jq gh; do
   fi
 done
 
-# Block install if required missing
-if [[ ${#MISSING[@]} -gt 0 || "$NODE_OK" -eq 0 ]]; then
+# Build a clear list of what's wrong, then block if anything is.
+PROBLEMS=("${MISSING[@]}")
+[[ "$NODE_OK" -eq 0 ]] && PROBLEMS+=("node-18+")
+[[ "$BUN_OK"  -eq 0 ]] && PROBLEMS+=("bun-1+")
+[[ "$PY_OK"   != "1" ]] && PROBLEMS+=("python-3.10+")
+if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
   echo
-  warn "Required tools missing or out of date: ${MISSING[*]:-} ${NODE_OK:+}"
+  warn "Required tools missing or out of date: ${PROBLEMS[*]}"
   cat <<HELP
 
 ${C_INFO}Install commands:${C_OFF}
@@ -137,7 +162,7 @@ ${C_INFO}Install commands:${C_OFF}
   /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
   ${C_DIM}# Required tools (via Homebrew):${C_OFF}
-  brew install bash node bun ripgrep git
+  brew install bash node bun ripgrep git python@3
 
   ${C_DIM}# Claude CLI:${C_OFF}
   Download from https://claude.ai/download
@@ -159,15 +184,8 @@ fi
 # Agent CLIs (codex/agy/grok/notebooklm/opencode) are OFFERED in Step 2, after the
 # hub is scaffolded — Vepol uses whichever you install and never blocks on them.
 
-# Python 3.10+ for People module + future Python-side tooling
-if command -v python3 >/dev/null 2>&1; then
-  PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)' 2>/dev/null || echo 0)
-  if [[ "$PY_OK" != "1" ]]; then
-    warn "  python3 < 3.10 detected — Vepol People module requires 3.10+"
-  fi
-else
-  warn "  python3 not found — Vepol People module needs it"
-fi
+# (python3 3.10+ is enforced as a required prerequisite above — the SessionStart
+# hook and People module both need it, so reaching here means it's present.)
 
 # Python deps — checked, NOT installed (per detect-only policy)
 if [[ -f "$VEPOL_DIR/requirements.txt" ]]; then
