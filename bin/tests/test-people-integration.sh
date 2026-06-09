@@ -23,6 +23,7 @@ fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 # Set up a fully isolated KB
 export KB_HUB="$TMPDIR_TEST/kb"
+export VEPOL_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$KB_HUB/people" "$KB_HUB/personal"
 echo "" > "$KB_HUB/people/_index.yaml"
 
@@ -43,7 +44,7 @@ KB_HUB = Path(os.environ["KB_HUB"])
 os.environ["KB_HUB"] = str(KB_HUB)
 
 # Insert vepol-prep bin to sys.path explicitly
-VEPOL_BIN = Path("/Users/macbook/vepol-prep/bin")
+VEPOL_BIN = Path(os.environ["VEPOL_BIN"])
 sys.path.insert(0, str(VEPOL_BIN))
 
 # Patch module-level paths to the test KB
@@ -126,7 +127,7 @@ PYEOF
 python3 - << PYEOF
 import os, sys
 from pathlib import Path
-sys.path.insert(0, "/Users/macbook/vepol-prep/bin")
+sys.path.insert(0, os.environ["VEPOL_BIN"])
 import frontmatter
 
 KB_HUB = Path(os.environ["KB_HUB"])
@@ -151,7 +152,7 @@ PYEOF
 python3 - << PYEOF
 import sys, os
 from pathlib import Path
-sys.path.insert(0, "/Users/macbook/vepol-prep/bin")
+sys.path.insert(0, os.environ["VEPOL_BIN"])
 import _kb_people.card as card
 KB_HUB = Path(os.environ["KB_HUB"])
 card.PEOPLE_DIR = KB_HUB / "people"
@@ -177,7 +178,7 @@ PYEOF
 python3 - << PYEOF
 import sys, os
 from pathlib import Path
-sys.path.insert(0, "/Users/macbook/vepol-prep/bin")
+sys.path.insert(0, os.environ["VEPOL_BIN"])
 import _kb_people.card as card
 KB_HUB = Path(os.environ["KB_HUB"])
 card.PEOPLE_DIR = KB_HUB / "people"
@@ -202,8 +203,8 @@ PYEOF
 
 # T5: bot/system local-part filter (real audit findings 2026-05-02)
 python3 - << 'PYEOF'
-import sys
-sys.path.insert(0, "/Users/macbook/vepol-prep/bin")
+import os, sys
+sys.path.insert(0, os.environ["VEPOL_BIN"])
 from _kb_people.sources.calendar_source import CalendarSource
 
 # Real bots from yesterday's audit + common patterns
@@ -229,7 +230,7 @@ real_emails = [
     "bob.smith@vendor.io",
     "first.last@personal.email",
     "ceo@startup.io",  # not a bot pattern
-    "vadym@nahornyi.ai",
+    "dana.lee@bigcorp.com",
 ]
 
 items = [{"name": "X", "email": e, "date": "2026-04-30", "context": "test"} for e in bot_emails + real_emails]
@@ -252,7 +253,7 @@ PYEOF
 python3 - << PYEOF
 import sys, os, tempfile, shutil
 from pathlib import Path
-sys.path.insert(0, "/Users/macbook/vepol-prep/bin")
+sys.path.insert(0, os.environ["VEPOL_BIN"])
 
 # Fresh isolated KB for this test
 tmpdir = Path(tempfile.mkdtemp())

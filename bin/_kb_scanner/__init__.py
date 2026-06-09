@@ -1,7 +1,7 @@
 """Context-injection scanner v2 — Vepol untrusted-input semantic gate.
 
-Implementation of the approved-with-concerns spec at
-`/Users/macbook/vepol-dev/knowledge/decisions/context-injection-scanner-v2.md`.
+Implementation of the approved-with-concerns scanner v2 spec
+(signature ledger: security/scanner-signatures-ledger.md).
 
 Public surface:
     from _kb_scanner.scanner import scan, scan_batch

@@ -1,7 +1,7 @@
 """Scanner v2 test suite — subset of T29-T44 from spec.
 
 Runnable directly:  python3 -m _kb_scanner.test_scanner
-or:  python3 /Users/macbook/knowledge/bin/_kb_scanner/test_scanner.py
+or:  python3 ~/knowledge/bin/_kb_scanner/test_scanner.py
 
 Stdlib unittest only. Tests requiring fmv v1.1 integration (T44) are
 marked skip; tests requiring catalogue mutation (T35/T43) use an isolated
