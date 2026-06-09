@@ -217,7 +217,8 @@ if [[ -x "$VEPOL_DIR/bin/kb-cli-offer" ]]; then
   bash "$VEPOL_DIR/bin/kb-cli-offer" || true   # fail-safe: never blocks install
 fi
 if [[ -x "$HUB/bin/kb-cli-roster" ]]; then
-  "$HUB/bin/kb-cli-roster" --out "$HUB/.active-roster.md" >/dev/null 2>&1 || true
+  # KB_HUB pins the registry lookup to THIS install's hub (not a stray ~/knowledge).
+  KB_HUB="$HUB" "$HUB/bin/kb-cli-roster" --out "$HUB/.active-roster.md" >/dev/null 2>&1 || true
   ok "  agent CLI roster generated (agents now know which CLIs are installed)"
 fi
 

@@ -152,3 +152,7 @@ if [[ -n "$OUT" ]]; then
 else
   printf '%s\n' "$content"
 fi
+
+# Explicit success: the last conditional above ([[ $PRINT -eq 1 ]] && …) returns 1
+# when PRINT=0, which would otherwise become the script's exit code on the success path.
+exit 0
