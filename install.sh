@@ -253,7 +253,15 @@ fi
 for pkg in _kb_backlog _kb_board _kb_people _kb_mcp _kb_scanner templates; do
   [[ -d "$VEPOL_DIR/bin/$pkg" ]] || continue
   if [[ -d "$HUB/bin/$pkg" && ! -L "$HUB/bin/$pkg" ]]; then
-    rm -rf "$HUB/bin/$pkg"   # managed target ($HUB/bin/$pkg) — stale copied install
+    # Never DELETE a real directory — we can't be sure we own this hub. Move it
+    # aside to a timestamped backup so nothing is lost, then place the symlink.
+    bak="$HUB/bin/$pkg.pre-vepol.$(date +%Y%m%d%H%M%S)"
+    if mv "$HUB/bin/$pkg" "$bak" 2>/dev/null; then
+      warn "  moved existing $HUB/bin/$pkg aside to $(basename "$bak") (was a real dir, not a Vepol symlink)"
+    else
+      warn "  $HUB/bin/$pkg exists as a real dir and could not be moved — skipping symlink"
+      continue
+    fi
   fi
   ln -sfn "$VEPOL_DIR/bin/$pkg" "$HUB/bin/$pkg"
 done
