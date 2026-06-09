@@ -64,8 +64,83 @@ Concerns:
 - Specific phrasing in user-facing copy
 
 The output is concrete redlines: "replace section X with Y because
-Z." The reviewer can flag "blocker," "request-changes," or
-"approve."
+Z." The verdict uses the structured format below.
+
+## Structured verdict — what counts toward the gate
+
+A review only counts toward a review gate (the ≥2 spec gate, or the
+implementation-review gate below) if it contains **all** mandatory
+fields:
+
+- `verdict: approve | approve-with-nits | block`
+- `reviewed: spec:<algo>:<hash>` — always; for implementation review
+  additionally `diff:<git ref | patch ref>`. Hash portably:
+  `git hash-object <file>` or `shasum -a 256 <file>`; the reviewer
+  hashes the bytes they actually read.
+- What was concretely checked
+- Top risks (≥2)
+- At least one failure mode or negative test case
+- What was NOT checked
+- Findings, each tagged `[blocker]` or `[nit]`
+
+The full field set applies to **every** counting review — including a
+single-reviewer implementation review of non-material work. There is
+no lighter form. A review missing mandatory fields does not count.
+Empty output is a tool failure, not a review.
+
+**Legacy vocabulary mapping** (older review records are not
+rewritten): `blocker` / `request-changes` → `block`;
+`concern` / minor remarks → `approve-with-nits`.
+
+## Disagreement and the final-version rule
+
+- Any `block` freezes the task: the author revises and requests
+  re-review. Blockers cannot be argued away in text; only
+  non-blocking remarks can be rebutted with a reason.
+- **Final-version rule:** a gate is satisfied only by the required
+  number of approve/approve-with-nits verdicts bound to the **exact
+  final version** (spec hash / diff ref) at close time. A material
+  edit during the cycle (scope, acceptance criteria, failure modes,
+  dependencies, security posture, public behavior) invalidates all
+  prior verdicts — the author must obtain refreshed verdicts on the
+  final version, at minimum re-engaging the reviewers whose areas the
+  edit touched. Cosmetic edits (typos, formatting) don't invalidate;
+  when in doubt, treat the edit as material.
+- A security/data-loss `block` is a veto only the human lifts.
+- Reviewers split approach-X-vs-Y → third-agent tie-break or human;
+  the conflict and resolution are recorded in the decision file.
+- **Re-review deadlock:** if the blocking reviewer is unavailable for
+  re-review after ≥2 attempts logged in `log.md`, escalate to the
+  human with `[Blocker-Re-Review-Unavailable: <who, original verdict,
+  what was fixed, risk>]`. The human lifts the block, appoints a
+  third agent for the tie-break, or waits. A non-security lift is
+  recorded in the decision file; if a defect ships later, the
+  incident RCA must reference it.
+
+## Implementation review (Phase 5.5)
+
+The spec gate is *before* code; this gate is *after* — specs don't
+ship, diffs do. For non-trivial work that produced code/tests/configs,
+the diff is reviewed by ≥1 independent reviewer (≥2 for material
+work), never the author, after tests are green and before
+verify+close.
+
+**Handoff package from the author:** the approved spec + its hash,
+the diff ref, the tests, the acceptance criteria, and "what I'm
+unsure about."
+
+**Reviewer checklist (mandatory concerns):**
+
+1. The diff matches the approved spec — nothing beyond scope
+2. Side effects: durable KB pages, hooks/installers/scheduler,
+   the public contract, other agents/rollouts
+3. Tests: every acceptance criterion is covered by a test or an
+   explicit manual check; negative cases exist
+4. Regressions in adjacent behavior
+
+The verdict's "what was checked" field must enumerate which checklist
+items were actually exercised against this diff. The verdict binds to
+`spec:<algo>:<hash> diff:<ref>`.
 
 ## Why two layers, not one
 
@@ -131,7 +206,8 @@ The reviewer cannot:
 
 - Approve its own changes (no self-review)
 - Ratify a plan that was already half-implemented before review
-  (the gate is *before* code, not after)
+  (the *spec* gate is before code; the only legitimate post-code
+  gate is the explicit implementation review of the diff above)
 - Skip Layer 1 and go straight to Layer 2 — even when the author
   insists "the direction is obviously right"
 - Decline to review without a recorded reason
@@ -187,21 +263,31 @@ on" instructions).
 
 Every cross-review leaves a trail in the spec document:
 
+Current (structured) format:
+
+```
+## Cross-review 2026-06-09 (Layer 2)
+Reviewer: Codex
+verdict: approve-with-nits
+reviewed: spec:git-blob:4b96bad1...
+checked: A1-A11 consistency, gate operationality, deadlock paths
+top_risks: (1) manual enforcement until guards land; (2) hash format drift
+failure_mode: reviewer copies shorthand hash syntax, verdict fails audit
+not_checked: seed copies, board/log evidence
+findings:
+1. [nit] align A1 example with canonical hash syntax
+Resolution: nit fixed (cosmetic, verdicts stay valid).
+```
+
+Legacy format (pre-2026-06 records, kept as-is for the audit trail):
+
 ```
 ## Cross-review 2026-04-29 (Layer 1)
 Reviewer: Codex
 Verdict: concern
 Findings:
 - Issue 1: ...
-- Issue 2: ...
 Resolution: spec section X rewritten; section Y deferred to phase 2.
-
-## Cross-review 2026-04-29 (Layer 2)
-Reviewer: Codex
-Verdict: request-changes
-Redlines applied: 7 of 8.
-One redline rejected: "the chosen phrasing is the maintainer's
-deliberate decision (preserved with reason)."
 ```
 
 The audit trail matters because three months later, when someone
