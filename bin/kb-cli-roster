@@ -76,8 +76,9 @@ is_installed() {
       # relative path candidate — cwd-dependent, ignore (registry should use abs paths or bare names)
       continue
     else
-      # bare name candidate — PATH lookup
-      command -v "$expanded" >/dev/null 2>&1 && return 0
+      # bare name candidate — PATH lookup. type -P resolves only executables on PATH
+      # (not shell builtins/functions/aliases), so a builtin named like a CLI won't false-match.
+      type -P "$expanded" >/dev/null 2>&1 && return 0
     fi
   done
   return 1
@@ -86,7 +87,8 @@ is_installed() {
 # Parse registry into parallel arrays.
 names=(); whens=(); installed=(); fallback_of=()
 lineno=0
-while IFS= read -r line; do
+# `|| [[ -n "$line" ]]` so a final line without a trailing newline is still parsed.
+while IFS= read -r line || [[ -n "$line" ]]; do
   lineno=$((lineno+1))
   line="${line%%$'\r'}"
   [[ -z "${line//[[:space:]]/}" ]] && continue                 # blank (incl. tabs)
@@ -173,15 +175,15 @@ build() {
 content="$(build)"
 
 if [[ -n "$OUT" ]]; then
-  # --ensure: skip the write only when the freshly-detected content is identical
-  # to what's already on disk (avoids needless rewrites/mtime churn). Detection
+  mkdir -p "$(dirname "$OUT")"
+  tmp="$(mktemp "${OUT}.XXXXXX")"
+  printf '%s\n' "$content" > "$tmp"
+  # --ensure: keep the existing file only when it is byte-identical to the freshly
+  # generated one (cmp, not "$(cat)" which strips trailing newlines). Detection
   # already ran, so this never serves stale state.
-  if [[ $ENSURE -eq 1 && -f "$OUT" && "$(cat "$OUT")" == "$content" ]]; then
-    :
+  if [[ $ENSURE -eq 1 && -f "$OUT" ]] && cmp -s "$tmp" "$OUT"; then
+    rm -f "$tmp"
   else
-    mkdir -p "$(dirname "$OUT")"
-    tmp="$(mktemp "${OUT}.XXXXXX")"
-    printf '%s\n' "$content" > "$tmp"
     mv -f "$tmp" "$OUT"
   fi
   [[ $PRINT -eq 1 ]] && printf '%s\n' "$content"

@@ -55,6 +55,14 @@ This project looks like a real project (has marker files), but does not have a \
 **Trigger phrases**: «заведи вику», «init-kb», «/init-kb», «создай базу знаний здесь», «нужна вика».
 
 Do NOT run init-kb automatically — wait for the user to ask or indicate they want it."
+    # Even without a wiki, give the session the agent-CLI roster (every session
+    # should know which CLIs exist). Print to stdout; don't create files here.
+    if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
+      _rt="$(KB_HUB="$KB_HUB_DIR" "$KB_HUB_DIR/bin/kb-cli-roster" 2>/dev/null || true)"
+      [[ -n "$_rt" ]] && HINT="$HINT
+
+$_rt"
+    fi
     python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":sys.argv[1]}}))' "$HINT"
     exit 0
   fi
@@ -92,7 +100,7 @@ parts.append(f"## Today\n{today.strftime('%A, %B %d, %Y')}")
 if roster_path:
     rf = Path(roster_path)
     if rf.exists():
-        parts.append(rf.read_text(encoding='utf-8').strip())
+        parts.append(rf.read_text(encoding='utf-8', errors='replace').strip())
 
 for name, label, cap in [
     ("README.md", "Project README", 5000),
@@ -101,7 +109,7 @@ for name, label, cap in [
 ]:
     f = k / name
     if f.exists():
-        body = f.read_text(encoding='utf-8')
+        body = f.read_text(encoding='utf-8', errors='replace')
         if len(body) > cap:
             body = body[:cap] + f"\n...(truncated, full file: {f})"
         parts.append(f"## {label}\n\n{body}")
@@ -116,14 +124,14 @@ for name, label, cap in [
 ]:
     f = k / name
     if f.exists():
-        content = f.read_text(encoding='utf-8')
+        content = f.read_text(encoding='utf-8', errors='replace')
         if len(content) > cap:
             content = content[:cap] + f"\n...(truncated, full file: {f})"
         parts.append(f"## {label}\n\n{content}")
 
 log = k / "log.md"
 if log.exists():
-    lines = log.read_text(encoding='utf-8').splitlines()
+    lines = log.read_text(encoding='utf-8', errors='replace').splitlines()
     tail = lines if len(lines) <= 80 else lines[-80:]
     parts.append("## Recent Log\n\n" + "\n".join(tail))
 
@@ -133,7 +141,7 @@ if daily_dir.exists():
         d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
         f = daily_dir / f"{d}.md"
         if f.exists():
-            body = f.read_text(encoding='utf-8').splitlines()[-60:]
+            body = f.read_text(encoding='utf-8', errors='replace').splitlines()[-60:]
             parts.append(f"## Recent Daily ({d})\n\n" + "\n".join(body))
             break
 
