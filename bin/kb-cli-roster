@@ -117,6 +117,15 @@ while IFS= read -r line; do
   if is_installed "$cands"; then installed+=("1"); else installed+=("0"); fi
 done < "$REGISTRY"
 
+# Validate fallback-of targets: each must name exactly one primary tool, else a
+# typo would silently produce a wrong/absent fallback note.
+for i in "${!names[@]}"; do
+  fb="${fallback_of[$i]}"; [[ -z "$fb" ]] && continue
+  hits=0
+  for j in "${!names[@]}"; do [[ "${names[$j]}" == "$fb" ]] && hits=$((hits+1)); done
+  (( hits == 1 )) || echo "kb-cli-roster: warning: '${names[$i]}' fallback-of '$fb' matches $hits tools in $REGISTRY" >&2
+done
+
 # Build cheatsheet.
 build() {
   echo "## Инструменты этой машины — зови сам, когда подходит"

@@ -32,8 +32,9 @@ esac
 
 # Хаб — это сам knowledge-dir без вложенного knowledge/. Триада лежит прямо в $PROJECT.
 # Отдаём python-блоку флаг через env, чтобы он не искал $PROJECT/knowledge/*.
+KB_HUB_DIR="${KB_HUB:-$HOME/knowledge}"
 HUB_MODE=0
-if [[ "$PROJECT" == "$HOME/knowledge" && -f "$PROJECT/log.md" ]]; then
+if [[ "$PROJECT" == "$KB_HUB_DIR" && -f "$PROJECT/log.md" ]]; then
   HUB_MODE=1
 fi
 
@@ -68,7 +69,6 @@ if [[ "$HUB_MODE" == "1" ]]; then
 else
   ROSTER="$PROJECT/knowledge/.active-roster.md"
 fi
-KB_HUB_DIR="${KB_HUB:-$HOME/knowledge}"
 if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
   KB_HUB="$KB_HUB_DIR" "$KB_HUB_DIR/bin/kb-cli-roster" --ensure --out "$ROSTER" >/dev/null 2>&1 || true
 fi
@@ -94,14 +94,17 @@ if roster_path:
     if rf.exists():
         parts.append(rf.read_text(encoding='utf-8').strip())
 
-for name, label in [
-    ("README.md", "Project README"),
-    ("state.md", "Project State"),
-    ("index.md", "Knowledge Index"),
+for name, label, cap in [
+    ("README.md", "Project README", 5000),
+    ("state.md", "Project State", 5000),
+    ("index.md", "Knowledge Index", 5000),
 ]:
     f = k / name
     if f.exists():
-        parts.append(f"## {label}\n\n{f.read_text(encoding='utf-8')}")
+        body = f.read_text(encoding='utf-8')
+        if len(body) > cap:
+            body = body[:cap] + f"\n...(truncated, full file: {f})"
+        parts.append(f"## {label}\n\n{body}")
 
 # Triad — coordination files every agent must see on entry.
 # Per ~/.claude/CLAUDE.md: backlog/escalations/incidents are core session context.
