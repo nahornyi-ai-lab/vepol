@@ -1,55 +1,59 @@
 #!/usr/bin/env bash
 # kb-cli-offer — at install time, OFFER the optional agent CLIs Vepol can use.
 #
-# Fail-safe by contract: NEVER blocks the Vepol install. Offers each CLI that is
-# not already present; installs the ones the user agrees to (best-effort); skips
-# the rest. After offering, the live roster (kb-cli-roster) reflects whatever the
-# user actually installed, so agents only ever advertise tools that exist.
-#
-# Non-interactive (no TTY): prints the list + how to install, installs nothing.
+# Fail-safe by contract: NEVER blocks the Vepol install. With --list (or no TTY,
+# or VEPOL_NONINTERACTIVE=1) it only prints each CLI and how to install it —
+# never prompts, never installs. Interactively (a real terminal, no --list) it
+# offers to install the ones with a known install command. After offering, the
+# live roster (kb-cli-roster) reflects whatever the user actually installed.
 #
 # Usage: kb-cli-offer            (interactive prompts when run from a terminal)
-#        kb-cli-offer --list     (just print the roster + install hints, no prompts)
+#        kb-cli-offer --list     (print CLIs + install hints, no prompts, no install)
 set -uo pipefail   # NOT -e: a failed optional install must not abort the installer
 
 C_OK=$'\033[1;32m'; C_INFO=$'\033[1;36m'; C_WARN=$'\033[1;33m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
 [[ -t 1 ]] || { C_OK=''; C_INFO=''; C_WARN=''; C_DIM=''; C_OFF=''; }
 
 LIST_ONLY=0
-[[ "${1:-}" == "--list" ]] && LIST_ONLY=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --list) LIST_ONLY=1; shift ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "kb-cli-offer: unknown arg: $1 (use --list or no args)" >&2; exit 2 ;;
+  esac
+done
 # Honor the installer's non-interactive contract: never prompt / auto-install.
 [[ "${VEPOL_NONINTERACTIVE:-0}" == "1" ]] && LIST_ONLY=1
 
-# name | detect (bare name or abs path) | what-for | install hint | auto-install cmd (empty = manual only)
+# name | detect-candidates (colon-sep; abs path or bare name) | what-for | install hint | auto-install cmd (empty = manual only)
 TOOLS=(
   "claude|claude|writes/runs code, skills, MCP, runs the project|Download the desktop app: https://claude.ai/download|"
   "codex|codex|analysis, planning, conservative second opinion, big research|npm install -g @openai/codex|npm install -g @openai/codex"
-  "agy|agy|independent second opinion, catches nuances others miss|Antigravity CLI installer (see https://antigravity.google )|"
-  "grok|grok|what's discussed on X/Reddit right now; current, blunt|Grok CLI installer (see https://x.ai )|"
-  "notebooklm|notebooklm|audio/video recaps for humans|pipx install notebooklm-py && notebooklm login|pipx install notebooklm-py"
-  "opencode|opencode|fallback when grok is unavailable; any model|OpenCode installer (see https://opencode.ai )|"
+  "agy|\$HOME/.local/bin/agy:agy|independent second opinion, catches nuances others miss|Antigravity CLI installer (see https://antigravity.google )|"
+  "grok|\$HOME/.grok/bin/grok:grok|what's discussed on X/Reddit right now; current, blunt|Grok CLI installer (see https://x.ai )|"
+  "notebooklm|\$HOME/.local/bin/notebooklm:notebooklm|audio/video recaps for humans|pipx install notebooklm-py && notebooklm login|pipx install notebooklm-py"
+  "opencode|\$HOME/.opencode/bin/opencode:opencode|fallback when grok is unavailable; any model|OpenCode installer (see https://opencode.ai )|"
 )
 
+# Detection works off the `detect` candidates (same shape rule as kb-cli-roster):
+# absolute path -> executable test; bare name -> PATH lookup; relative path ignored.
 is_present() {
-  local d="$1"
-  if [[ "$d" == */* ]]; then [[ -x "$d" ]]; else command -v "$d" >/dev/null 2>&1; fi
-}
-# Also treat known absolute fallbacks as present.
-present_any() {
-  local name="$1"
-  case "$name" in
-    agy)        is_present agy || is_present "$HOME/.local/bin/agy" ;;
-    grok)       is_present grok || is_present "$HOME/.grok/bin/grok" ;;
-    notebooklm) is_present notebooklm || is_present "$HOME/.local/bin/notebooklm" ;;
-    opencode)   is_present opencode || is_present "$HOME/.opencode/bin/opencode" ;;
-    *)          is_present "$name" ;;
-  esac
+  local candidates="$1" cand expanded
+  IFS=':' read -ra _c <<< "$candidates"
+  for cand in "${_c[@]}"; do
+    cand="$(echo "$cand" | sed 's/^ *//;s/ *$//')"; [[ -z "$cand" ]] && continue
+    expanded="${cand/#\$HOME/$HOME}"
+    if [[ "$expanded" == /* ]]; then [[ -x "$expanded" ]] && return 0
+    elif [[ "$expanded" == */* ]]; then continue
+    else command -v "$expanded" >/dev/null 2>&1 && return 0; fi
+  done
+  return 1
 }
 
 echo "${C_INFO}Agent CLIs Vepol can use (it uses whichever you install):${C_OFF}"
 for row in "${TOOLS[@]}"; do
   IFS='|' read -r name detect what hint auto <<< "$row"
-  if present_any "$name"; then
+  if is_present "$detect"; then
     echo "  ${C_OK}✓${C_OFF} ${name} — already installed (${what})"
     continue
   fi

@@ -36,20 +36,24 @@ OUT=""
 ENSURE=0
 PRINT=0
 
+# Options that take a value must actually have one; under `set -u` a bare
+# `--out` would otherwise crash with "$2: unbound variable" instead of a clean error.
+need_arg() { [[ $# -ge 2 ]] || { echo "kb-cli-roster: $1 requires a value" >&2; exit 2; }; }
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --out) OUT="$2"; shift 2 ;;
+    --out) need_arg "$@"; OUT="$2"; shift 2 ;;
     --ensure) ENSURE=1; shift ;;
-    --ttl) shift 2 ;;   # accepted for backward compat; ignored (no time-based cache)
-    --registry) REGISTRY="$2"; shift 2 ;;
+    --ttl) need_arg "$@"; shift 2 ;;   # accepted for backward compat; ignored (no time-based cache)
+    --registry) need_arg "$@"; REGISTRY="$2"; shift 2 ;;
     --print) PRINT=1; shift ;;
     -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "kb-cli-roster: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ ! -f "$REGISTRY" ]]; then
-  echo "kb-cli-roster: registry not found: $REGISTRY" >&2
+if [[ ! -f "$REGISTRY" || ! -r "$REGISTRY" ]]; then
+  echo "kb-cli-roster: registry not found or unreadable: $REGISTRY" >&2
   exit 3
 fi
 
@@ -65,9 +69,14 @@ is_installed() {
     cand="$(echo "$cand" | sed 's/^ *//;s/ *$//')"
     [[ -z "$cand" ]] && continue
     expanded="${cand/#\$HOME/$HOME}"
-    if [[ "$expanded" == */* ]]; then
+    if [[ "$expanded" == /* ]]; then
+      # absolute path candidate
       [[ -x "$expanded" ]] && return 0
+    elif [[ "$expanded" == */* ]]; then
+      # relative path candidate — cwd-dependent, ignore (registry should use abs paths or bare names)
+      continue
     else
+      # bare name candidate — PATH lookup
       command -v "$expanded" >/dev/null 2>&1 && return 0
     fi
   done
@@ -76,12 +85,18 @@ is_installed() {
 
 # Parse registry into parallel arrays.
 names=(); whens=(); installed=(); fallback_of=()
+lineno=0
 while IFS= read -r line; do
+  lineno=$((lineno+1))
   line="${line%%$'\r'}"
-  [[ -z "${line// }" ]] && continue
-  [[ "${line#\#}" != "$line" ]] && continue   # comment
+  [[ -z "${line//[[:space:]]/}" ]] && continue                 # blank (incl. tabs)
+  [[ "$(printf '%s' "$line" | sed 's/^[[:space:]]*//')" == \#* ]] && continue   # comment (incl. indented)
   IFS='|' read -ra f <<< "$line"
-  (( ${#f[@]} < 4 )) && continue
+  # A lost pipe must NOT silently drop a CLI — warn with the line number so it's visible.
+  if (( ${#f[@]} < 4 )); then
+    echo "kb-cli-roster: warning: $REGISTRY line $lineno malformed (need >=4 pipe-separated fields), skipping: $line" >&2
+    continue
+  fi
   name="$(echo "${f[0]}" | sed 's/^ *//;s/ *$//')"
   kind="$(echo "${f[1]}" | sed 's/^ *//;s/ *$//')"
   # Enforce the registry contract: warn on an unknown kind so typos/drift don't pass

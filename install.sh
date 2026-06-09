@@ -210,8 +210,10 @@ done
 # CLIs, and generate the per-machine cheatsheet that agents read at startup.
 mkdir -p "$HUB/.orchestrator"
 if [[ -f "$VEPOL_DIR/bin/cli-tools.tsv" ]]; then
-  cp "$VEPOL_DIR/bin/cli-tools.tsv" "$HUB/.orchestrator/cli-tools.tsv"
-  ok "  agent CLI registry: $HUB/.orchestrator/cli-tools.tsv"
+  # cp -n: never clobber a user who added their own CLIs to the registry.
+  if cp -n "$VEPOL_DIR/bin/cli-tools.tsv" "$HUB/.orchestrator/cli-tools.tsv" 2>/dev/null; then
+    ok "  agent CLI registry: $HUB/.orchestrator/cli-tools.tsv"
+  fi
 fi
 if [[ -x "$VEPOL_DIR/bin/kb-cli-offer" ]]; then
   # --list: detect-only, non-interactive — prints each agent CLI + its install
@@ -222,8 +224,12 @@ if [[ -x "$VEPOL_DIR/bin/kb-cli-offer" ]]; then
 fi
 if [[ -x "$HUB/bin/kb-cli-roster" ]]; then
   # KB_HUB pins the registry lookup to THIS install's hub (not a stray ~/knowledge).
-  KB_HUB="$HUB" "$HUB/bin/kb-cli-roster" --out "$HUB/.active-roster.md" >/dev/null 2>&1 || true
-  ok "  agent CLI roster generated (agents now know which CLIs are installed)"
+  # Report success only if it actually generated — don't claim a roster that isn't there.
+  if KB_HUB="$HUB" "$HUB/bin/kb-cli-roster" --out "$HUB/.active-roster.md" >/dev/null 2>&1; then
+    ok "  agent CLI roster generated (agents now know which CLIs are installed)"
+  else
+    warn "  agent CLI roster generation failed — agents fall back to AGENTS.md pointer"
+  fi
 fi
 
 # Internal Python packages — symlink directories
