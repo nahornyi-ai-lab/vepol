@@ -300,7 +300,7 @@ ok "  _template/ refreshed"
 
 # Hub-level master contract AGENTS.md + Claude adapter
 if [[ ! -f "$HUB/AGENTS.md" ]]; then
-  cp "$VEPOL_DIR/knowledge/AGENTS.md" "$HUB/AGENTS.md"
+  sed "s|__HOME__|$HOME_DIR|g" "$VEPOL_DIR/knowledge/AGENTS.md" > "$HUB/AGENTS.md"
   ok "  $HUB/AGENTS.md installed (master contract)"
 else
   warn "  $HUB/AGENTS.md already exists — not overwritten"
