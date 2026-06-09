@@ -208,15 +208,12 @@ ok "  All required prerequisites present"
 # ─────────────────────────────────────────
 say "Step 2 · Setting up knowledge hub at $HUB"
 
-if [[ ! -d "$HUB" ]]; then
-  mkdir -p "$HUB"/{bin,raw,concepts,people,companies,solutions,projects,personal,daily,sources}
-  ok "  created $HUB"
-else
-  ok "  $HUB already exists — preserving"
-fi
-
-mkdir -p "$HUB/_template/knowledge"
-mkdir -p "$HUB/.orchestrator"
+HUB_EXISTED=1; [[ -d "$HUB" ]] || HUB_EXISTED=0
+# Always (re)create managed dirs — an existing hub may be missing bin/ (e.g. a
+# partial/older install), and the bin symlinks below would otherwise abort under set -e.
+mkdir -p "$HUB"/{bin,raw,concepts,people,companies,solutions,projects,personal,daily,sources}
+mkdir -p "$HUB/_template/knowledge" "$HUB/.orchestrator"
+if [[ $HUB_EXISTED -eq 1 ]]; then ok "  $HUB already exists — preserving"; else ok "  created $HUB"; fi
 
 # Symlink bin scripts (overwrite — these are managed by repo)
 for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki; do
@@ -250,26 +247,16 @@ if [[ -x "$HUB/bin/kb-cli-roster" ]]; then
   fi
 fi
 
-# Internal Python packages — symlink directories
-if [[ -d "$VEPOL_DIR/bin/_kb_backlog" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/_kb_backlog" "$HUB/bin/_kb_backlog"
-fi
-if [[ -d "$VEPOL_DIR/bin/_kb_board" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/_kb_board" "$HUB/bin/_kb_board"
-fi
-if [[ -d "$VEPOL_DIR/bin/_kb_people" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/_kb_people" "$HUB/bin/_kb_people"
-fi
-if [[ -d "$VEPOL_DIR/bin/_kb_mcp" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/_kb_mcp" "$HUB/bin/_kb_mcp"
-fi
-if [[ -d "$VEPOL_DIR/bin/_kb_scanner" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/_kb_scanner" "$HUB/bin/_kb_scanner"
-fi
-# Prompt templates
-if [[ -d "$VEPOL_DIR/bin/templates" ]]; then
-  ln -sfn "$VEPOL_DIR/bin/templates" "$HUB/bin/templates"
-fi
+# Internal Python packages + prompt templates — symlink directories. If an older
+# install left a REAL directory at a managed target, replace it: `ln -sfn` onto an
+# existing real dir would create the link nested inside it, not replace it.
+for pkg in _kb_backlog _kb_board _kb_people _kb_mcp _kb_scanner templates; do
+  [[ -d "$VEPOL_DIR/bin/$pkg" ]] || continue
+  if [[ -d "$HUB/bin/$pkg" && ! -L "$HUB/bin/$pkg" ]]; then
+    rm -rf "$HUB/bin/$pkg"   # managed target ($HUB/bin/$pkg) — stale copied install
+  fi
+  ln -sfn "$VEPOL_DIR/bin/$pkg" "$HUB/bin/$pkg"
+done
 ok "  bin/ symlinks point at $VEPOL_DIR/bin/"
 
 if [[ -L "$HUB/orchestrator-seed" || ! -e "$HUB/orchestrator-seed" ]]; then
@@ -373,8 +360,10 @@ say "Step 3 · Installing global methodology (~/.claude/CLAUDE.md)"
 
 mkdir -p "$HOME_DIR/.claude/.vepol"
 
-# Always overwrite the managed copy (owned by repo)
-cp "$VEPOL_DIR/claude/CLAUDE.md" "$HOME_DIR/.claude/.vepol/CLAUDE.managed.md"
+# Always overwrite the managed copy (owned by repo). Render __HOME__ placeholders
+# so the include path (@__HOME__/knowledge/AGENTS.md) resolves to a real path
+# instead of being copied verbatim.
+sed "s|__HOME__|$HOME_DIR|g" "$VEPOL_DIR/claude/CLAUDE.md" > "$HOME_DIR/.claude/.vepol/CLAUDE.managed.md"
 ok "  managed copy: $HOME_DIR/.claude/.vepol/CLAUDE.managed.md"
 
 INCLUDE_BEGIN="<!-- BEGIN VEPOL MANAGED — do not edit. Source: ~/.claude/.vepol/CLAUDE.managed.md -->"
