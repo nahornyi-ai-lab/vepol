@@ -84,6 +84,13 @@ while IFS= read -r line; do
   (( ${#f[@]} < 4 )) && continue
   name="$(echo "${f[0]}" | sed 's/^ *//;s/ *$//')"
   kind="$(echo "${f[1]}" | sed 's/^ *//;s/ *$//')"
+  # Enforce the registry contract: warn on an unknown kind so typos/drift don't pass
+  # silently. Detection below is candidate-shape based and handles both kinds, so an
+  # unknown kind still falls back to generic detection rather than breaking the run.
+  case "$kind" in
+    which-any|path-any) ;;
+    *) echo "kb-cli-roster: warning: unknown kind '$kind' for '$name' in $REGISTRY (using generic detection)" >&2 ;;
+  esac
   cands="$(echo "${f[2]}" | sed 's/^ *//;s/ *$//')"
   when="$(echo "${f[3]}" | sed 's/^ *//;s/ *$//')"
   fb=""
@@ -130,7 +137,13 @@ build() {
   if (( ${#missing[@]} > 0 )); then
     echo "Не установлено (не зови): ${missing[*]}."
   fi
-  echo "Правило: инструмент может требовать логина; если вызов упал или вернул пусто — это сбой, не «нет результата». Точные вызовы/флаги: ${MATRIX}."
+  # Reference the deep matrix only if it actually exists on this machine — otherwise
+  # a fresh client (no matrix shipped, or a custom hub) would get a dead pointer.
+  if [[ -f "$MATRIX" ]]; then
+    echo "Правило: инструмент может требовать логина; если вызов упал или вернул пусто — это сбой, не «нет результата». Точные вызовы/флаги: ${MATRIX}."
+  else
+    echo "Правило: инструмент может требовать логина; если вызов упал или вернул пусто — это сбой, не «нет результата», переключись на другой инструмент."
+  fi
 }
 
 content="$(build)"

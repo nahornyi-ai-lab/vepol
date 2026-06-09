@@ -68,8 +68,9 @@ if [[ "$HUB_MODE" == "1" ]]; then
 else
   ROSTER="$PROJECT/knowledge/.active-roster.md"
 fi
-if [[ -x "$HOME/knowledge/bin/kb-cli-roster" ]]; then
-  "$HOME/knowledge/bin/kb-cli-roster" --ensure --out "$ROSTER" >/dev/null 2>&1 || true
+KB_HUB_DIR="${KB_HUB:-$HOME/knowledge}"
+if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
+  KB_HUB="$KB_HUB_DIR" "$KB_HUB_DIR/bin/kb-cli-roster" --ensure --out "$ROSTER" >/dev/null 2>&1 || true
 fi
 
 python3 - "$PROJECT" "$HUB_MODE" "$ROSTER" <<'PY'
