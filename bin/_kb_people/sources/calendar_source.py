@@ -48,7 +48,7 @@ _RESOURCE_CAL_RE = re.compile(r"resource\.calendar\.google\.com$")
 # Why this set: real-run audit on 2026-05-02 surfaced
 # meet1@zezman.com.ua, schedule@mint.greenhouse.io, assistant@zezman.ua,
 # and r@sapienta.cloud — all created as drafts; none represented a
-# human Vadim could ever follow up with. Filtering these at sanitize
+# human owner could ever follow up with. Filtering these at sanitize
 # is preferable to relying on dedup's draft flag, because drafts
 # accumulate and clutter `kb-contact due` / search.
 #

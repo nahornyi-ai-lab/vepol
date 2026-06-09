@@ -491,7 +491,7 @@ PYEOF
     echo ""
     echo "  Security impact: in this state, an injected prompt can trigger arbitrary"
     echo "  Bash/Gmail/Telegram tool calls without your approval. See:"
-    echo "    vepol-dev/knowledge/decisions/security-model-2026-05-22.md § C-01"
+    echo "    SECURITY.md (threat model: prompt injection × bypass mode)"
     echo ""
     echo "  Migration will:"
     echo "    1. snapshot to ~/.claude/settings.json.bak-<timestamp> (mode preserved)"

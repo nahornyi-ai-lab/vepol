@@ -35,7 +35,8 @@ def _norm_target(surface_target: str) -> str:
 
 def _is_hub_writer(surface_target: str) -> bool:
     target = _norm_target(surface_target)
-    return target.startswith("/Users/macbook/knowledge/") or target == "/Users/macbook/knowledge"
+    hub = str(pathlib.Path.home() / "knowledge")
+    return target.startswith(hub + "/") or target == hub
 
 
 def banned_reason(surface_target: str) -> str | None:

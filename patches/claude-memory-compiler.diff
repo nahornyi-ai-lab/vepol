@@ -180,7 +180,7 @@ index 0000000..b11aaec
 +"""Token-shape redaction. Applied to all transcript writes (C-06, extended).
 +
 +Pattern set v2: 11 specific shapes + 1 generic. See
-+vepol-dev/knowledge/sources/p0-6-extended-draft-2026-05-23.md for rationale
++the Vepol security ledger (security/scanner-signatures-ledger.md) for rationale
 +and benchmark.
 +"""
 +from __future__ import annotations

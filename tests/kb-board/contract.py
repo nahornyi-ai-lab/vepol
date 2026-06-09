@@ -575,7 +575,7 @@ def cli_progress_updates_metadata() -> None:
                 "--field",
                 "priority=P0",
                 "--field",
-                "owner=vepol-dev",
+                "owner=example-project",
                 "--json",
             ],
             text=True,
@@ -586,7 +586,7 @@ def cli_progress_updates_metadata() -> None:
         board = _parse(path.read_text(encoding="utf-8"))
         task = _task(board, "pi-backlog")
         assert _field(task, "priority") == "P0"
-        assert _field(task, "owner") == "vepol-dev"
+        assert _field(task, "owner") == "example-project"
         _check(path.read_text(encoding="utf-8"))
 
 

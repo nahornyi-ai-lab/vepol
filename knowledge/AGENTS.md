@@ -16,9 +16,9 @@ Telegram user mention token (`at` sign + bot username, for example `user_<role>_
    - **Глобальные категории хаба**: `~/knowledge/{concepts,people,companies,solutions}/` — то, что пересекает проекты.
 3. **Схема (Universal Agent Entrypoint, 2026-05-19; Antigravity CLI rollout 2026-05-21)** — правила:
    - **Canonical, vendor-neutral**: `~/knowledge/AGENTS.md` (этот файл) — hub-level контракт; `<project>/AGENTS.md` — project overlay со специфичными правилами. Полная политика живёт здесь, не в runtime-файлах.
-   - **Adapter files (тонкие, ≤ 30 строк)**: `CLAUDE.md` (Claude Code), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, через `read: AGENTS.md`). Каждый — bootloader, который только указывает на канонический `AGENTS.md` и держит **только** runtime-specific caveats. Не отдельная политика. **Antigravity CLI (`agy`)** читает project `AGENTS.md` нативно при запуске с `--add-dir <path>` (verified 2026-05-22 marker-test: agy v1.0.0 с `--add-dir` pre-loads и `AGENTS.md`, и `GEMINI.md` из указанной директории в системный промпт через cascadeManager; без `--add-dir` — workspace игнорируется, грузится только global `~/.gemini/GEMINI.md`). Для удобства — shell-функция `agy-here() { /Users/macbook/.local/bin/agy --add-dir "$PWD" "$@"; }` в `~/.zshrc`. Project `GEMINI.md` adapter избыточен (canonical AGENTS.md загружается так же), удалены 2026-05-21.
+   - **Adapter files (тонкие, ≤ 30 строк)**: `CLAUDE.md` (Claude Code), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, через `read: AGENTS.md`). Каждый — bootloader, который только указывает на канонический `AGENTS.md` и держит **только** runtime-specific caveats. Не отдельная политика. **Antigravity CLI (`agy`)** читает project `AGENTS.md` нативно при запуске с `--add-dir <path>` (verified 2026-05-22 marker-test: agy v1.0.0 с `--add-dir` pre-loads и `AGENTS.md`, и `GEMINI.md` из указанной директории в системный промпт через cascadeManager; без `--add-dir` — workspace игнорируется, грузится только global `~/.gemini/GEMINI.md`). Для удобства — shell-функция `agy-here() { $HOME/.local/bin/agy --add-dir "$PWD" "$@"; }` в `~/.zshrc`. Project `GEMINI.md` adapter избыточен (canonical AGENTS.md загружается так же), удалены 2026-05-21.
    - **Identity layer (отдельный артефакт)**: `<project>/knowledge/agents/agent-card.md` — карточка роли проекта. Не заменяет AGENTS.md, дополняет.
-   - **Полная спецификация** rollout'а — `vepol-dev/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Раскатано 2026-05-19. Migration Gemini CLI → Antigravity CLI (`agy`) — `vepol-dev/knowledge/decisions/antigravity-cli-migration-2026-05-21.md` (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18). Guard — `kb-doctor agent-entrypoint --strict`.
+   - **Полная спецификация** rollout'а — `example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Раскатано 2026-05-19. Migration Gemini CLI → Antigravity CLI (`agy`) — `example-project/knowledge/decisions/antigravity-cli-migration-2026-05-21.md` (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18). Guard — `kb-doctor agent-entrypoint --strict`.
 
 ## Структура хаба
 
@@ -94,7 +94,7 @@ Rules:
 
 ## Universal Agent Entrypoint
 
-Канонический контракт принят 2026-05-19 (`vepol-dev/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md`, cross-review у Codex/Claude/Gemini), раскатан там же (`...-rollout-spec.md`, `...-implementation-plan-2026-05-19.md`). Этот раздел — мастер-формулировка для машины.
+Канонический контракт принят 2026-05-19 (`example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md`, cross-review у Codex/Claude/Gemini), раскатан там же (`...-rollout-spec.md`, `...-implementation-plan-2026-05-19.md`). Этот раздел — мастер-формулировка для машины.
 
 ### Canonical vs adapter
 
@@ -224,7 +224,7 @@ Acceptance — ответ должен содержать все эти подс
 | Поле | Тип | Назначение |
 |------|-----|-----------|
 | `name` | string (slug) | id проекта/роли в `knowledge/agents/`, lowercase-kebab, совпадает с `<slug>` или `<slug>-<role>` |
-| `display_name` | string | человекочитаемое имя роли («vepol-dev orchestrator», не «Claude Code в vepol-dev») |
+| `display_name` | string | человекочитаемое имя роли («example-project orchestrator», не «Claude Code в example-project») |
 | `version` | string | semver карточки, **bump patch при любой правке frontmatter** |
 | `description` | string | **routing-trigger**, начинается с глагола («Use proactively when…»). Это не лейбл. |
 | `role` | string | позиция в команде (одно предложение) |

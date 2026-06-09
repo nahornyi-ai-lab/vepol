@@ -58,7 +58,7 @@ def _infer_slug_from_username(bot_username: str, projects_dir: Path) -> str | No
 
     Heuristics, in order of confidence:
       1. Strip common prefixes/suffixes, match a projects/<slug> symlink.
-         e.g. `<your_handle>_<slug>_bot` → try `vepol_dev`, `vepol-dev`.
+         e.g. `<your_handle>_<slug>_bot` → try `my_project`, `my-project`.
       2. Try slug == username minus `_bot` suffix entirely.
       3. Try slug derived from any infix tokens.
 
@@ -72,7 +72,7 @@ def _infer_slug_from_username(bot_username: str, projects_dir: Path) -> str | No
     u = bot_username.lower().removesuffix("_bot")
     candidates: list[str] = []
     # Strip personal prefix tokens (first underscore-separated word)
-    # e.g. "<your_handle>_<slug>" → ["vepol_dev"]; "<another_handle>_<slug>" → ["landing"]
+    # e.g. "<your_handle>_<slug>" → ["my_project"]; "<another_handle>_<slug>" → ["landing"]
     parts = u.split("_")
     for i in range(len(parts)):
         tail = "_".join(parts[i:])

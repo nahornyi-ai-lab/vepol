@@ -277,7 +277,7 @@ def test_policy_refusals() -> None:
 
         hub_target = proposals.validate_proposal_file(
             valid_proposal(knowledge, proposal_id="prop-hub-2026-05-23-001", risk_tier=1,
-                           target="/Users/macbook/knowledge/log.md")
+                           target=str(pathlib.Path.home() / "knowledge/log.md"))
         )
         res = policy.validate_apply_request(knowledge, hub_target, evaluator=evaluator, scanner_available=False)
         assert_(not res.allowed and "hub-writer" in res.reason, "hub-writer never exempt from scanner")

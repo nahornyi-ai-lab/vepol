@@ -284,7 +284,7 @@ preflight has TWO layers:
 
 **Layer 2 — per-tool canaries** (one per shipped MCP source):
 - Each module ships its own canary that **attempts a real call**
-  to its target MCP tool. Per Vadim's caution: do not trust the
+  to its target MCP tool. Per the maintainer's caution: do not trust the
   model's self-report of "yes, the tool exists" — the model can
   hallucinate a tool list. Only attempt-and-observe-failure-mode
   is deterministic.

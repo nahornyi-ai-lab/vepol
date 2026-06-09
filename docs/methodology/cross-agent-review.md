@@ -8,12 +8,13 @@ applies-to: [non-trivial-plans, design-decisions, refactors]
 
 # Cross-Agent Review
 
-The quality gate Vepol applies before any non-trivial change goes
-into implementation: **a non-trivial plan is reviewed by an
-independent agent before implementation**. Concerns get addressed
-before code is written. This is not optional ceremony — it's the
-mechanism that catches bias and tunnel vision that single-agent
-flows produce.
+The quality gates Vepol applies around implementation: **a material
+plan is reviewed by independent agents before code is written** (the
+spec gate), and for non-trivial work **the resulting diff is reviewed
+again before it ships** (the implementation-review gate below).
+Concerns get addressed at the spec stage and again at the diff stage.
+This is not optional ceremony — it's the mechanism that catches bias
+and tunnel vision that single-agent flows produce.
 
 ## When it applies
 

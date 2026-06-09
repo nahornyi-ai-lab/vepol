@@ -79,7 +79,7 @@ Telegram = новый канал связи поверх существующе�
 
 ```
 Telegram Group "<your_group>" (private, invite-only)
-   ├─ @vadim                      (human, также Telethon observer)
+   ├─ @owner                      (human, также Telethon observer)
    ├─ @demo_hub_bot              (root)
    ├─ @demo_grants_bot
    ├─ @demo_winox_bot
@@ -279,7 +279,7 @@ Multibot агенты участвуют в existing `kb-orchestrator-cycle retr
 2. **Parent агенты** (leadgen, family) собирают reports children + свои observations → rolled-up в `<parent>/knowledge/reports/`.
 3. **Hub** агрегирует все root reports → `~/knowledge/daily/YYYY-MM-DD.md` + Telegram summary.
 
-Phase 1: hub summary летит в DM `@firstmindbot` как сейчас. Publish в группу `<your_group>` — Phase 2 opt-in.
+Phase 1: hub summary летит в DM `@your_hub_bot` как сейчас. Publish в группу `<your_group>` — Phase 2 opt-in.
 
 ## 7.11 Event schema (Phase 1 contract)
 
@@ -357,7 +357,7 @@ Phase 1: hub summary летит в DM `@firstmindbot` как сейчас. Publi
 - MCP server hot-pooling (можно в Phase 2 если latency painful)
 - Dynamic runtime allowlist UI (enforcement Phase 1; CLI/UI для editing — Phase 2)
 - Daily retro publish в группу (DM only Phase 1)
-- Replacing `@firstmindbot` (он на canonical `claude --channels`, отдельный канал, не блокирует multibot)
+- Replacing `@your_hub_bot` (он на canonical `claude --channels`, отдельный канал, не блокирует multibot)
 - Direct bot-to-bot DM делегация (через group для visibility в Phase 1)
 
 ## 9. Locked decisions
@@ -485,12 +485,12 @@ Bot FAQ ещё не переписан под 10.0 (lag доки). Актуал�
 -  `kb-deactivate-agent <slug>` — revoke token через @BotFather (manual), kick из группы через user-account или manual, `enabled: false` в YAML. Bot identity сохраняется как historical.
 
 **Bot tokens:**
--  storage `~/.claude/channels/bots/<slug>.env` (chmod 600), single line `BOT_TOKEN=...`. Identical pattern к `@firstmindbot` setup.
+-  storage `~/.claude/channels/bots/<slug>.env` (chmod 600), single line `BOT_TOKEN=...`. Identical pattern к `@your_hub_bot` setup.
 
 **Telethon:**
 -  Conflict с the Telethon stack pattern над phone-account. Recommendation: отдельная session file для supervisor (`~/.orchestrator/multibot-supervisor.session`); empirical test 24h в parallel с the Telethon stack pattern до production.
 -  First-time auth — interactive verification code. CLI `kb-multibot-setup --auth` запускается один раз manually, session cached.
--  Session invalidation — detect + alarm the operator через DM `@firstmindbot` + supervisor exits gracefully; LaunchAgent retry с throttle.
+-  Session invalidation — detect + alarm the operator через DM `@your_hub_bot` + supervisor exits gracefully; LaunchAgent retry с throttle.
 
 **DM vs group:**
 -  Hybrid Telethon + Bot API. Уточнение по visibility:
@@ -504,7 +504,7 @@ Bot FAQ ещё не переписан под 10.0 (lag доки). Актуал�
 -  `@triggering_user` mention fallback when no username — используем reply_to_message_id всегда (надёжный); mention добавляется только если username существует.
 
 **Voice:**
--  Voice в DM боту — транскрипция через local Whisper, далее text-context-spawn (как сейчас работает @firstmindbot).
+-  Voice в DM боту — транскрипция через local Whisper, далее text-context-spawn (как сейчас работает @your_hub_bot).
 -  Voice в группе с @mention — supervisor транскрибирует до spawn'а, passes текст в prompt.
 
 **Catchup:**
@@ -534,7 +534,7 @@ Bot FAQ ещё не переписан под 10.0 (lag доки). Актуал�
 -  Out of scope Phase 1. Если latency painful — Phase 2.
 
 **Retro publish:**
--  Phase 1 — daily summary в DM `@firstmindbot` как сейчас. Группа — opt-in Phase 2.
+-  Phase 1 — daily summary в DM `@your_hub_bot` как сейчас. Группа — opt-in Phase 2.
 -  Hub bot identity для group publish (Phase 2) — recommend `@demo_hub_bot` (root parent).
 
 **Trivials:**
