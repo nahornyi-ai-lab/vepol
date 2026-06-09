@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pathlib
 from dataclasses import dataclass
 from typing import Any
@@ -35,7 +36,8 @@ def _norm_target(surface_target: str) -> str:
 
 def _is_hub_writer(surface_target: str) -> bool:
     target = _norm_target(surface_target)
-    hub = str(pathlib.Path.home() / "knowledge")
+    # Same hub resolution as _kb_backlog/_kb_multibot: KB_HUB overrides ~/knowledge.
+    hub = os.environ.get("KB_HUB", str(pathlib.Path.home() / "knowledge")).rstrip("/")
     return target.startswith(hub + "/") or target == hub
 
 
