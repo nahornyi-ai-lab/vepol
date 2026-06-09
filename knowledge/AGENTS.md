@@ -299,6 +299,21 @@ Acceptance — ответ должен содержать все эти подс
 - Новый проект через `new-wiki` → `knowledge/agents/_example.md` создаётся автоматически. Первый агент при старте сессии видит «карточки нет» → копирует `_example.md` → `agent-card.md`, заполняет под проект, делает commit-в-вику.
 - Существующий проект без карточки → агент при первой содержательной задаче спрашивает: «Завести `agent-card.md` сейчас?». Если да — заполняет; если нет — отмечает в `backlog.md`.
 
+## Development Loop
+
+Единый процесс для **любого** агента (Claude Code / Codex / Antigravity / любой будущий) при новой разработке. Канон — [`vepol-prep/docs/methodology/development-loop.md`](https://github.com/nahornyi-ai-lab/vepol/blob/main/docs/methodology/development-loop.md); тут — компакт, которому агенты следуют нативно из этого файла. Claude-скилл `vepol-develop` — тонкий адаптер на этот же процесс.
+
+0. **Scope + Definition of Done.** Классифицировать работу и записать что значит «done» (acceptance + как проверим). *Trivial* (опечатка/док, bump зависимости, один файл, blast radius=0) → пропустить фазы 1 и 4, строка `research | skipped | trivial` в `log.md`, но всё равно верифицировать. *Non-trivial* (>~30 мин, новая фича/зависимость/инфра, cross-subsystem, трудно откатить, security/licensing/публичное) → полный loop.
+1. **Research-first (reuse-or-build).** Найти что уже есть для переиспользования/копирования (KB, другие проекты, мир). Фан-аут на агентов **только для реально независимых вопросов** (`grok` — когда нужен текущий X/Reddit). Запись: `candidates / decision: reuse|adapt|build / why`. Не строить то, что есть.
+2. **TRIZ-дизайн** — контрадикция → ИКР → разрешение (`triz-for-design.md`).
+3. **Спецификация** до кода → `knowledge/decisions/`, с acceptance и failure modes (`spec-driven-workflow.md`).
+4. **Cross-agent review — ≥2 НЕЗАВИСИМЫХ ревьюера, до человека.** Только материальные решения (архитектура/зависимость/миграция/security/публичный артефакт/методология/крупная ревизия). Ревьюеры исключают автора (Claude писал → Codex+agy). Layer 1 (направление) → Layer 2 (детали). Каждое замечание — учесть или аргументированно отбить. К человеку — только после двух. Ревьюер недоступен → запись в `log.md` + эскалация с `[Single-Agent Fallback: <reason>]`, не молчать. (`cross-agent-review.md`)
+5. **Тесты → имплементация.** Red → green → ревизии. Маленькие проверяемые шаги. Пустой/упавший вывод = провал, не «нет результата».
+6. **KB write-back в файлы, не в память.** decision/spec → `knowledge/decisions/`; факты → `sources/`/`concepts/`/`solutions/`/`state.md`/`strategies.md`; строка → `log.md`. Память лишь зеркалит то, что уже в файле.
+7. **Verify + close.** Тесты/build/lint + `kb-doctor` (нет свежих P0/P1), подтвердить КАЖДЫЙ acceptance-критерий реальным выводом, затем `kb-board close ... --claim-id`. Evidence до заявления «готово».
+
+**Task-board триггер (enforcement для не-Claude):** перед переводом задачи в `In Progress` агент обязан убедиться, что спека есть в `knowledge/decisions/` и (для материальной работы) прошла ≥2-агентное ревью; иначе первая подзадача — написать спеку. `agy` запускать через `agy --add-dir "$PWD"`, чтобы он читал проектный `AGENTS.md`.
+
 ## Операции
 
 ### Ingest — положить новый источник

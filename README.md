@@ -295,6 +295,7 @@ These live in [`docs/methodology/`](docs/methodology/):
 
 ![Vepol methodology — five-step working principle](docs/visuals/vepol-methodology.png)
 
+- **[Development loop](docs/methodology/development-loop.md)** — the single process any agent follows for new work (research-first → TRIZ → spec → ≥2-agent review → tests → write-back → verify)
 - **[Orchestrated knowledge base](docs/methodology/orchestrated-knowledge-base.md)** — root concept (Karpathy LLM Wiki + 7 extensions)
 - **[KB authoring discipline](docs/methodology/kb-authoring-discipline.md)** — 8 rules to avoid false-canonical content
 - **[KB freshness loop](docs/methodology/kb-freshness-loop.md)** — how reads stay current
