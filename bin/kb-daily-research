@@ -958,12 +958,14 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
         return 0
 
     if not text_only and os.environ.get("KB_PROCESS_BACKGROUND") == "1":
+        # A refused background run makes no NotebookLM call, so it must not
+        # consume the full-mode quota cap (`attempts`) either.
         error = "background NotebookLM run refused (use --text-only)"
         manifest.update({
             "date": date_iso,
             "mode": "notebooklm_audio",
             "status": "failed",
-            "attempts": int(manifest.get("attempts") or 0) + 1,
+            "background_refusals": int(manifest.get("background_refusals") or 0) + 1,
             "last_attempt_at": now_iso(),
             "packet_path": rel(packet),
             "error": error,
@@ -975,10 +977,15 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     topic, selection_source, rationale, focus_project = choose_topic(cfg)
     source_mode = (cfg.get("source_mode") or "curated").strip().lower()
     research_mode = notebooklm_research_mode(cfg)
+    # Separate counters per mode: `attempts` is the NotebookLM-quota cap and
+    # only full-mode runs may consume it. Text-only failures count in
+    # `text_attempts` so a day of failed digest deliveries cannot lock a
+    # later explicit full-mode run out of NotebookLM it never touched.
+    attempts_key = "text_attempts" if text_only else "attempts"
     manifest.update({
         "date": date_iso,
         "status": manifest.get("status") or "started",
-        "attempts": int(manifest.get("attempts") or 0) + 1,
+        attempts_key: int(manifest.get(attempts_key) or 0) + 1,
         "last_attempt_at": now_iso(),
         "topic": topic,
         "selection_source": selection_source,

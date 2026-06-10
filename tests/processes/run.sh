@@ -529,6 +529,38 @@ unset KB_NOTEBOOKLM_BIN KB_DAILY_RESEARCH_COLLECTOR_FIXTURE
   && ok "retry cap: fired never set without delivery" \
   || bad "retry cap: fired never set without delivery"
 
+# Text-only failures must not consume the full-mode NotebookLM retry cap:
+# after repeated failed deliveries, an explicit manual full-mode run (the
+# only path allowed to call NotebookLM) must still proceed.
+HUB=$(new_hub capisolation)
+mknotebooklm "$HUB"; mkchannel "$HUB" 3   # failing channel
+for _ in 1 2 3; do
+  KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder" \
+    KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" KB_PROCESS_OUTPUTS="telegram,file" \
+    "$PY" "$BIN/kb-daily-research" --text-only --date "$TODAY" >/dev/null 2>&1
+done
+cat > "$HUB/bin/notebooklm-good" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-good-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_full"}\n';;
+  source) printf '{"source_id":"s_full"}\n';;
+  generate) printf '{"artifact_id":"art_full"}\n';;
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-good"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+RC_FULL=$?
+[[ "$RC_FULL" -eq 0 ]] && ok "text-only failures do not exhaust full-mode retry cap" \
+  || bad "text-only failures do not exhaust full-mode retry cap (rc=$RC_FULL)"
+grep -q '"artifact_id": "art_full"' "$HUB/.orchestrator/daily-research-$TODAY.json" 2>/dev/null \
+  && ok "manual full run completed with artifact after text failures" \
+  || bad "manual full run completed with artifact after text failures"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 
