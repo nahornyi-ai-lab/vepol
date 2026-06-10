@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""kb-daily-research — one daily topic research report via NotebookLM."""
+"""kb-daily-research — daily research packets, text digests, or NotebookLM audio."""
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import fcntl
+import html
 import json
 import os
 import pathlib
@@ -13,6 +14,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 
@@ -23,16 +28,55 @@ ORCH = HUB / ".orchestrator"
 LOG = HUB / "logs" / "daily-research.log"
 
 MAX_ATTEMPTS_DEFAULT = 3
+MAX_SOURCES_DEFAULT = 12
+
+RADAR_TOPIC = (
+    "AI-agent world radar: current AI-agent, coding-agent, MCP, agent-runtime, "
+    "and frontier-lab news worth tracking"
+)
+
+WATCHLIST = [
+    "Andrej Karpathy",
+    "Ilya Sutskever / Safe Superintelligence",
+    "OpenAI Codex / agents",
+    "Anthropic Claude Code / Claude agents / MCP",
+    "Google DeepMind / Gemini agents",
+    "Microsoft / GitHub coding agents",
+    "Hugging Face / Papers with Code",
+    "credible open-source agent projects",
+]
+
+RADAR_KEYWORDS = (
+    "agent",
+    "agents",
+    "agentic",
+    "coding agent",
+    "claude code",
+    "codex",
+    "mcp",
+    "tool use",
+    "computer use",
+    "autonomous",
+    "karpathy",
+    "sutskever",
+    "safe superintelligence",
+)
+
+LOW_SIGNAL_COMMUNITY = re.compile(
+    r"\b(banned|account|meme|aged like|fine wine|jailbreak|nsfw|rug-pulled|shit)\b",
+    re.IGNORECASE,
+)
 
 
 DEFAULT_CONFIG = {
-    "enabled": "true",
     "focus_project": "auto",
-    "mode": "auto",
+    "mode": "ai_agents_radar",
     "topic_override": "",
     "language": "ru",
     "research_mode": "deep",
+    "source_mode": "curated",
     "max_attempts": str(MAX_ATTEMPTS_DEFAULT),
+    "max_sources": str(MAX_SOURCES_DEFAULT),
 }
 
 
@@ -97,9 +141,18 @@ def write_config(cfg: dict[str, str]) -> None:
     merged.update({k: str(v) for k, v in cfg.items()})
     lines = [
         "# Vepol daily research configuration.",
-        "# Change topic_override to pin a topic; clear it for auto-topic.",
+        "# Default mode is ai_agents_radar; set topic_override for a one-topic deep dive.",
     ]
-    for key in ("enabled", "focus_project", "mode", "topic_override", "language", "research_mode", "max_attempts"):
+    for key in (
+        "focus_project",
+        "mode",
+        "topic_override",
+        "language",
+        "research_mode",
+        "source_mode",
+        "max_attempts",
+        "max_sources",
+    ):
         val = merged.get(key, "")
         if val == "":
             lines.append(f'{key}: ""')
@@ -126,10 +179,6 @@ NOTEBOOKLM_BIN = resolve_notebooklm_bin()
 
 def packet_path(date_iso: str) -> pathlib.Path:
     return REPORTS / f"daily-research-notebooklm-brief-{date_iso}.md"
-
-
-def audio_path(date_iso: str) -> pathlib.Path:
-    return REPORTS / f"daily-research-audio-{date_iso}.mp3"
 
 
 def manifest_path(date_iso: str) -> pathlib.Path:
@@ -172,11 +221,40 @@ def read_text(path: pathlib.Path, limit: int = 5000) -> str:
     return path.read_text(encoding="utf-8", errors="replace")[:limit]
 
 
+def config_int(cfg: dict[str, str], key: str, default: int) -> int:
+    try:
+        return max(0, int(cfg.get(key) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def notebooklm_research_mode(cfg: dict[str, str]) -> str:
+    mode = (cfg.get("research_mode") or "deep").strip().lower()
+    return mode if mode in {"fast", "deep"} else "deep"
+
+
+def is_radar_mode(cfg: dict[str, str], selection_source: str) -> bool:
+    return (
+        selection_source == "ai_agents_radar"
+        and not cfg.get("topic_override", "").strip()
+        and (cfg.get("source_mode") or "curated").strip().lower() == "curated"
+    )
+
+
 def choose_topic(cfg: dict[str, str]) -> tuple[str, str, str, str]:
     slug = resolve_focus_project(cfg)
     override = cfg.get("topic_override", "").strip()
     if override:
         return override, "override", "topic_override from personal/daily-research.yaml", slug
+
+    mode = (cfg.get("mode") or "ai_agents_radar").strip().lower()
+    if mode == "ai_agents_radar":
+        return (
+            RADAR_TOPIC,
+            "ai_agents_radar",
+            "default daily AI-agent world radar",
+            slug,
+        )
 
     p = project_path(slug)
     backlog = read_text(p / "backlog.md", limit=12000)
@@ -311,8 +389,519 @@ Vepol — локальная Markdown-first система памяти и ор�
 """
 
 
-def already_completed(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
-    return manifest.get("status") == "completed" and audio.is_file() and audio.stat().st_size > 0
+def keyword_match(text: str) -> bool:
+    low = text.lower()
+    return any(term in low for term in RADAR_KEYWORDS)
+
+
+def http_get_text(url: str, timeout: int = 12) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "kb-daily-research/1.0",
+            "Accept": "application/json, application/xml, text/xml, text/html;q=0.9, */*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def http_get_json(url: str, timeout: int = 12) -> Any:
+    return json.loads(http_get_text(url, timeout=timeout))
+
+
+def clean_text(text: Any, limit: int = 220) -> str:
+    s = html.unescape(str(text or ""))
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:limit]
+
+
+def candidate(
+    title: str,
+    url: str,
+    source_type: str,
+    score: int,
+    date: str = "",
+    reason: str = "",
+    collector: str = "",
+) -> dict[str, Any]:
+    return {
+        "title": clean_text(title, limit=180),
+        "url": str(url).strip(),
+        "source_type": source_type,
+        "score": int(score),
+        "date": str(date or ""),
+        "reason": clean_text(reason, limit=240),
+        "collector": collector,
+    }
+
+
+def load_fixture_candidates() -> list[dict[str, Any]]:
+    fixture = os.environ.get("KB_DAILY_RESEARCH_COLLECTOR_FIXTURE", "").strip()
+    if not fixture:
+        return []
+    path = pathlib.Path(fixture)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    out = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title", "")
+        url = item.get("url", "")
+        if title and url:
+            out.append(candidate(
+                title=title,
+                url=url,
+                source_type=item.get("source_type", "community"),
+                score=int(item.get("score") or 0),
+                date=item.get("date", ""),
+                reason=item.get("reason", "fixture source"),
+                collector=item.get("collector", "fixture"),
+            ))
+    return out
+
+
+def collect_hn_candidates() -> list[dict[str, Any]]:
+    queries = [
+        "AI agents",
+        "coding agents",
+        "Claude Code",
+        "Codex",
+        "MCP",
+        "agentic",
+        "Karpathy",
+        "Ilya Sutskever",
+        "Safe Superintelligence",
+        "OpenAI agents",
+        "Anthropic agents",
+        "GitHub Copilot coding agent",
+        "Gemini agents",
+        "Hugging Face agents",
+    ]
+    since = int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).timestamp())
+    out: list[dict[str, Any]] = []
+    for q in queries:
+        params = urllib.parse.urlencode({
+            "query": q,
+            "tags": "story",
+            "hitsPerPage": "8",
+            "numericFilters": f"created_at_i>{since}",
+        })
+        try:
+            data = http_get_json(f"https://hn.algolia.com/api/v1/search_by_date?{params}", timeout=12)
+        except Exception as exc:
+            log(f"HN collector failed for {q!r}: {exc}")
+            continue
+        for hit in data.get("hits", []) if isinstance(data, dict) else []:
+            title = hit.get("title") or hit.get("story_title") or ""
+            url = hit.get("url") or ""
+            story_id = hit.get("objectID") or hit.get("story_id")
+            if not url and story_id:
+                url = f"https://news.ycombinator.com/item?id={story_id}"
+            if not title or not url or not keyword_match(f"{title} {hit.get('story_text', '')}"):
+                continue
+            score = int(hit.get("points") or 0) + int(hit.get("num_comments") or 0) * 2
+            out.append(candidate(
+                title=title,
+                url=url,
+                source_type="community",
+                score=score,
+                date=(hit.get("created_at") or "")[:10],
+                reason=f"Hacker News result for {q}",
+                collector="hn",
+            ))
+    return out
+
+
+def collect_reddit_candidates() -> list[dict[str, Any]]:
+    subs = ["MachineLearning", "LocalLLaMA", "OpenAI", "ClaudeAI"]
+    out: list[dict[str, Any]] = []
+    for sub in subs:
+        url = f"https://www.reddit.com/r/{sub}/top/.json?t=week&limit=25"
+        try:
+            data = http_get_json(url, timeout=12)
+        except Exception as exc:
+            log(f"Reddit collector failed for r/{sub}: {exc}")
+            continue
+        children = (((data or {}).get("data") or {}).get("children") or []) if isinstance(data, dict) else []
+        for child in children:
+            post = child.get("data") or {}
+            title = post.get("title") or ""
+            text = f"{title} {post.get('selftext', '')}"
+            if not title or not keyword_match(text):
+                continue
+            if LOW_SIGNAL_COMMUNITY.search(title):
+                continue
+            permalink = post.get("permalink") or ""
+            post_url = f"https://www.reddit.com{permalink}" if permalink else post.get("url") or ""
+            if not post_url:
+                continue
+            created = post.get("created_utc")
+            date = ""
+            if isinstance(created, (int, float)):
+                date = dt.datetime.fromtimestamp(created, tz=dt.timezone.utc).date().isoformat()
+            score = int(post.get("ups") or 0) + int(post.get("num_comments") or 0) * 2
+            out.append(candidate(
+                title=title,
+                url=post_url,
+                source_type="community",
+                score=score,
+                date=date,
+                reason=f"top-week Reddit signal from r/{sub}",
+                collector="reddit",
+            ))
+    return out
+
+
+def collect_github_candidates() -> list[dict[str, Any]]:
+    since = (dt.date.today() - dt.timedelta(days=14)).isoformat()
+    queries = [
+        f"ai agents pushed:>{since}",
+        f"coding agent pushed:>{since}",
+        f"mcp agent pushed:>{since}",
+    ]
+    out: list[dict[str, Any]] = []
+    for q in queries:
+        params = urllib.parse.urlencode({"q": q, "sort": "stars", "order": "desc", "per_page": "6"})
+        try:
+            data = http_get_json(f"https://api.github.com/search/repositories?{params}", timeout=15)
+        except Exception as exc:
+            log(f"GitHub collector failed for {q!r}: {exc}")
+            continue
+        for item in data.get("items", []) if isinstance(data, dict) else []:
+            title = item.get("full_name") or item.get("name") or ""
+            url = item.get("html_url") or ""
+            desc = item.get("description") or ""
+            if not title or not url or not keyword_match(f"{title} {desc}"):
+                continue
+            score = int(item.get("stargazers_count") or 0)
+            out.append(candidate(
+                title=title,
+                url=url,
+                source_type="github",
+                score=score,
+                date=(item.get("pushed_at") or "")[:10],
+                reason=clean_text(desc, limit=180) or f"GitHub search result for {q}",
+                collector="github",
+            ))
+    return out
+
+
+def collect_rss_candidates() -> list[dict[str, Any]]:
+    feeds = [
+        ("OpenAI", "https://openai.com/news/rss.xml"),
+        ("Google AI", "https://blog.google/innovation-and-ai/technology/ai/rss/"),
+        ("Google Gemini", "https://blog.google/products-and-platforms/products/gemini/rss/"),
+    ]
+    out: list[dict[str, Any]] = []
+    for name, feed_url in feeds:
+        try:
+            text = http_get_text(feed_url, timeout=15)
+            root = ET.fromstring(text)
+        except Exception as exc:
+            log(f"RSS collector failed for {name}: {exc}")
+            continue
+        for item in root.findall(".//item"):
+            title = item.findtext("title") or ""
+            link = item.findtext("link") or ""
+            desc = item.findtext("description") or ""
+            pub = item.findtext("pubDate") or ""
+            if not title or not link or not keyword_match(f"{title} {desc}"):
+                continue
+            date = ""
+            try:
+                date = parsedate_to_datetime(pub).date().isoformat() if pub else ""
+            except Exception:
+                date = pub[:16]
+            out.append(candidate(
+                title=title,
+                url=link,
+                source_type="official",
+                score=90,
+                date=date,
+                reason=f"{name} official feed matched agent keywords",
+                collector="rss",
+            ))
+    return out
+
+
+def collect_anthropic_candidates() -> list[dict[str, Any]]:
+    try:
+        text = http_get_text("https://www.anthropic.com/news", timeout=15)
+    except Exception as exc:
+        log(f"Anthropic collector failed: {exc}")
+        return []
+    out: list[dict[str, Any]] = []
+    for match in re.finditer(r'href="(/news/[^"]+)"(?P<context>.{0,700})', text, flags=re.DOTALL):
+        context = clean_text(match.group("context"), limit=500)
+        if not keyword_match(context):
+            continue
+        title = context[:120] or match.group(1).rsplit("/", 1)[-1].replace("-", " ").title()
+        out.append(candidate(
+            title=title,
+            url=f"https://www.anthropic.com{match.group(1)}",
+            source_type="official",
+            score=86,
+            reason="Anthropic news page matched agent keywords",
+            collector="anthropic",
+        ))
+    return out
+
+
+def collect_arxiv_candidates(date_iso: str) -> list[dict[str, Any]]:
+    path = HUB / "sources" / f"arxiv-ai-research-snapshot-{date_iso}.md"
+    text = read_text(path, limit=50000)
+    if not text:
+        return []
+    out: list[dict[str, Any]] = []
+    pattern = re.compile(r"- \*\*(?P<title>.*?)\*\*.*?\((?P<url>https://arxiv\.org/abs/[^)]+)\)", re.DOTALL)
+    for match in pattern.finditer(text):
+        title = clean_text(match.group("title"), limit=180)
+        block = text[match.start() : min(len(text), match.end() + 700)]
+        if not keyword_match(f"{title} {block}"):
+            continue
+        score = 78 if "MUST_READ" in text[max(0, match.start() - 200):match.start()] else 65
+        out.append(candidate(
+            title=title,
+            url=match.group("url"),
+            source_type="paper",
+            score=score,
+            date=date_iso,
+            reason="agent-relevant item from daily arXiv snapshot",
+            collector="arxiv",
+        ))
+    return out
+
+
+def collect_radar_candidates(date_iso: str) -> list[dict[str, Any]]:
+    fixture = load_fixture_candidates()
+    if fixture:
+        return fixture
+    if os.environ.get("KB_DAILY_RESEARCH_DISABLE_NETWORK", "").strip() in {"1", "true", "yes"}:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for collector in (
+        collect_arxiv_candidates,
+        lambda _date: collect_rss_candidates(),
+        lambda _date: collect_anthropic_candidates(),
+        lambda _date: collect_hn_candidates(),
+        lambda _date: collect_reddit_candidates(),
+        lambda _date: collect_github_candidates(),
+    ):
+        try:
+            candidates.extend(collector(date_iso))
+        except Exception as exc:
+            log(f"radar collector error: {exc}")
+    return candidates
+
+
+def select_radar_sources(candidates: list[dict[str, Any]], max_sources: int) -> list[dict[str, Any]]:
+    priority = {"official": 4000, "community": 3000, "paper": 2500, "github": 2000}
+    collector_priority = {"rss": 500, "anthropic": 500, "hn": 800, "arxiv": 350, "github": 200, "reddit": 100}
+    caps = {"official": 4, "community": 4, "paper": 3, "github": 3}
+    seen: set[str] = set()
+    clean: list[dict[str, Any]] = []
+    for item in candidates:
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not url or not title:
+            continue
+        key = re.sub(r"[#?].*$", "", url).rstrip("/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(item)
+    clean.sort(
+        key=lambda item: (
+            priority.get(str(item.get("source_type") or ""), 0)
+            + collector_priority.get(str(item.get("collector") or ""), 0)
+            + min(int(item.get("score") or 0), 500),
+            str(item.get("date") or ""),
+        ),
+        reverse=True,
+    )
+    selected: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for item in clean:
+        typ = str(item.get("source_type") or "other")
+        if counts.get(typ, 0) >= caps.get(typ, max_sources):
+            continue
+        selected.append(item)
+        counts[typ] = counts.get(typ, 0) + 1
+        if len(selected) >= max_sources:
+            break
+    return selected
+
+
+def render_radar_packet(date_iso: str, topic: str, rationale: str, focus: str, sources: list[dict[str, Any]]) -> str:
+    if sources:
+        source_lines = []
+        for idx, item in enumerate(sources, start=1):
+            meta = " · ".join(part for part in [
+                str(item.get("source_type") or "source"),
+                str(item.get("date") or ""),
+                f"score={item.get('score', 0)}",
+                str(item.get("collector") or ""),
+            ] if part)
+            source_lines.append(
+                f"{idx}. **{item['title']}**\n"
+                f"   - URL: {item['url']}\n"
+                f"   - Meta: {meta}\n"
+                f"   - Why selected: {item.get('reason', '')}"
+            )
+        selected_block = "\n".join(source_lines)
+    else:
+        selected_block = (
+            "No external sources were selected. Use the watchlist and source-selection criteria "
+            "as the fallback brief; do not invent specific news."
+        )
+
+    watchlist = "\n".join(f"- {name}" for name in WATCHLIST)
+    return f"""# AI-agent radar для Vepol — {date_iso}
+
+## Topic
+
+{topic}
+
+## Why this was selected
+
+- focus_project: `{focus}`
+- selection_source: `ai_agents_radar`
+- rationale: {rationale}
+
+## Source-selection criteria
+
+- Prefer fresh official/lab releases and primary docs over generic AI news.
+- Include community heat from Hacker News / Reddit when available.
+- Include arXiv or GitHub only when the item is directly relevant to AI agents, coding agents, MCP/tooling, RAG/evals, or agent safety.
+- Keep the packet small: selected URLs are capped before NotebookLM sees them.
+- Do not turn private Vepol KB, daily logs, secrets, or internal screenshots into NotebookLM sources.
+
+## Selected sources
+
+{selected_block}
+
+## Watchlist
+
+{watchlist}
+
+## Контекст Vepol
+
+Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, и daily product-learning loop.
+
+## Инструкция для NotebookLM
+
+Сделай короткий русский аудиообзор как практический AI-agent radar для пользователя Vepol.
+
+Обязательная структура смысла:
+
+1. Что случилось за сутки/неделю: 3–5 самых важных сигналов из selected sources.
+2. Что сейчас на пике обсуждения: какие статьи, demos, releases or community threads выглядят горячими.
+3. Кого/что отслеживать дальше: watchlist people/labs/projects.
+4. Что это значит для Vepol: implications for local agents, KB, governance, source selection, product positioning.
+5. Что не раздувать: weak signals, hype, unsupported claims.
+6. Следующие действия: 2–4 concrete follow-ups for backlog/spec/research.
+
+Не пересказывай источники по очереди. Синтезируй, но не выдумывай факты сверх selected sources.
+"""
+
+
+def already_completed(manifest: dict[str, Any]) -> bool:
+    # Audio is listened to in NotebookLM; idempotency keys on the completed
+    # artifact id, not a local mp3 (no local audio downloads — user directive).
+    return manifest.get("status") == "completed" and bool(manifest.get("artifact_id"))
+
+
+def text_only_completed(manifest: dict[str, Any]) -> bool:
+    return (
+        manifest.get("status") == "completed"
+        and manifest.get("mode") == "text_only"
+        and bool(manifest.get("digest_delivered"))
+    )
+
+
+def process_outputs() -> set[str]:
+    raw = os.environ.get("KB_PROCESS_OUTPUTS", "telegram,file")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def resolve_channel_send_bin() -> str:
+    if os.environ.get("KB_HUB"):
+        hub_bin = HUB / "bin" / "kb-channel-send"
+        if hub_bin.exists():
+            return str(hub_bin)
+    default_bin = pathlib.Path.home() / "knowledge" / "bin" / "kb-channel-send"
+    if default_bin.exists():
+        return str(default_bin)
+    found = shutil.which("kb-channel-send")
+    return found or ""
+
+
+def render_text_digest(date_iso: str, topic: str, sources: list[dict[str, Any]], packet: pathlib.Path) -> str:
+    lines = [
+        f"📡 AI-agent radar {date_iso}",
+        f"Тема: {topic}",
+        "",
+    ]
+    if sources:
+        for idx, item in enumerate(sources[:8], start=1):
+            title = clean_text(item.get("title", ""), limit=140) or "Источник"
+            url = str(item.get("url") or "").strip()
+            lines.append(f"{idx}. {title} — {url}")
+    else:
+        lines.append("Свежих источников не собрано")
+    lines.extend([
+        "",
+        f"Полный packet: {rel(packet)}",
+    ])
+    return "\n".join(lines)
+
+
+def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mpath: pathlib.Path) -> int:
+    outputs = process_outputs()
+    manifest["outputs"] = sorted(outputs)
+    manifest["digest"] = digest
+    if "telegram" not in outputs:
+        manifest["digest_delivered"] = False
+        manifest["status"] = "completed"
+        manifest["error"] = None
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: completed text-only without telegram output")
+        return 0
+
+    sender = resolve_channel_send_bin()
+    if not sender:
+        manifest["status"] = "failed"
+        manifest["error"] = "telegram delivery failed"
+        manifest["digest_delivered"] = False
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: telegram delivery failed: kb-channel-send not found")
+        return 1
+
+    proc = subprocess.run(
+        [sender, "daily-research", digest],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if proc.returncode != 0:
+        manifest["status"] = "failed"
+        manifest["error"] = "telegram delivery failed"
+        manifest["digest_delivered"] = False
+        save_manifest(mpath, manifest)
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
+        log(f"{date_iso}: telegram delivery failed: {detail}")
+        return 1
+
+    manifest["digest_delivered"] = True
+    manifest["status"] = "completed"
+    manifest["error"] = None
+    save_manifest(mpath, manifest)
+    log(f"{date_iso}: completed text-only digest delivery")
+    return 0
 
 
 def acquire_lock(date_iso: str):
@@ -329,38 +918,53 @@ def acquire_lock(date_iso: str):
     return fh
 
 
-def run(date_iso: str, force: bool = False) -> int:
+def run(date_iso: str, force: bool = False, text_only: bool = False) -> int:
     lock_fh = acquire_lock(date_iso)
     if lock_fh is None:
         log(f"{date_iso}: another daily research run is active; exiting")
         return 0
     try:
-        return _run_locked(date_iso, force=force)
+        return _run_locked(date_iso, force=force, text_only=text_only)
     finally:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
         lock_fh.close()
 
 
-def _run_locked(date_iso: str, force: bool = False) -> int:
+def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> int:
     cfg = load_config()
-    if cfg.get("enabled", "true").lower() not in ("true", "1", "yes"):
-        log(f"{date_iso}: disabled by config")
-        return 0
 
     max_attempts = int(cfg.get("max_attempts") or MAX_ATTEMPTS_DEFAULT)
     packet = packet_path(date_iso)
-    audio = audio_path(date_iso)
     mpath = manifest_path(date_iso)
     manifest = load_manifest(mpath)
+    if force and manifest:
+        manifest = {"attempts": int(manifest.get("attempts") or 0)}
 
-    if not force and already_completed(manifest, audio):
-        log(f"{date_iso}: already completed; audio={audio}")
+    if not force and (already_completed(manifest) or (text_only and text_only_completed(manifest))):
+        log(f"{date_iso}: already completed; notebook={manifest.get('notebook_id')} artifact={manifest.get('artifact_id')}")
         return 0
     if not force and int(manifest.get("attempts") or 0) >= max_attempts and manifest.get("status") == "failed":
         log(f"{date_iso}: retry cap reached; not calling NotebookLM")
         return 0
 
+    if not text_only and os.environ.get("KB_PROCESS_BACKGROUND") == "1":
+        error = "background NotebookLM run refused (use --text-only)"
+        manifest.update({
+            "date": date_iso,
+            "mode": "notebooklm_audio",
+            "status": "failed",
+            "attempts": int(manifest.get("attempts") or 0) + 1,
+            "last_attempt_at": now_iso(),
+            "packet_path": rel(packet),
+            "error": error,
+        })
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: {error}")
+        return 1
+
     topic, selection_source, rationale, focus_project = choose_topic(cfg)
+    source_mode = (cfg.get("source_mode") or "curated").strip().lower()
+    research_mode = notebooklm_research_mode(cfg)
     manifest.update({
         "date": date_iso,
         "status": manifest.get("status") or "started",
@@ -370,24 +974,42 @@ def _run_locked(date_iso: str, force: bool = False) -> int:
         "selection_source": selection_source,
         "selection_rationale": rationale,
         "focus_project": focus_project,
-        "research_mode": cfg.get("research_mode", "deep"),
+        "mode": "text_only" if text_only else "notebooklm_audio",
+        "research_mode": research_mode,
+        "source_mode": source_mode,
         "language": cfg.get("language", "ru"),
         "packet_path": rel(packet),
-        "audio_path": rel(audio),
         "error": None,
     })
     save_manifest(mpath, manifest)
 
     try:
-        atomic_write(packet, render_packet(date_iso, topic, selection_source, rationale, focus_project))
+        radar_mode = is_radar_mode(cfg, selection_source)
+        selected_sources: list[dict[str, Any]] = []
+        if radar_mode:
+            max_sources = config_int(cfg, "max_sources", MAX_SOURCES_DEFAULT)
+            selected_sources = select_radar_sources(collect_radar_candidates(date_iso), max_sources)
+            atomic_write(packet, render_radar_packet(date_iso, topic, rationale, focus_project, selected_sources))
+            manifest["selected_sources"] = selected_sources
+            manifest["selected_source_count"] = len(selected_sources)
+        else:
+            atomic_write(packet, render_packet(date_iso, topic, selection_source, rationale, focus_project))
+            manifest["selected_sources"] = []
+            manifest["selected_source_count"] = 0
         manifest["status"] = "packet_written"
         save_manifest(mpath, manifest)
 
+        if text_only:
+            digest = render_text_digest(date_iso, topic, selected_sources, packet)
+            return deliver_text_digest(date_iso, digest, manifest, mpath)
+
         title = f"Vepol daily research {date_iso} — {short_topic(topic)}"
-        created = run_notebooklm(["create", title, "--json"], timeout=120)
-        notebook_id = pick_id(created, "id", "notebook_id")
+        notebook_id = "" if force else str(manifest.get("notebook_id") or "")
         if not notebook_id:
-            raise RuntimeError(f"could not parse notebook id: {created!r}")
+            created = run_notebooklm(["create", title, "--json"], timeout=120)
+            notebook_id = pick_id(created, "id", "notebook_id")
+            if not notebook_id:
+                raise RuntimeError(f"could not parse notebook id: {created!r}")
         manifest["notebook_id"] = notebook_id
         manifest["notebook_title"] = title
         manifest["status"] = "notebook_created"
@@ -400,32 +1022,61 @@ def _run_locked(date_iso: str, force: bool = False) -> int:
             save_manifest(mpath, manifest)
             run_notebooklm(["source", "wait", source_id, "-n", notebook_id, "--timeout", "180", "--json"], timeout=240)
 
-        query = (
-            f"{topic}. Focus on practical implications for local AI agents, "
-            "knowledge bases, RAG, evaluation, autonomy, safety, and product design."
-        )
-        run_notebooklm(
-            [
-                "source",
-                "add-research",
-                query,
-                "-n",
-                notebook_id,
-                "--from",
-                "web",
-                "--mode",
-                cfg.get("research_mode", "deep") or "deep",
-                "--import-all",
-            ],
-            timeout=900,
-        )
-        manifest["status"] = "research_imported"
-        save_manifest(mpath, manifest)
+        if radar_mode:
+            added_sources = []
+            skipped_sources = []
+            for item in selected_sources:
+                url = str(item.get("url") or "")
+                try:
+                    added = run_notebooklm(["source", "add", url, "-n", notebook_id, "--json"], timeout=180)
+                    url_source_id = pick_id(added, "source_id", "id")
+                    added_sources.append({**item, "source_id": url_source_id})
+                    if url_source_id:
+                        run_notebooklm(
+                            ["source", "wait", url_source_id, "-n", notebook_id, "--timeout", "180", "--json"],
+                            timeout=240,
+                        )
+                except Exception as exc:
+                    skipped_sources.append({**item, "error": str(exc)})
+                    log(f"{date_iso}: skipped radar source {url}: {exc}")
+            manifest["added_sources"] = added_sources
+            manifest["skipped_sources"] = skipped_sources
+            manifest["status"] = "curated_sources_added"
+            save_manifest(mpath, manifest)
+        else:
+            query = (
+                f"{topic}. Focus on practical implications for local AI agents, "
+                "knowledge bases, RAG, evaluation, autonomy, safety, and product design."
+            )
+            run_notebooklm(
+                [
+                    "source",
+                    "add-research",
+                    query,
+                    "-n",
+                    notebook_id,
+                    "--from",
+                    "web",
+                    "--mode",
+                    research_mode,
+                    "--import-all",
+                ],
+                timeout=900,
+            )
+            manifest["status"] = "research_imported"
+            save_manifest(mpath, manifest)
 
-        prompt = (
-            "Сделай короткий русский аудиообзор daily research для Vepol: "
-            "что нашли, как применить в Vepol, что не брать, следующие действия."
-        )
+        if radar_mode:
+            prompt = (
+                "Сделай короткий русский AI-agent radar для Vepol: что случилось за сутки/неделю, "
+                "что сейчас на пике обсуждения, кого/что отслеживать дальше, что это значит для Vepol, "
+                "что не раздувать, следующие действия."
+            )
+        else:
+            prompt = (
+                "Сделай короткий русский аудиообзор daily research для Vepol: "
+                "что нашли, как применить в Vepol, что не брать, следующие действия."
+            )
         generated = run_notebooklm(
             [
                 "generate",
@@ -446,19 +1097,17 @@ def _run_locked(date_iso: str, force: bool = False) -> int:
             ],
             timeout=720,
         )
+        # `generate audio --wait` already blocks until the artifact is ready.
+        # The user listens to it directly in NotebookLM — do NOT download a
+        # local mp3. Completion keys on the artifact id.
         artifact_id = pick_id(generated, "artifact_id", "id", "task_id")
-        if artifact_id:
-            manifest["artifact_id"] = artifact_id
-        manifest["status"] = "audio_requested"
-        save_manifest(mpath, manifest)
-
-        run_notebooklm(["download", "audio", "-n", notebook_id, "--latest", "--force", str(audio)], timeout=180)
-        if not audio.is_file() or audio.stat().st_size == 0:
-            raise RuntimeError(f"audio download did not create {audio}")
+        if not artifact_id:
+            raise RuntimeError("audio generation returned no artifact id")
+        manifest["artifact_id"] = artifact_id
         manifest["status"] = "completed"
         manifest["error"] = None
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: completed notebook={notebook_id} topic={topic!r}")
+        log(f"{date_iso}: completed notebook={notebook_id} artifact={artifact_id} topic={topic!r}")
         return 0
     except Exception as exc:
         manifest["status"] = "failed"
@@ -470,21 +1119,31 @@ def _run_locked(date_iso: str, force: bool = False) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run one daily Vepol research topic through NotebookLM.")
+    parser = argparse.ArgumentParser(description="Run one daily Vepol research topic as a text packet or NotebookLM audio.")
     parser.add_argument("--date", default=today_iso(), help="Date in YYYY-MM-DD.")
     parser.add_argument("--force", action="store_true", help="Regenerate even if completed.")
+    parser.add_argument("--text-only", action="store_true", help="Write the packet and deliver a short text digest without NotebookLM.")
     parser.add_argument("--set-topic", help="Pin daily research topic until changed.")
-    parser.add_argument("--auto-topic", action="store_true", help="Clear topic override and return to auto-topic.")
+    parser.add_argument("--auto-topic", action="store_true", help="Clear topic override and return to AI-agent radar.")
+    parser.add_argument("--legacy-auto-topic", action="store_true", help="Clear topic override and use legacy backlog-derived topic selection.")
     args = parser.parse_args()
 
     if args.set_topic is not None:
         cfg = load_config()
         cfg["topic_override"] = args.set_topic.strip()
-        cfg["mode"] = "override" if cfg["topic_override"] else "auto"
+        cfg["mode"] = "override" if cfg["topic_override"] else "ai_agents_radar"
         write_config(cfg)
         return 0
 
     if args.auto_topic:
+        cfg = load_config()
+        cfg["topic_override"] = ""
+        cfg["mode"] = "ai_agents_radar"
+        cfg["source_mode"] = "curated"
+        write_config(cfg)
+        return 0
+
+    if args.legacy_auto_topic:
         cfg = load_config()
         cfg["topic_override"] = ""
         cfg["mode"] = "auto"
@@ -494,7 +1153,7 @@ def main() -> int:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
         print(f"invalid --date: {args.date}", file=sys.stderr)
         return 2
-    return run(args.date, force=args.force)
+    return run(args.date, force=args.force, text_only=args.text_only)
 
 
 if __name__ == "__main__":

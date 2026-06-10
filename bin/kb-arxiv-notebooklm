@@ -3,7 +3,8 @@
 
 Reads sources/arxiv-ai-research-snapshot-<DATE>.md, writes a Russian source
 packet under reports/, uploads it to a monthly NotebookLM notebook, generates
-audio for the daily source, downloads the mp3, and keeps a resumable manifest.
+audio for the daily source (listened to in NotebookLM — no local mp3 download),
+and keeps a resumable manifest keyed on the audio artifact id.
 """
 from __future__ import annotations
 
@@ -72,10 +73,6 @@ def snapshot_path(date_iso: str) -> pathlib.Path:
 
 def packet_path(date_iso: str) -> pathlib.Path:
     return REPORTS / f"arxiv-ai-research-notebooklm-brief-{date_iso}.md"
-
-
-def audio_path(date_iso: str) -> pathlib.Path:
-    return REPORTS / f"arxiv-ai-research-audio-{date_iso}.mp3"
 
 
 def manifest_path(date_iso: str) -> pathlib.Path:
@@ -226,14 +223,17 @@ def ensure_notebook(manifest: dict[str, Any]) -> str:
     return nbid
 
 
-def already_done(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
-    return manifest.get("status") == "completed" and audio.is_file() and audio.stat().st_size > 0
+def already_done(manifest: dict[str, Any]) -> bool:
+    # Audio is listened to in NotebookLM; idempotency keys on the completed
+    # artifact id, not a local mp3 (no local audio downloads — user directive).
+    return manifest.get("status") == "completed" and bool(manifest.get("artifact_id"))
 
 
-def recover_downloaded_audio(manifest: dict[str, Any], audio: pathlib.Path) -> bool:
+def recover_completed(manifest: dict[str, Any]) -> bool:
+    # Crash recovery: audio was generated (artifact id present) on a prior run
+    # but the manifest never reached "completed". No local file to check.
     return (
-        audio.is_file()
-        and audio.stat().st_size > 0
+        bool(manifest.get("artifact_id"))
         and bool(manifest.get("notebook_id"))
         and bool(manifest.get("source_id"))
     )
@@ -242,19 +242,18 @@ def recover_downloaded_audio(manifest: dict[str, Any], audio: pathlib.Path) -> b
 def run(date_iso: str, force: bool = False) -> int:
     snap = snapshot_path(date_iso)
     packet = packet_path(date_iso)
-    audio = audio_path(date_iso)
     mpath = manifest_path(date_iso)
 
     manifest = load_manifest(mpath)
-    if not force and already_done(manifest, audio):
-        log(f"{date_iso}: already completed; audio={audio}")
+    if not force and already_done(manifest):
+        log(f"{date_iso}: already completed; notebook={manifest.get('notebook_id')} artifact={manifest.get('artifact_id')}")
         return 0
-    if not force and recover_downloaded_audio(manifest, audio):
+    if not force and recover_completed(manifest):
         manifest["status"] = "completed"
         manifest["error"] = None
         manifest["last_attempt_at"] = now_iso()
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: recovered completed state from existing audio={audio}")
+        log(f"{date_iso}: recovered completed state from artifact={manifest.get('artifact_id')}")
         return 0
     if not force and manifest.get("status") == "skipped_empty":
         log(f"{date_iso}: already skipped_empty")
@@ -271,7 +270,6 @@ def run(date_iso: str, force: bool = False) -> int:
             "notebook_title": notebook_title(date_iso),
             "source_title": source_title(date_iso),
             "packet_path": rel(packet),
-            "audio_path": rel(audio),
             "error": f"snapshot missing: {snap}",
         })
         save_manifest(mpath, manifest)
@@ -290,7 +288,6 @@ def run(date_iso: str, force: bool = False) -> int:
         "source_id": manifest.get("source_id"),
         "artifact_id": manifest.get("artifact_id"),
         "packet_path": rel(packet),
-        "audio_path": rel(audio),
         "error": None,
     }
     manifest.update({k: v for k, v in base.items() if v is not None})
@@ -369,20 +366,17 @@ def run(date_iso: str, force: bool = False) -> int:
             ],
             timeout=720,
         )
+        # `generate audio --wait` already blocks until the artifact is ready.
+        # The user listens to it directly in NotebookLM — do NOT download a
+        # local mp3. Completion keys on the artifact id.
         artifact_id = pick_id(generated, "artifact_id", "id", "task_id")
-        if artifact_id:
-            manifest["artifact_id"] = artifact_id
-        manifest["status"] = "audio_requested"
-        save_manifest(mpath, manifest)
-
-        download_args = ["download", "audio", "-n", nbid, "--latest", "--force", str(audio)]
-        run_notebooklm(download_args, timeout=180)
-        if not audio.is_file() or audio.stat().st_size == 0:
-            raise RuntimeError(f"audio download did not create {audio}")
+        if not artifact_id:
+            raise RuntimeError("audio generation returned no artifact id")
+        manifest["artifact_id"] = artifact_id
         manifest["status"] = "completed"
         manifest["error"] = None
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: completed notebook={nbid} source={manifest.get('source_id')} audio={audio}")
+        log(f"{date_iso}: completed notebook={nbid} source={manifest.get('source_id')} artifact={artifact_id}")
         return 0
     except Exception as exc:
         manifest["status"] = "failed"
