@@ -30,7 +30,7 @@ Fail-closed: any unrecognized structure, field, value, or invariant
 violation raises ProcessConfigError; kb-tick then runs no processes for
 that tick and logs why.
 
-Spec: vepol-dev/knowledge/decisions/processes-release-spec-2026-06-09.md
+Contract: processes release 2026-06-09 (five-field processes.yaml).
 
 CLI: python3 _kb_processes.py <path>   → exit 0 valid / 1 invalid
 """

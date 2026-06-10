@@ -7,7 +7,7 @@ for today), regenerates it by invoking kb-planner; if processes.yaml is
 missing, writes safe release defaults; if it is invalid, fails closed and
 runs nothing.
 
-Spec: vepol-dev/knowledge/decisions/processes-release-spec-2026-06-09.md
+Contract: processes release 2026-06-09 (five-field processes.yaml).
 Background runs never call NotebookLM (audio is on-demand/manual only).
 """
 import datetime
