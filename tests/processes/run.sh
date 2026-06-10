@@ -654,6 +654,54 @@ grep -q '"artifact_id": "art_leg"' "$HUB/.orchestrator/daily-research-$TODAY.jso
   && ok "legacy text-failure state does not trip the full-mode cap" \
   || bad "legacy text-failure state does not trip the full-mode cap (rc=$RC_LEG)"
 
+# Inherited text attempts must not count toward the audio budget either:
+# after migration, one genuinely failed audio run (attempt #1) must leave
+# room for further manual retries within the cap.
+HUB=$(new_hub legacybudget)
+mknotebooklm "$HUB"
+cat > "$HUB/bin/notebooklm-bad" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-bad-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_b"}\n';;
+  source) printf '{"source_id":"s_b"}\n';;
+  generate) printf '{}\n';;   # no artifact → genuine audio failure
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-bad"
+cat > "$HUB/bin/notebooklm-good" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-good-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_g"}\n';;
+  source) printf '{"source_id":"s_g"}\n';;
+  generate) printf '{"artifact_id":"art_budget"}\n';;
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-good"
+cat > "$HUB/.orchestrator/daily-research-$TODAY.json" <<EOF
+{"date": "$TODAY", "status": "failed", "mode": "text_only", "attempts": 3,
+ "error": "telegram delivery failed", "topic": "legacy"}
+EOF
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-bad" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+RC_BAD=$?
+[[ "$RC_BAD" -ne 0 ]] && ok "first genuine audio failure exits non-zero" \
+  || bad "first genuine audio failure exits non-zero (rc=$RC_BAD)"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+RC_GOOD=$?
+grep -q '"artifact_id": "art_budget"' "$HUB/.orchestrator/daily-research-$TODAY.json" 2>/dev/null \
+  && [[ "$RC_GOOD" -eq 0 ]] \
+  && ok "audio retry budget intact after legacy migration" \
+  || bad "audio retry budget intact after legacy migration (rc=$RC_GOOD)"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 

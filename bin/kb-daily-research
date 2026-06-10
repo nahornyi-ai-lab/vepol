@@ -821,6 +821,29 @@ def text_only_completed(manifest: dict[str, Any]) -> bool:
     return bool(manifest.get("digest_delivered"))
 
 
+def migrate_legacy_text_state(manifest: dict[str, Any]) -> None:
+    """One-time migration for manifests written before per-mode state.
+
+    Those recorded text-only runs in the shared keys (status/attempts/error
+    with mode=text_only). Move them to the text_* keys so inherited text
+    failures never count against the full-mode NotebookLM budget — neither
+    through the retry cap nor through the attempts counter itself."""
+    if manifest.get("mode") != "text_only":
+        return
+    if "attempts" in manifest:
+        manifest["text_attempts"] = max(
+            int(manifest.get("text_attempts") or 0),
+            int(manifest.pop("attempts") or 0),
+        )
+    if "status" in manifest:
+        manifest.setdefault("text_status", manifest.pop("status"))
+    if "error" in manifest:
+        legacy_error = manifest.pop("error")
+        if manifest.get("text_error") is None and legacy_error:
+            manifest["text_error"] = legacy_error
+    manifest.pop("mode", None)
+
+
 def process_outputs() -> set[str]:
     raw = os.environ.get("KB_PROCESS_OUTPUTS", "telegram,file")
     return {part.strip() for part in raw.split(",") if part.strip()}
@@ -936,6 +959,9 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     packet = packet_path(date_iso)
     mpath = manifest_path(date_iso)
     manifest = load_manifest(mpath)
+    # Migrate before the force-reset so a force run also keeps only genuine
+    # full-mode attempts in the quota counter.
+    migrate_legacy_text_state(manifest)
     if force and manifest:
         manifest = {"attempts": int(manifest.get("attempts") or 0)}
 
