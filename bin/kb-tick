@@ -1,22 +1,51 @@
 #!/usr/bin/env python3
-"""Runs every 15 minutes via launchd. Reads today-plan.json and fires kb-brief /
-kb-retro when their scheduled time arrives. Marks `brief_fired` / `retro_fired`
-so it only fires once per day. Self-heals: if plan is missing or stale (not for
-today), regenerates it by invoking kb-planner.
+"""Runs every 15 minutes via launchd. Fires every background process declared
+in personal/processes.yaml (five fields: id, enabled, when, run, outputs) when
+its trigger arrives, and marks per-day fired state in today-plan.json so each
+process runs once per day. Self-heals: if the plan is missing or stale (not
+for today), regenerates it by invoking kb-planner; if processes.yaml is
+missing, writes safe release defaults; if it is invalid, fails closed and
+runs nothing.
+
+Spec: vepol-dev/knowledge/decisions/processes-release-spec-2026-06-09.md
+Background runs never call NotebookLM (audio is on-demand/manual only).
 """
 import datetime
 import json
 import os
 import pathlib
+import shlex
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _kb_processes import ProcessConfigError, load_processes  # noqa: E402
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 PLAN = HUB / "logs" / "today-plan.json"
 LOG = HUB / "logs" / "planner.log"
+PROCESSES = HUB / "personal" / "processes.yaml"
+
+# Per-day fired-state keys in today-plan.json. The first three predate
+# processes.yaml and are kept for compatibility (kb-orchestrator-cycle
+# still sets retro_fired directly).
+LEGACY_FIRED_KEYS = {
+    "daily": "brief_fired",
+    "retro": "retro_fired",
+    "learning": "daily_research_fired",
+}
+
+PROCESS_TIMEOUT = 1800
+
+
+def fired_key(process_id: str) -> str:
+    return LEGACY_FIRED_KEYS.get(process_id, process_id.replace("-", "_") + "_fired")
 
 
 def log(msg: str) -> None:
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a") as f:
         f.write(f"[{stamp}] tick: {msg}\n")
 
@@ -41,34 +70,11 @@ def regenerate_plan() -> dict | None:
     return load_plan()
 
 
-def fire(script: str) -> int:
-    """Run a hub event script and return its exit code.
-
-    Blocking call. Caller decides whether to mark `*_fired=true` based on
-    rc==0. Was Popen+start_new_session previously, but that path set the
-    fired flag *before* the script finished — if kb-retro/kb-brief crashed
-    the flag was already true and the message never went out, with no retry
-    on the next tick. Incident-2026-05-05.
-
-    Launchd's StartInterval=900 schedule re-fires only after the previous
-    instance exits, so blocking here for ~3 min (retro) or ~6 min (brief)
-    only shifts the next tick, it doesn't stack instances.
-    """
-    log(f"firing {script}")
-    proc = subprocess.run(
-        [str(HUB / "bin" / script)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    log(f"{script} completed rc={proc.returncode}")
-    return proc.returncode
-
-
 def channel_instances_guard() -> None:
     """Incident-2026-04-25: every tick (15 min), check telegram channel
     plugin instance count. If duplicates accumulated, run cleanup. If
     channel is down, append escalation. Wrapped in try/except so a flap
-    here doesn't break brief/retro firing."""
+    here doesn't break process firing."""
     try:
         proc = subprocess.run(
             [str(HUB / "bin" / "kb-doctor"), "channel-instances", "--format", "json"],
@@ -97,6 +103,98 @@ def channel_instances_guard() -> None:
         log(f"channel-instances guard error (non-fatal): {exc!r}")
 
 
+def resolve_command(process_id: str, run: str) -> list[str] | None:
+    """shlex-split `run`; resolve a bare command name strictly against
+    $HUB/bin. No PATH fallback: a fixture/foreign hub must never end up
+    executing a same-named binary from elsewhere (real sends, real quota).
+    Paths containing '/' are expanded (~) and used as-is."""
+    try:
+        argv = shlex.split(run)
+    except ValueError as exc:
+        log(f"{process_id}: cannot parse run command: {exc}")
+        return None
+    if not argv:
+        log(f"{process_id}: empty run command")
+        return None
+    head = argv[0]
+    if "/" in head:
+        argv[0] = os.path.expanduser(head)
+        return argv
+    candidate = HUB / "bin" / head
+    if candidate.is_file():
+        argv[0] = str(candidate)
+        return argv
+    log(f"{process_id}: command {head!r} not found in {HUB / 'bin'}; treated as failed")
+    return None
+
+
+def eligible(proc: dict, snapshot: dict, now_hm: str) -> bool:
+    """Trigger semantics. after:* is evaluated against the fired-state
+    snapshot taken at tick start, so a dependent becomes eligible on the
+    next tick after its parent succeeded for the same day — never within
+    the same tick pass as the parent."""
+    when = proc["when"]
+    if when == "on-demand":
+        return False
+    if when.startswith("after:"):
+        parent = when[len("after:"):]
+        return snapshot.get(fired_key(parent)) is True
+    return now_hm >= when
+
+
+def run_process(proc: dict, plan: dict) -> None:
+    pid = proc["id"]
+    key = fired_key(pid)
+
+    # arXiv digest pre-fetch — failure-isolated, never blocks the brief.
+    # Spec: ~/knowledge/concepts/daily-arxiv-ai-digest.md (acceptance #5).
+    if pid == "daily" and (HUB / "bin" / "kb-arxiv-pull").is_file():
+        try:
+            subprocess.run(
+                [str(HUB / "bin" / "kb-arxiv-pull")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+        except Exception as e:
+            log(f"kb-arxiv-pull failed: {e!r}; {pid} continues")
+
+    cmd = resolve_command(pid, proc["run"])
+    if cmd is None:
+        return
+
+    env = dict(os.environ)
+    env["KB_PROCESS_ID"] = pid
+    env["KB_PROCESS_OUTPUTS"] = ",".join(proc["outputs"])
+    env["KB_PROCESS_BACKGROUND"] = "1"
+
+    # Blocking call; fired is only set on rc==0 so a crash or a failed
+    # required output retries on the next tick instead of being swallowed
+    # (Incident-2026-05-05). launchd's StartInterval=900 re-fires only
+    # after the previous instance exits, so blocking shifts the next tick
+    # rather than stacking instances.
+    log(f"firing {pid}: {' '.join(cmd)}")
+    try:
+        proc_run = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=PROCESS_TIMEOUT,
+            env=env,
+            check=False,
+        )
+    except Exception as e:
+        log(f"{pid} failed: {e!r}; {key} NOT set; will retry next tick")
+        return
+    if proc_run.returncode == 0:
+        plan[key] = True
+        save_plan(plan)
+        log(f"{pid} completed rc=0; {key} set")
+    else:
+        log(f"{pid} rc={proc_run.returncode}, {key} NOT set; will retry next tick")
+
+
 def main() -> None:
     today = datetime.date.today().isoformat()
     now_hm = datetime.datetime.now().strftime("%H:%M")
@@ -111,83 +209,21 @@ def main() -> None:
             log("plan still missing after regen, abort")
             return
 
-    # Brief — only mark fired on rc==0 so a crash retries on next tick
-    # rather than silently swallowing the day's brief.
-    if not plan.get("brief_fired") and now_hm >= plan["brief_hm"]:
-        # arXiv digest pre-fetch — failure-isolated, never blocks brief.
-        # Spec: ~/knowledge/concepts/daily-arxiv-ai-digest.md (acceptance #5).
-        try:
-            subprocess.run(
-                [str(HUB / "bin" / "kb-arxiv-pull")],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=60,
-                check=False,
-            )
-        except Exception as e:
-            log(f"kb-arxiv-pull failed: {e!r}; brief continues")
-        rc = fire("kb-brief")
-        if rc == 0:
-            plan["brief_fired"] = True
-            save_plan(plan)
-        else:
-            log(f"brief rc={rc}, brief_fired NOT set; will retry next tick")
+    try:
+        processes = load_processes(PROCESSES, create_default=True)
+    except (ProcessConfigError, OSError) as exc:
+        log(f"processes.yaml invalid: {exc}; fail closed — no processes run this tick")
+        return
 
-    # Optional daily arXiv NotebookLM report. Disabled by default because the
-    # product-level daily research loop below is the single default audio.
-    if (
-        os.environ.get("KB_ARXIV_NOTEBOOKLM_ENABLE") == "1"
-        and not plan.get("arxiv_notebooklm_fired")
-        and now_hm >= plan["brief_hm"]
-    ):
-        try:
-            proc = subprocess.run(
-                [str(HUB / "bin" / "kb-arxiv-notebooklm"), "--date", today],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=900,
-                check=False,
-            )
-            log(f"kb-arxiv-notebooklm completed rc={proc.returncode}")
-            if proc.returncode == 0:
-                plan["arxiv_notebooklm_fired"] = True
-                save_plan(plan)
-            else:
-                log("arxiv_notebooklm_fired NOT set; will retry next tick")
-        except Exception as e:
-            log(f"kb-arxiv-notebooklm failed: {e!r}; will retry next tick")
-
-    # Daily topic research → NotebookLM. This is the default one-audio-per-day
-    # product loop; it is independent from the Telegram brief.
-    if not plan.get("daily_research_fired") and now_hm >= plan["brief_hm"]:
-        try:
-            proc = subprocess.run(
-                [str(HUB / "bin" / "kb-daily-research"), "--date", today],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1200,
-                check=False,
-            )
-            log(f"kb-daily-research completed rc={proc.returncode}")
-            if proc.returncode == 0:
-                plan["daily_research_fired"] = True
-                save_plan(plan)
-            else:
-                log("daily_research_fired NOT set; will retry next tick")
-        except Exception as e:
-            log(f"kb-daily-research failed: {e!r}; will retry next tick")
-
-    # Retro — same retry-on-failure semantics. Note: on most days
-    # kb-orchestrator-cycle (20:45 cron) marks retro_fired=true before this
-    # tick checks, so this branch is the fallback path when cycle is
-    # disabled or fails.
-    if not plan.get("retro_fired") and now_hm >= plan["retro_hm"]:
-        rc = fire("kb-retro")
-        if rc == 0:
-            plan["retro_fired"] = True
-            save_plan(plan)
-        else:
-            log(f"retro rc={rc}, retro_fired NOT set; will retry next tick")
+    snapshot = dict(plan)
+    for proc in processes:
+        if not proc["enabled"]:
+            continue
+        if plan.get(fired_key(proc["id"])):
+            continue
+        if not eligible(proc, snapshot, now_hm):
+            continue
+        run_process(proc, plan)
 
 
 if __name__ == "__main__":

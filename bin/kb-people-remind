@@ -10,6 +10,7 @@ a week before." Pass --horizon N (N>0) if you want N-day-ahead
 anticipation reminders.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 import click
 from _kb_people import card
 from _kb_people.channel import send
+
+# Honor KB_HUB (kb-tick processes, launchd, test fixtures); card.PEOPLE_DIR
+# defaults to ~/knowledge/people otherwise.
+if os.environ.get("KB_HUB"):
+    card.PEOPLE_DIR = Path(os.environ["KB_HUB"]).expanduser() / "people"
 
 
 @click.command()
@@ -42,7 +48,12 @@ def main(horizon, dry_run):
     if dry_run:
         click.echo(message)
     else:
-        send("contact-reminder", message)
+        # [telegram] is this process's only declared output: a failed
+        # delivery must surface as a non-zero exit so kb-tick does not
+        # mark the process fired and retries on the next tick.
+        if not send("contact-reminder", message):
+            click.echo("kb-people-remind: channel delivery failed", err=True)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

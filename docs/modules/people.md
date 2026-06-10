@@ -271,8 +271,9 @@ Implementation: **shipping** in `bin/_kb_people/`, `bin/kb-contact`,
 `bin/kb-calendar-sync`, `bin/kb-people-remind`. Tests in
 `bin/tests/test-people.sh`. Card template in
 `_template/knowledge/people/_example.md`. Channel send wrapper in
-`bin/kb-channel-send`. Reminder LaunchAgent template in
-`launchd/com.knowledge.people-remind.plist.template`.
+`bin/kb-channel-send`. Reminders are scheduled as the `people-remind`
+process in `knowledge/personal/processes.yaml` and fired by the
+orchestrator tick — there is no standalone reminder LaunchAgent.
 
 Python dependencies (`python-frontmatter`, `click`, `PyYAML`,
 `jellyfish`) are listed in the project root `requirements.txt`.

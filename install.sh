@@ -600,16 +600,21 @@ fi
 # ─────────────────────────────────────────
 say "Step 6 · Optional features (opt-in)"
 echo "  Vepol can run scheduled background tasks via macOS LaunchAgents:"
-echo "    • daily morning brief (sunrise+45min)"
-echo "    • orchestrator tick (every 15 min, light pulse)"
+echo "    • orchestrator tick (every 15 min — runs every process declared"
+echo "      in knowledge/personal/processes.yaml: brief, retro, learning,"
+echo "      people reminders, …)"
+echo "    • daily plan generation (sunrise/sunset times)"
 echo "    • cycle launch (twice a day — brief + retro)"
-echo "    • People follow-up reminders (daily at 9:00)"
 
+# Note: People follow-up reminders run as a kb-tick process (processes.yaml)
+# since the 2026-06-10 processes release — no standalone people-remind
+# LaunchAgent is installed anymore (its /usr/bin/env python3 invocation broke
+# under launchd's default PATH: no frontmatter/click in system Python).
 if ask "Install scheduled tasks?"; then
   rm -f "$HUB/.orchestrator/launchagents.opted-out"
   LA_DIR="$HOME_DIR/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
-  for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle com.knowledge.people-remind; do
+  for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle; do
     DEST="$LA_DIR/$name.plist"
     SRC="$VEPOL_DIR/launchd/$name.plist.template"
     if [[ ! -f "$SRC" ]]; then
@@ -683,6 +688,7 @@ fi
 _enforce_mode "$HUB/personal" 700
 _enforce_mode "$HUB/personal/.secrets" 600
 _enforce_mode "$HUB/personal/daily-research.yaml" 600
+_enforce_mode "$HUB/personal/processes.yaml" 600
 
 _enforce_mode "$HOME_DIR/.orchestrator" 700
 _enforce_mode "$HOME_DIR/.orchestrator/multibot" 700
