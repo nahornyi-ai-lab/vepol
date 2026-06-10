@@ -815,11 +815,10 @@ def already_completed(manifest: dict[str, Any]) -> bool:
 
 
 def text_only_completed(manifest: dict[str, Any]) -> bool:
-    return (
-        manifest.get("status") == "completed"
-        and manifest.get("mode") == "text_only"
-        and bool(manifest.get("digest_delivered"))
-    )
+    # Text-only state lives in its own keys (text_status/text_error/
+    # digest_delivered) so background digest runs never clobber the
+    # full-mode audio record (status/mode/error/artifact_id).
+    return bool(manifest.get("digest_delivered"))
 
 
 def process_outputs() -> set[str]:
@@ -865,16 +864,16 @@ def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mp
     manifest["digest"] = digest
     if "telegram" not in outputs:
         manifest["digest_delivered"] = False
-        manifest["status"] = "completed"
-        manifest["error"] = None
+        manifest["text_status"] = "completed"
+        manifest["text_error"] = None
         save_manifest(mpath, manifest)
         log(f"{date_iso}: completed text-only without telegram output")
         return 0
 
     sender = resolve_channel_send_bin()
     if not sender:
-        manifest["status"] = "failed"
-        manifest["error"] = "telegram delivery failed"
+        manifest["text_status"] = "failed"
+        manifest["text_error"] = "telegram delivery failed"
         manifest["digest_delivered"] = False
         save_manifest(mpath, manifest)
         log(f"{date_iso}: telegram delivery failed: kb-channel-send not found")
@@ -888,8 +887,8 @@ def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mp
         check=False,
     )
     if proc.returncode != 0:
-        manifest["status"] = "failed"
-        manifest["error"] = "telegram delivery failed"
+        manifest["text_status"] = "failed"
+        manifest["text_error"] = "telegram delivery failed"
         manifest["digest_delivered"] = False
         save_manifest(mpath, manifest)
         detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
@@ -897,8 +896,8 @@ def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mp
         return 1
 
     manifest["digest_delivered"] = True
-    manifest["status"] = "completed"
-    manifest["error"] = None
+    manifest["text_status"] = "completed"
+    manifest["text_error"] = None
     save_manifest(mpath, manifest)
     log(f"{date_iso}: completed text-only digest delivery")
     return 0
@@ -986,27 +985,31 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     topic, selection_source, rationale, focus_project = choose_topic(cfg)
     source_mode = (cfg.get("source_mode") or "curated").strip().lower()
     research_mode = notebooklm_research_mode(cfg)
-    # Separate counters per mode: `attempts` is the NotebookLM-quota cap and
-    # only full-mode runs may consume it. Text-only failures count in
-    # `text_attempts` so a day of failed digest deliveries cannot lock a
-    # later explicit full-mode run out of NotebookLM it never touched.
+    # State is namespaced per mode: full-mode runs own status/mode/error and
+    # the NotebookLM-quota `attempts` cap; text-only runs own text_status/
+    # text_error/text_attempts/digest_delivered. A background digest run must
+    # never clobber a completed audio record (or its retry budget), and vice
+    # versa.
     attempts_key = "text_attempts" if text_only else "attempts"
+    status_key = "text_status" if text_only else "status"
+    error_key = "text_error" if text_only else "error"
     manifest.update({
         "date": date_iso,
-        "status": manifest.get("status") or "started",
+        status_key: manifest.get(status_key) or "started",
         attempts_key: int(manifest.get(attempts_key) or 0) + 1,
         "last_attempt_at": now_iso(),
         "topic": topic,
         "selection_source": selection_source,
         "selection_rationale": rationale,
         "focus_project": focus_project,
-        "mode": "text_only" if text_only else "notebooklm_audio",
         "research_mode": research_mode,
         "source_mode": source_mode,
         "language": cfg.get("language", "ru"),
         "packet_path": rel(packet),
-        "error": None,
+        error_key: None,
     })
+    if not text_only:
+        manifest["mode"] = "notebooklm_audio"
     save_manifest(mpath, manifest)
 
     try:
@@ -1022,7 +1025,7 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
             atomic_write(packet, render_packet(date_iso, topic, selection_source, rationale, focus_project))
             manifest["selected_sources"] = []
             manifest["selected_source_count"] = 0
-        manifest["status"] = "packet_written"
+        manifest[status_key] = "packet_written"
         save_manifest(mpath, manifest)
 
         if text_only:
@@ -1136,11 +1139,11 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
         log(f"{date_iso}: completed notebook={notebook_id} artifact={artifact_id} topic={topic!r}")
         return 0
     except Exception as exc:
-        manifest["status"] = "failed"
-        manifest["error"] = str(exc)
+        manifest[status_key] = "failed"
+        manifest[error_key] = str(exc)
         manifest["last_attempt_at"] = now_iso()
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: failed attempt {manifest.get('attempts')}: {exc}")
+        log(f"{date_iso}: failed attempt {manifest.get(attempts_key)}: {exc}")
         return 1
 
 

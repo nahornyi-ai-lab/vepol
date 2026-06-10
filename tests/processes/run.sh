@@ -433,8 +433,8 @@ check 0 $? "text-only exits 0"
 PACKET="$HUB/reports/daily-research-notebooklm-brief-$TODAY.md"
 [[ -s "$PACKET" ]] && ok "text-only writes packet" || bad "text-only writes packet"
 MANIFEST="$HUB/.orchestrator/daily-research-$TODAY.json"
-grep -q '"status": "completed"' "$MANIFEST" 2>/dev/null && ok "manifest completed" || bad "manifest completed"
-grep -q 'text_only' "$MANIFEST" 2>/dev/null && ok "manifest marked text_only" || bad "manifest marked text_only"
+grep -q '"text_status": "completed"' "$MANIFEST" 2>/dev/null && ok "manifest completed" || bad "manifest completed"
+grep -q '"digest_delivered": true' "$MANIFEST" 2>/dev/null && ok "manifest marked digest delivered" || bad "manifest marked digest delivered"
 [[ ! -s "$HUB/notebooklm-calls.log" ]] && ok "zero notebooklm calls" || bad "zero notebooklm calls"
 grep -q "Running Codex safely" "$HUB/channel.log" 2>/dev/null && ok "telegram digest contains source" || bad "telegram digest contains source"
 
@@ -579,6 +579,50 @@ grep -q "Running Codex safely" "$HUB/channel.log" 2>/dev/null \
   || bad "digest still delivered after manual audio completion"
 [[ ! -s "$HUB/notebooklm-calls.log" ]] && ok "post-audio text-only made zero notebooklm calls" \
   || bad "post-audio text-only made zero notebooklm calls"
+
+# A failed text-only run must not invalidate an existing completed audio
+# artifact: the manifest keeps status=completed + artifact_id, and a later
+# manual full-mode run is an idempotent no-op (no quota re-spend).
+HUB=$(new_hub audiointegrity)
+mknotebooklm "$HUB"
+cat > "$HUB/bin/notebooklm-good" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-good-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_int"}\n';;
+  source) printf '{"source_id":"s_int"}\n';;
+  generate) printf '{"artifact_id":"art_int"}\n';;
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-good"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+MANIFEST_INT="$HUB/.orchestrator/daily-research-$TODAY.json"
+grep -q '"artifact_id": "art_int"' "$MANIFEST_INT" && ok "manual audio completed (setup)" || bad "manual audio completed (setup)"
+mkchannel "$HUB" 3   # failing channel
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" KB_PROCESS_OUTPUTS="telegram,file" \
+  "$PY" "$BIN/kb-daily-research" --text-only --date "$TODAY" >/dev/null 2>&1
+RC_TF=$?
+[[ "$RC_TF" -ne 0 ]] && ok "text-only delivery still fails closed (rc=$RC_TF)" || bad "text-only delivery still fails closed"
+"$PY" - "$MANIFEST_INT" <<'EOF' && ok "audio completion survives text-only failure" || bad "audio completion survives text-only failure"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m.get("status") == "completed", f"status clobbered: {m.get('status')}"
+assert m.get("artifact_id") == "art_int", "artifact lost"
+EOF
+CALLS_BEFORE=$(wc -l < "$HUB/notebooklm-good-calls.log")
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+RC_RERUN=$?
+CALLS_AFTER=$(wc -l < "$HUB/notebooklm-good-calls.log")
+[[ "$RC_RERUN" -eq 0 && "$CALLS_BEFORE" -eq "$CALLS_AFTER" ]] \
+  && ok "full-mode rerun is idempotent no-op (no quota re-spend)" \
+  || bad "full-mode rerun is idempotent no-op (rc=$RC_RERUN calls $CALLS_BEFORE→$CALLS_AFTER)"
 
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
