@@ -624,6 +624,36 @@ CALLS_AFTER=$(wc -l < "$HUB/notebooklm-good-calls.log")
   && ok "full-mode rerun is idempotent no-op (no quota re-spend)" \
   || bad "full-mode rerun is idempotent no-op (rc=$RC_RERUN calls $CALLS_BEFORE→$CALLS_AFTER)"
 
+# Legacy manifests (written before per-mode state) recorded text-only
+# failures in the shared keys: status=failed, mode=text_only, attempts>=cap.
+# A manual full-mode run must not be locked out by that inherited state.
+HUB=$(new_hub legacycap)
+mknotebooklm "$HUB"
+cat > "$HUB/bin/notebooklm-good" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-good-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_leg"}\n';;
+  source) printf '{"source_id":"s_leg"}\n';;
+  generate) printf '{"artifact_id":"art_leg"}\n';;
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-good"
+cat > "$HUB/.orchestrator/daily-research-$TODAY.json" <<EOF
+{"date": "$TODAY", "status": "failed", "mode": "text_only", "attempts": 3,
+ "error": "telegram delivery failed", "topic": "legacy"}
+EOF
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+RC_LEG=$?
+grep -q '"artifact_id": "art_leg"' "$HUB/.orchestrator/daily-research-$TODAY.json" 2>/dev/null \
+  && [[ "$RC_LEG" -eq 0 ]] \
+  && ok "legacy text-failure state does not trip the full-mode cap" \
+  || bad "legacy text-failure state does not trip the full-mode cap (rc=$RC_LEG)"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 

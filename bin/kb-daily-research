@@ -956,11 +956,16 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     # undelivered digest must never exit 0 — the tick would mark the process
     # fired with zero user delivery. Keep retrying; a recovered channel then
     # delivers the digest later the same day.
+    # The mode guard also unpoisons legacy manifests written before per-mode
+    # state: those recorded text-only failures in the shared status/attempts
+    # keys (with mode=text_only), and must not lock a manual full-mode run
+    # out of NotebookLM it never used.
     if (
         not force
         and not text_only
         and int(manifest.get("attempts") or 0) >= max_attempts
         and manifest.get("status") == "failed"
+        and manifest.get("mode") != "text_only"
     ):
         log(f"{date_iso}: retry cap reached; not calling NotebookLM")
         return 0
