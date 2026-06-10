@@ -851,6 +851,15 @@ def migrate_legacy_text_state(manifest: dict[str, Any]) -> None:
             legacy_error = manifest.pop("error")
             if manifest.get("text_error") is None and legacy_error:
                 manifest["text_error"] = legacy_error
+    else:
+        # The shared status belongs to whichever legacy run wrote last. A
+        # "completed" without an audio artifact was the text digest — record
+        # it on the text side and keep the audio side failed, so the retry
+        # cap still counts the genuine audio attempts instead of being
+        # bypassed by a text success.
+        if manifest.get("status") == "completed" and not manifest.get("artifact_id"):
+            manifest.setdefault("text_status", "completed")
+            manifest["status"] = "failed"
     manifest.pop("mode", None)
 
 

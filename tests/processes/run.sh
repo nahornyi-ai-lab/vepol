@@ -730,6 +730,21 @@ KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
   && ok "mixed legacy history keeps real audio attempts (cap holds, zero calls)" \
   || bad "mixed legacy history keeps real audio attempts (notebooklm was called)"
 
+# Same protection when the LAST legacy write was a text SUCCESS: shared
+# status=completed (no artifact) must not let a full-mode run bypass the
+# cap that real audio attempts already exhausted.
+cat > "$HUB/.orchestrator/daily-research-$TODAY.json" <<EOF
+{"date": "$TODAY", "status": "completed", "mode": "text_only", "attempts": 3,
+ "notebook_id": "nb_real_audio", "digest_delivered": true, "topic": "legacy"}
+EOF
+: > "$HUB/notebooklm-good-calls.log"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+[[ ! -s "$HUB/notebooklm-good-calls.log" ]] \
+  && ok "mixed legacy text-success cannot bypass the audio cap" \
+  || bad "mixed legacy text-success cannot bypass the audio cap (notebooklm was called)"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 
