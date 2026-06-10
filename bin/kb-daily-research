@@ -940,9 +940,18 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     if force and manifest:
         manifest = {"attempts": int(manifest.get("attempts") or 0)}
 
-    if not force and (already_completed(manifest) or (text_only and text_only_completed(manifest))):
-        log(f"{date_iso}: already completed; notebook={manifest.get('notebook_id')} artifact={manifest.get('artifact_id')}")
-        return 0
+    # Idempotency is per mode: a text-only (background) run is done only
+    # when its Telegram digest was delivered — a manually generated audio
+    # artifact must not mark the learning process fired without any user
+    # channel delivery. A full-mode run keys on the audio artifact as before.
+    if not force:
+        if text_only:
+            if text_only_completed(manifest):
+                log(f"{date_iso}: text digest already delivered; nothing to do")
+                return 0
+        elif already_completed(manifest):
+            log(f"{date_iso}: already completed; notebook={manifest.get('notebook_id')} artifact={manifest.get('artifact_id')}")
+            return 0
     # The retry cap protects NotebookLM quota in full mode only. Text-only
     # attempts are cheap (packet + one channel send, no quota), and an
     # undelivered digest must never exit 0 — the tick would mark the process

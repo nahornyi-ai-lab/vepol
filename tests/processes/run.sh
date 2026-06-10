@@ -561,6 +561,25 @@ grep -q '"artifact_id": "art_full"' "$HUB/.orchestrator/daily-research-$TODAY.js
   && ok "manual full run completed with artifact after text failures" \
   || bad "manual full run completed with artifact after text failures"
 
+# A manually completed audio run must not satisfy the text-only process:
+# the learning digest still owes a Telegram delivery before it counts as
+# fired. Channel now works — the digest must actually go out (and the
+# NotebookLM recorder must stay silent). Clear the channel log first: the
+# earlier failing shim records messages before exiting non-zero.
+mkchannel "$HUB" 0
+: > "$HUB/channel.log"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" KB_PROCESS_OUTPUTS="telegram,file" \
+  "$PY" "$BIN/kb-daily-research" --text-only --date "$TODAY" >/dev/null 2>&1
+RC_AFTER_AUDIO=$?
+[[ "$RC_AFTER_AUDIO" -eq 0 ]] && ok "text-only after manual audio exits 0" \
+  || bad "text-only after manual audio exits 0 (rc=$RC_AFTER_AUDIO)"
+grep -q "Running Codex safely" "$HUB/channel.log" 2>/dev/null \
+  && ok "digest still delivered after manual audio completion" \
+  || bad "digest still delivered after manual audio completion"
+[[ ! -s "$HUB/notebooklm-calls.log" ]] && ok "post-audio text-only made zero notebooklm calls" \
+  || bad "post-audio text-only made zero notebooklm calls"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 
