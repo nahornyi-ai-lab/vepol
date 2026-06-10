@@ -702,6 +702,34 @@ grep -q '"artifact_id": "art_budget"' "$HUB/.orchestrator/daily-research-$TODAY.
   && ok "audio retry budget intact after legacy migration" \
   || bad "audio retry budget intact after legacy migration (rc=$RC_GOOD)"
 
+# The inverse must hold too: a legacy manifest whose mode was overwritten
+# by a text run but which carries real audio history (notebook_id) must NOT
+# have its attempts erased — the cap stays in force for the audio budget.
+HUB=$(new_hub legacymixed)
+mknotebooklm "$HUB"
+cat > "$HUB/bin/notebooklm-good" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$HUB/notebooklm-good-calls.log"
+case "\$1" in
+  create) printf '{"id":"nb_m"}\n';;
+  source) printf '{"source_id":"s_m"}\n';;
+  generate) printf '{"artifact_id":"art_mixed"}\n';;
+  *) printf '{}\n';;
+esac
+exit 0
+EOF
+chmod +x "$HUB/bin/notebooklm-good"
+cat > "$HUB/.orchestrator/daily-research-$TODAY.json" <<EOF
+{"date": "$TODAY", "status": "failed", "mode": "text_only", "attempts": 3,
+ "notebook_id": "nb_real_audio", "error": "telegram delivery failed", "topic": "legacy"}
+EOF
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
+  KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" \
+  "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
+[[ ! -s "$HUB/notebooklm-good-calls.log" ]] \
+  && ok "mixed legacy history keeps real audio attempts (cap holds, zero calls)" \
+  || bad "mixed legacy history keeps real audio attempts (notebooklm was called)"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 

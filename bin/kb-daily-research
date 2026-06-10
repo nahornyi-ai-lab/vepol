@@ -825,22 +825,32 @@ def migrate_legacy_text_state(manifest: dict[str, Any]) -> None:
     """One-time migration for manifests written before per-mode state.
 
     Those recorded text-only runs in the shared keys (status/attempts/error
-    with mode=text_only). Move them to the text_* keys so inherited text
-    failures never count against the full-mode NotebookLM budget — neither
-    through the retry cap nor through the attempts counter itself."""
+    with mode=text_only). When the day's history is purely text (no
+    notebook_id — full mode is the only writer of that key), move the
+    counters to the text_* keys so inherited text failures never count
+    against the full-mode NotebookLM budget.
+
+    When the manifest carries real audio history (notebook_id present, its
+    mode merely overwritten by a later text run), the shared counters may
+    include genuine audio attempts — keep them in the audio budget so the
+    migration can never erase real quota spend. The split is unknowable, so
+    we stay conservative; an explicit --force run remains the escape hatch.
+    Only the stale mode marker is dropped, letting the retry cap apply."""
     if manifest.get("mode") != "text_only":
         return
-    if "attempts" in manifest:
-        manifest["text_attempts"] = max(
-            int(manifest.get("text_attempts") or 0),
-            int(manifest.pop("attempts") or 0),
-        )
-    if "status" in manifest:
-        manifest.setdefault("text_status", manifest.pop("status"))
-    if "error" in manifest:
-        legacy_error = manifest.pop("error")
-        if manifest.get("text_error") is None and legacy_error:
-            manifest["text_error"] = legacy_error
+    pure_text_history = not manifest.get("notebook_id")
+    if pure_text_history:
+        if "attempts" in manifest:
+            manifest["text_attempts"] = max(
+                int(manifest.get("text_attempts") or 0),
+                int(manifest.pop("attempts") or 0),
+            )
+        if "status" in manifest:
+            manifest.setdefault("text_status", manifest.pop("status"))
+        if "error" in manifest:
+            legacy_error = manifest.pop("error")
+            if manifest.get("text_error") is None and legacy_error:
+                manifest["text_error"] = legacy_error
     manifest.pop("mode", None)
 
 
