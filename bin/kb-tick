@@ -10,6 +10,8 @@ runs nothing.
 Contract: processes release 2026-06-09 (five-field processes.yaml).
 Background runs never call NotebookLM (audio is on-demand/manual only).
 """
+from __future__ import annotations
+
 import datetime
 import json
 import os

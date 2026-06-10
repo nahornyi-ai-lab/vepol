@@ -943,7 +943,17 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
     if not force and (already_completed(manifest) or (text_only and text_only_completed(manifest))):
         log(f"{date_iso}: already completed; notebook={manifest.get('notebook_id')} artifact={manifest.get('artifact_id')}")
         return 0
-    if not force and int(manifest.get("attempts") or 0) >= max_attempts and manifest.get("status") == "failed":
+    # The retry cap protects NotebookLM quota in full mode only. Text-only
+    # attempts are cheap (packet + one channel send, no quota), and an
+    # undelivered digest must never exit 0 — the tick would mark the process
+    # fired with zero user delivery. Keep retrying; a recovered channel then
+    # delivers the digest later the same day.
+    if (
+        not force
+        and not text_only
+        and int(manifest.get("attempts") or 0) >= max_attempts
+        and manifest.get("status") == "failed"
+    ):
         log(f"{date_iso}: retry cap reached; not calling NotebookLM")
         return 0
 

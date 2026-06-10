@@ -512,6 +512,23 @@ unset KB_NOTEBOOKLM_BIN KB_DAILY_RESEARCH_COLLECTOR_FIXTURE
 [[ -s "$HUB/reports/daily-research-notebooklm-brief-$TODAY.md" ]] \
   && ok "file output still written (internal memory)" || bad "file output still written"
 
+# Retry cap must stay fail-closed for text-only: even after max_attempts
+# failed deliveries, the process must NOT exit 0 (tick would mark it fired
+# with zero user delivery). Run the tick three more times to exhaust the
+# cap (attempts increment per run), then assert the next run still fails.
+export KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder"
+export KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE"
+run_tick "$HUB"; run_tick "$HUB"; run_tick "$HUB"
+KB_HUB="$HUB" KB_PROCESS_OUTPUTS="telegram,file" \
+  "$PY" "$BIN/kb-daily-research" --text-only --date "$TODAY" >/dev/null 2>&1
+RC_CAP=$?
+unset KB_NOTEBOOKLM_BIN KB_DAILY_RESEARCH_COLLECTOR_FIXTURE
+[[ "$RC_CAP" -ne 0 ]] && ok "retry cap: undelivered digest still exits non-zero" \
+  || bad "retry cap: undelivered digest still exits non-zero (rc=0 would mark fired)"
+[[ "$(plan_get "$HUB" daily_research_fired)" != "true" ]] \
+  && ok "retry cap: fired never set without delivery" \
+  || bad "retry cap: fired never set without delivery"
+
 echo
 echo "=== T6: people-extract creates People without Calendar ==="
 
