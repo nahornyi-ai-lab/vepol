@@ -131,6 +131,9 @@ class BaseAdapter:
                 *argv,
                 cwd=workdir,
                 env=proc_env,
+                # codex exec >=0.138 blocks forever reading an inherited open
+                # stdin (waits for EOF); always hand children a closed stdin.
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
