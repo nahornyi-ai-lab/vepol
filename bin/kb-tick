@@ -118,9 +118,12 @@ def resolve_command(process_id: str, run: str) -> list[str] | None:
     if not argv:
         log(f"{process_id}: empty run command")
         return None
+    # shlex does not do shell expansion: expand a leading ~ in every token,
+    # or hub-relative arguments like `--hub ~/knowledge` reach the child
+    # literally and resolve against launchd's cwd (incident 2026-06-10).
+    argv = [os.path.expanduser(tok) for tok in argv]
     head = argv[0]
     if "/" in head:
-        argv[0] = os.path.expanduser(head)
         return argv
     candidate = HUB / "bin" / head
     if candidate.is_file():

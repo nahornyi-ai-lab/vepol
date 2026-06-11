@@ -391,6 +391,45 @@ run_tick "$HUB"; run_tick "$HUB"
 calls_has "$HUB" shim-learning && bad "failed parent blocks dependent" || ok "failed parent blocks dependent"
 
 echo
+echo "=== run-command arguments: tilde expansion ==="
+
+# processes.yaml run commands are shlex-split, not shell-expanded: a literal
+# `--hub ~/knowledge` must reach the child with ~ expanded, or hub-relative
+# paths resolve against launchd's cwd (incident 2026-06-10: people-extract
+# crashed every tick writing its audit under /~/knowledge).
+HUB=$(new_hub tilde)
+cat > "$HUB/bin/shim-args" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "$HUB/args.log"
+exit 0
+EOF
+chmod +x "$HUB/bin/shim-args"
+write_cfg "$HUB" <<'EOF'
+- id: daily
+  enabled: true
+  when: "00:00"
+  run: shim-args --hub ~/knowledge
+  outputs: [file]
+EOF
+run_tick "$HUB"
+grep -qx -- "$HOME/knowledge" "$HUB/args.log" 2>/dev/null \
+  && ok "tick expands ~ in run arguments" \
+  || bad "tick expands ~ in run arguments (got: $(tr '\n' ' ' < "$HUB/args.log" 2>/dev/null))"
+
+if [[ -x "$HUB_BIN/kb-extract-people" ]]; then
+FAKEHOME="$TMP/fakehome"; mkdir -p "$FAKEHOME/hub/people" "$FAKEHOME/hub/.orchestrator"
+cat > "$FAKEHOME/hub/registry.md" <<'EOF'
+| slug | path | status |
+|------|------|--------|
+EOF
+HOME="$FAKEHOME" "$PY" "$HUB_BIN/kb-extract-people" --hub "~/hub" --no-llm --quiet >/dev/null 2>&1
+RC_TILDE=$?
+[[ "$RC_TILDE" -eq 0 && -f "$FAKEHOME/hub/.orchestrator/people-extraction-$(date -u +%Y-%m-%d).json" ]] \
+  && ok "kb-extract-people expands ~ in --hub itself" \
+  || bad "kb-extract-people expands ~ in --hub itself (rc=$RC_TILDE)"
+fi
+
+echo
 echo "=== T10: calendar / on-demand never scheduled ==="
 
 HUB=$(new_hub calendar)
