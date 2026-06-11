@@ -14,7 +14,45 @@ upgrading.
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+- **Background processes runtime** — the routine processes
+  (daily brief, evening retro, learning digest, people extraction,
+  follow-up reminders, calendar pull) are now declared in a single
+  `personal/processes.yaml` and gated through `kb-tick`. Five fields per
+  process (`id`, `enabled`, `when`, `run`, `outputs`); a missing config
+  self-heals with safe defaults; each process has its own independent
+  `enabled` switch.
+- **Development Loop methodology** — one vendor-neutral process any agent
+  follows for new work (scope → research-first → design → spec →
+  cross-agent review → tests → implementation review → write-back →
+  verify), with v2 quality gates.
+  [`docs/methodology/development-loop.md`](docs/methodology/development-loop.md)
+- **Agent CLI roster** — every agent session now starts knowing which
+  CLI tools are installed on the machine and when to reach for each:
+  `kb-cli-roster` generates a per-machine `.active-roster.md` from a
+  declarative registry and injects it at session start.
+
+### Changed
+- **Daily research / learning is text-first.** Background runs deliver a
+  text digest through the configured channel and make zero NotebookLM
+  calls; the NotebookLM notebook + Russian audio recap is an explicit
+  on-demand mode. Daily research sources are curated and audio artifacts
+  are no longer downloaded locally.
+- Installer and hub setup hardened for existing/partial/upgraded
+  installs: prerequisite version enforcement, never deleting hub
+  directories (moved aside instead), custom-hub (`KB_HUB`/`VEPOL_HUB`)
+  handling in hooks and roster scripts.
+- Seed release hygiene extended: shipped files are routed through the
+  seed sanitizer and scrubbed of maintainer-workspace references.
+
+### Fixed
+- Manifest state for daily research is namespaced per mode: text-only
+  failures no longer consume the NotebookLM audio retry budget, a
+  delivered digest is required for text-only idempotency, and legacy
+  mixed-state manifests migrate conservatively without erasing real
+  audio attempts.
+- Tilde (`~`) in `processes.yaml` run-command arguments is expanded, so
+  processes run correctly under launchd with `cwd=/`.
 
 ## [0.2.1] — 2026-05-29
 

@@ -59,14 +59,20 @@ any single model's private memory.
   tasks, deadlines, what got done yesterday — and writes a short brief.
   Not "what do you want to do?" — "this is what's worth doing today,
   given what I know about your work."
-- **Researches one useful topic every morning.** Vepol picks a topic from
-  your active project, creates a NotebookLM notebook, imports web research,
-  and generates a Russian audio recap: what it found, how it applies to the
-  project, what to ignore, and what to do next.
-- **Runs your routine in the background.** Tasks marked low-judgment
-  (`auto: true`) — drafting follow-ups, refreshing research, updating the
-  project registry — Vepol picks up and executes without prompting. By
-  the time you sit down, they're done.
+- **Researches one useful topic every day.** By default Vepol runs a
+  curated radar over the AI-agent space, imports web research, and
+  delivers a digest: what it found, how it applies to your work, what
+  to ignore, and what to do next. Pin any topic — including one from
+  your active project — when you want a one-topic deep dive. The
+  digest arrives as text in your channel; when you want depth, an
+  on-demand NotebookLM mode turns the same research into a notebook
+  with a Russian audio recap.
+- **Runs your routine in the background.** Scheduled routines — the
+  morning brief, evening retro, daily research digest, follow-up
+  reminders — are declared in `processes.yaml` and fire on schedule
+  without prompting. By the time you sit down, they're done. Per-task
+  background execution from the task board (`auto: true`) is being
+  re-ported to the new board format and is not part of that loop yet.
 - **Studies you, doesn't just store you.** After each session, Vepol
   extracts decisions, lessons, action items, and ergonomic patterns
   ("sharper in the morning," "this kind of task always blocks for two
@@ -77,28 +83,37 @@ any single model's private memory.
 - **Proactive, not reactive.** Morning brief, evening retro, mid-day
   reminders, escalations when blocked — all initiated by Vepol over
   Telegram or whatever channel you wired up.
-- **Aligned with your health and goals.** Pulls data from Garmin, Apple
-  Health, scales — uses it as a constraint on your day plan, not a
-  performance metric. If sleep dropped for three days, the plan loses
-  intensity automatically.
-- **Takes on more of your work each day.** This is the most important part:
-  **Vepol's autonomy compounds over time.**
-  - Day 1: drafts emails, you proofread and send.
-  - Week 2: classifies routine emails, you only see exceptions.
-  - Month 2: answers typical inquiries through your draft folder.
-  - Month 6: half your operational routine runs without you.
+- **Aligned with your health and goals** *(in progress)*. The design:
+  data from Garmin, Apple Health, scales feeds in as a constraint on
+  your day plan, not a performance metric — if sleep dropped for three
+  days, the plan loses intensity. Device ingestion is being wired up
+  release by release; treat this one as roadmap, not shipped.
+- **Takes on more of your work, task type by task type.** This is the
+  most important part: **Vepol's autonomy is designed to compound.**
+  Every task type starts supervised — Vepol drafts, you edit. The
+  design contract: where your edits approach zero, that task type
+  graduates to background execution; where you keep correcting, it
+  stays supervised. Today the scheduled daily routine — morning brief,
+  research digest, follow-up reminders, evening retro — already runs
+  unattended on the maintainer's production setup, with every action
+  logged for review.
 
-  The progression is real because Vepol watches what you actually edited
-  vs accepted, and adjusts autonomy per task type.
-
-![Autonomy growth — Day 1 to Month 6](docs/visuals/vepol-autonomy-growth.png)
-
-## What's shipped in v0.2.1
+## What's shipped
 
 The behaviour above is delivered through a small set of modules. Each
 ships a CLI, a markdown schema agents read natively, and at minimum
 unit tests. The list grows release by release; see
 [`CHANGELOG.md`](CHANGELOG.md) for per-release history.
+
+- **Background processes runtime** — the routine processes
+  (daily brief, evening retro, learning digest, people extraction,
+  follow-up reminders, calendar pull) are declared in one
+  `processes.yaml` and gated through `kb-tick`. Five fields per
+  process — `id`, `enabled`, `when`, `run`, `outputs` — and one file
+  to read to see which routines run on your machine. Background runs
+  are text-first by default; NotebookLM audio is an explicit on-demand
+  step, never a silent background cost. A missing config self-heals
+  with safe defaults.
 
 - **People** — durable markdown card per person Vepol encounters,
   with `kb-contact` (add / log / remind / search / due / show /
@@ -108,14 +123,20 @@ unit tests. The list grows release by release; see
 - **Daily plan** — `kb-orchestrator-cycle gen-plan` writes a draft
   plan for tomorrow from your open backlog at the end of evening
   retro. You confirm overnight; the morning dispatch turns the
-  approved plan into per-project work.
+  approved plan into per-project work. The fully automated nightly
+  cycle is currently kept disabled on the maintainer's production
+  node pending scanner-v2 security-review evidence (context-injection
+  scanning); `kb-doctor` reports that reviewed-disabled state, and
+  the plan flow remains usable through the task board meanwhile.
 - **Task board** — `kb-board` makes `knowledge/backlog.md` the
   markdown-native task board for agents: Backlog, Ready, In Progress,
   Blocked, Review, Done, and Cancelled, with ID-first claim/review/close
   operations and no external database.
 - **Daily research** — `kb-daily-research` runs one topic per day
-  through NotebookLM web research and generates a Russian audio overview.
-  Topic is automatic by default; pin it with
+  through web research and delivers a text digest by default; the
+  on-demand NotebookLM mode generates a notebook and a Russian audio
+  overview. Topic is automatic by default (a curated radar over the
+  AI-agent space); pin it with
   `kb-daily-research --set-topic "..."`, or return to auto-selection with
   `kb-daily-research --auto-topic`.
 - **Multi-bot agent runtime** — a Telegram-based supervisor that
@@ -199,7 +220,7 @@ The full breakdown:
 | **Transparency** | "magic" inside the model | every step is text on disk |
 | **Quality of plans** | one answer from one model | plan goes through cross-review by independent AI agents |
 | **Growth over time** | each chat starts blank | each day, takes on more of your routine |
-| **Health/goal alignment** | absent | present (devices feed in; pace adapts) |
+| **Health/goal alignment** | absent | in progress (devices feed in as plan constraints) |
 
 ## Quickstart
 
@@ -253,17 +274,21 @@ kb-demo brief          # see what a synthesized brief looks like
 ```
 
 That's the value loop. Methodology comes after, when you want it.
-For the daily NotebookLM research loop, authenticate once with
+Daily research delivers a text digest out of the box; if you want the
+on-demand NotebookLM audio mode, authenticate once with
 `notebooklm login && notebooklm status`. The default topic is automatic; use
 `kb-daily-research --set-topic "..."` only when you want to steer it.
 
 ## Status
 
-**Vepol is in alpha (v0.1.x).** What that means:
+**Vepol is in alpha (0.2.x).** What that means:
 
 - ✅ The knowledge schema is stable and proven on the maintainer's
   daily-driver setup (16+ projects)
-- ✅ Daily brief, evening retro, and tick (orchestrator pulse) work
+- ✅ Vepol runs unattended in production on the maintainer's machine —
+  daily brief, evening retro, and the other scheduled routines fire
+  via tick (orchestrator pulse), gated by the declarative
+  `processes.yaml`
 - ✅ Privacy layers (4 of them) are in place and tested
 - ⚠️ macOS 13+ only — Linux support is a Phase 2 candidate
 - ⚠️ Pro-tier features (cloud-sync, advanced templates) not built yet
@@ -311,14 +336,14 @@ the tool.
 
 | Tool | Required | Why |
 |---|---|---|
-| macOS 13+ | Yes (v0.2.1) | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | v0.2.1 MCP/setup host and default orchestrator |
+| macOS 13+ | Yes (0.2.x) | launchd, paths, brew defaults |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | 0.2.x MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
 | [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review / alternate orchestrator |
 | [Antigravity CLI](https://google-gemini.github.io/antigravity-cli/docs/get-started/) | Recommended | Third-opinion review / quorum |
-| [NotebookLM CLI](https://github.com/teng-lin/notebooklm-py) | Recommended | Daily Russian research notebook/audio |
+| [NotebookLM CLI](https://github.com/teng-lin/notebooklm-py) | Recommended | On-demand research notebook / Russian audio recap |
 | Telegram bot | Optional | Brief / retro channel |
 | [claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) | Optional | Auto-capture sessions |
 
