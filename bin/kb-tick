@@ -151,20 +151,9 @@ def run_process(proc: dict, plan: dict) -> None:
     pid = proc["id"]
     key = fired_key(pid)
 
-    # arXiv digest pre-fetch — failure-isolated, never blocks the brief.
-    # Spec: ~/knowledge/concepts/daily-arxiv-ai-digest.md (acceptance #5).
-    if pid == "daily" and (HUB / "bin" / "kb-arxiv-pull").is_file():
-        try:
-            subprocess.run(
-                [str(HUB / "bin" / "kb-arxiv-pull")],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=60,
-                check=False,
-            )
-        except Exception as e:
-            log(f"kb-arxiv-pull failed: {e!r}; {pid} continues")
-
+    # `daily` runs only its declared command (kb-brief). The historical
+    # hidden arXiv prefetch was removed: arXiv ownership lives in the
+    # `learning` process (learning-arxiv spec 2026-06-12).
     cmd = resolve_command(pid, proc["run"])
     if cmd is None:
         return

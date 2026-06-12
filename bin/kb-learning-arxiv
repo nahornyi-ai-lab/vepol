@@ -1,0 +1,1026 @@
+#!/usr/bin/env python3
+"""kb-learning-arxiv — scheduled learning: arXiv-only 3-paper Russian digest
+with a Grok X/Twitter + Reddit social-context check.
+
+Spec: learning-arxiv-implementation-spec-2026-06-12 (KB decisions; cross-reviewed
+round 2: codex approve-with-nits, agy approve-with-nits).
+
+Flow: fetch arXiv Atom → deterministic regex ranking → select up to 3 papers
+→ deterministic Russian summaries from title+abstract → one Grok call for
+X/Reddit context per paper → short Russian Telegram digest + file artifacts.
+
+Primary selection is arXiv-only by construction: no RSS/HN/GitHub/news
+collector exists in this runner, so official-source links can never outrank
+papers. NotebookLM is never called here — audio stays manual-only.
+
+Artifacts per date:
+  sources/arxiv-learning-snapshot-<DATE>.md
+  sources/arxiv-learning-social-grok-<DATE>.md
+  reports/learning-arxiv-summary-<DATE>.md
+  .orchestrator/learning-arxiv-<DATE>.json (+ .lock)
+
+Env:
+  KB_HUB                            hub root (default ~/knowledge)
+  KB_LEARNING_ARXIV_FIXTURE         path to Atom XML — bypasses network fetch
+  KB_LEARNING_ARXIV_DISABLE_NETWORK 1 = fail fetch unless fixture is set
+  KB_LEARNING_ARXIV_GROK_BIN        grok binary override (tests use a fake)
+  KB_LEARNING_ARXIV_GROK_TIMEOUT    seconds (default 600)
+  KB_PROCESS_OUTPUTS / KB_PROCESS_BACKGROUND  set by kb-tick
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+# NOTE: no urllib here, deliberately. On macOS, a urllib fetch in this
+# process leaves CFNetwork/Obj-C state that makes a subsequently spawned
+# Bun-based CLI (grok 0.2.22) SIGSEGV instantly — repro 2026-06-12: after
+# urllib.request.urlopen, even `grok --version` exits -11. arXiv is fetched
+# through a curl subprocess instead (same transport kb-channel-send uses).
+
+HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+CONFIG_PATH = HUB / "personal" / "daily-research.yaml"
+REPORTS = HUB / "reports"
+SOURCES = HUB / "sources"
+ORCH = HUB / ".orchestrator"
+LOG = HUB / "logs" / "learning-arxiv.log"
+
+API_BASE = "https://export.arxiv.org/api/query"
+USER_AGENT = os.environ.get(
+    "KB_ARXIV_USER_AGENT", "kb-learning-arxiv/1.0 (mailto:user@example.com)"
+)
+ATOM_NS = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+
+DEFAULT_CATEGORIES = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "stat.ML"]
+MAX_PAPERS_DEFAULT = 3
+DIGEST_BUDGET = 3500
+INCIDENT_ATTEMPTS = 8
+HTTP_TIMEOUT = 30
+JACCARD_LIMIT = 0.6
+
+# Keys in personal/daily-research.yaml that belong to the legacy runner only.
+LEGACY_KEYS = ("mode", "source_mode", "topic_override", "research_mode",
+               "max_sources", "max_attempts")
+
+SOCIAL_STATUSES = {"found", "weak", "not_found", "degraded"}
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+
+# Topic keyword groups for the deterministic ranker (spec: Deterministic
+# scoring formula v1). Group name → compiled regex.
+TOPIC_GROUPS = [
+    ("agents", re.compile(r"\b(agents?|agentic|multi[- ]agent)\b", re.I)),
+    ("reasoning", re.compile(r"\b(reasoning|chain[- ]of[- ]thought|planning)\b", re.I)),
+    ("memory", re.compile(r"\b(memory|knowledge[- ]bases?|retrieval|\brag\b|retrieval[- ]augmented)\b", re.I)),
+    ("tools", re.compile(r"\b(tool[- ]use|tools?|mcp|function[- ]calling)\b", re.I)),
+    ("evaluation", re.compile(r"\b(evaluation|benchmark|evaluating)\b", re.I)),
+    ("local", re.compile(r"\b(local|on[- ]device|efficient[- ]inference|quantization)\b", re.I)),
+    ("safety", re.compile(r"\b(safety|alignment)\b", re.I)),
+]
+
+PROBLEM_RE = re.compile(r"\b(we study|we investigate|we analyze|problem|challenge|limitation)\b", re.I)
+METHOD_RE = re.compile(r"\b(we propose|we introduce|we present|our (method|framework|approach))\b", re.I)
+RESULT_RE = re.compile(r"\b(we show|results?|achieves?|improves?|outperforms?|state[- ]of[- ]the[- ]art)\b", re.I)
+# Quantitative marker per the approved formula: a number ADJACENT to a metric
+# token — bare "accuracy"/"score" without a number does not count.
+QUANT_RE = re.compile(
+    r"\d+(\.\d+)?\s*(%|x\b|points?\b|pp\b)"
+    r"|\b(accuracy|score)\b[^.]{0,24}\d"
+    r"|\d[^.]{0,24}\b(accuracy|score)\b",
+    re.I,
+)
+PRACT_CODE_RE = re.compile(r"\b(open[- ]source|code is available|we release|release our code)\b", re.I)
+PRACT_DEPLOY_RE = re.compile(r"\b(deploy(ment)?|production|local|on[- ]device)\b", re.I)
+
+STOP_WORDS = {
+    "this", "that", "with", "from", "into", "over", "under", "between",
+    "their", "these", "those", "which", "while", "where", "when", "what",
+    "based", "using", "such", "than", "then", "them", "they", "have",
+    "been", "more", "most", "also", "show", "shows", "paper", "study",
+    "propose", "present", "approach", "method", "methods", "model",
+    "models", "results", "result", "novel", "framework",
+}
+
+WHY_RU = {
+    "agents": "напрямую про агентные системы — ядро Vepol.",
+    "reasoning": "про качество reasoning/планирования — влияет на оркестрацию задач.",
+    "memory": "про память/RAG/KB — это архитектура знаний Vepol.",
+    "tools": "про tool-use/MCP — то, как агенты Vepol зовут инструменты.",
+    "evaluation": "про оценку агентов — пригодится для проверки качества процессов.",
+    "local": "про локальные/эффективные модели — Vepol живёт на локальной машине.",
+    "safety": "про safety/alignment — рамки безопасности агентских действий.",
+}
+
+STATUS_RU = {"not_found": "не найдено"}
+
+
+def now_iso() -> str:
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def today_iso() -> str:
+    return datetime.date.today().isoformat()
+
+
+def log(msg: str) -> None:
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"[{now_iso()}] learning-arxiv: {msg}\n")
+
+
+def atomic_write(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def rel(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(HUB))
+    except ValueError:
+        return str(path)
+
+
+# --------------------------------------------------------------------------
+# Config (read-only; legacy keys are ignored with a single log line)
+# --------------------------------------------------------------------------
+
+def load_config() -> dict:
+    cfg = {
+        "language": "ru",
+        "learning_topic": "ai_agents",
+        "max_papers": MAX_PAPERS_DEFAULT,
+        "arxiv_categories": list(DEFAULT_CATEGORIES),
+        "social_check": "grok",
+    }
+    if not CONFIG_PATH.is_file():
+        return cfg
+    legacy_present = []
+    for raw in CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        # Inline comments ("max_papers: 3 # limit") must not poison values.
+        line = re.split(r"\s+#", line, maxsplit=1)[0].strip()
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key, val = key.strip(), val.strip().strip("'\"")
+        if key in LEGACY_KEYS:
+            legacy_present.append(key)
+            continue
+        if key == "max_papers":
+            try:
+                # The scheduled contract is "up to three papers" — a config
+                # typo must not flood the digest.
+                cfg["max_papers"] = max(1, min(3, int(val)))
+            except ValueError:
+                pass
+        elif key == "arxiv_categories":
+            m = re.match(r"^\[(.*)\]$", val)
+            if m:
+                cats = [c.strip().strip("'\"") for c in m.group(1).split(",") if c.strip()]
+                if cats:
+                    cfg["arxiv_categories"] = cats
+        elif key in ("language", "learning_topic", "social_check", "focus_project"):
+            if val:
+                cfg[key] = val
+    if legacy_present:
+        log(f"legacy config keys ignored: {', '.join(sorted(legacy_present))}")
+    return cfg
+
+
+# --------------------------------------------------------------------------
+# Paths / manifest / lock
+# --------------------------------------------------------------------------
+
+def manifest_path(d: str) -> pathlib.Path:
+    return ORCH / f"learning-arxiv-{d}.json"
+
+
+def lock_path(d: str) -> pathlib.Path:
+    return ORCH / f"learning-arxiv-{d}.lock"
+
+
+def report_path(d: str) -> pathlib.Path:
+    return REPORTS / f"learning-arxiv-summary-{d}.md"
+
+
+def snapshot_path(d: str) -> pathlib.Path:
+    return SOURCES / f"arxiv-learning-snapshot-{d}.md"
+
+
+def social_path(d: str) -> pathlib.Path:
+    return SOURCES / f"arxiv-learning-social-grok-{d}.md"
+
+
+def load_manifest(d: str) -> dict:
+    p = manifest_path(d)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"{d}: manifest parse failed: {exc}; starting fresh")
+        return {}
+
+
+def save_manifest(d: str, manifest: dict) -> None:
+    atomic_write(manifest_path(d), json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+def acquire_lock(d: str):
+    """Advisory flock — auto-released on process exit/crash; a stale lock
+    file on disk never blocks future runs (spec: Manifest Schema). Opened
+    in append mode so a contender that fails the flock never truncates the
+    holder's pid/started_at metadata."""
+    ORCH.mkdir(parents=True, exist_ok=True)
+    fh = lock_path(d).open("a", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    fh.seek(0)
+    fh.truncate(0)
+    fh.write(f"pid={os.getpid()} started_at={now_iso()}\n")
+    fh.flush()
+    return fh
+
+
+# --------------------------------------------------------------------------
+# arXiv fetch + parse
+# --------------------------------------------------------------------------
+
+def build_query(categories: list) -> str:
+    cat_clause = "+OR+".join(f"cat:{c}" for c in categories)
+    return (
+        f"{API_BASE}?search_query=({cat_clause})"
+        f"&sortBy=submittedDate&sortOrder=descending&max_results=100"
+    )
+
+
+def fetch_atom(categories: list) -> str:
+    fixture = os.environ.get("KB_LEARNING_ARXIV_FIXTURE", "").strip()
+    if fixture:
+        return pathlib.Path(fixture).read_text(encoding="utf-8")
+    if os.environ.get("KB_LEARNING_ARXIV_DISABLE_NETWORK", "").strip() in {"1", "true", "yes"}:
+        raise RuntimeError("network disabled and no fixture provided")
+    url = build_query(categories)
+    log(f"GET {url}")
+    proc = subprocess.run(
+        ["curl", "-sSL", "--fail", "--max-time", str(HTTP_TIMEOUT), "-A", USER_AGENT, url],
+        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"curl rc={proc.returncode}: {(proc.stderr or '').strip()[:200]}"
+        )
+    return proc.stdout
+
+
+def parse_atom(xml_text: str) -> list:
+    out = []
+    root = ET.fromstring(xml_text)
+    for entry in root.findall("a:entry", ATOM_NS):
+        try:
+            entry_id = (entry.findtext("a:id", default="", namespaces=ATOM_NS) or "").strip()
+            arxid = re.sub(r"v\d+$", "", entry_id.rsplit("/", 1)[-1])
+            if not arxid:
+                continue
+            title = re.sub(r"\s+", " ", (entry.findtext("a:title", default="", namespaces=ATOM_NS) or "").strip())
+            abstract = re.sub(r"\s+", " ", (entry.findtext("a:summary", default="", namespaces=ATOM_NS) or "").strip())
+            published = (entry.findtext("a:published", default="", namespaces=ATOM_NS) or "").strip()
+            authors = []
+            for a in entry.findall("a:author", ATOM_NS):
+                n = a.findtext("a:name", default="", namespaces=ATOM_NS)
+                if n:
+                    authors.append(n.strip())
+            cat_el = entry.find("arxiv:primary_category", ATOM_NS)
+            primary_cat = cat_el.attrib.get("term", "") if cat_el is not None else ""
+            out.append({
+                "id": arxid,
+                "title": title,
+                "abstract": abstract,
+                "authors": authors,
+                "published": published,
+                "primary_category": primary_cat,
+                "link": f"https://arxiv.org/abs/{arxid}",
+            })
+        except Exception as exc:
+            log(f"skip entry parse error: {exc}")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Deterministic scoring + selection (spec: Deterministic scoring formula v1)
+# --------------------------------------------------------------------------
+
+def topic_groups(text: str) -> set:
+    return {name for name, rx in TOPIC_GROUPS if rx.search(text)}
+
+
+def score_paper(paper: dict) -> dict:
+    title, abstract = paper["title"], paper["abstract"]
+    title_groups = topic_groups(title)
+    abstract_groups = topic_groups(abstract)
+    topic_relevance = min(10, 2 * len(title_groups) + len(abstract_groups))
+    abstract_signal = sum(1 for rx in (PROBLEM_RE, METHOD_RE, RESULT_RE, QUANT_RE) if rx.search(abstract))
+    practicality = 0
+    if PRACT_CODE_RE.search(f"{title} {abstract}"):
+        practicality += 1
+    if len(title_groups | abstract_groups) >= 2:
+        practicality += 1
+    if PRACT_DEPLOY_RE.search(f"{title} {abstract}"):
+        practicality += 1
+    scores = {
+        "topic_relevance": topic_relevance,
+        "abstract_signal": min(4, abstract_signal),
+        "novelty_practicality": min(3, practicality),
+        "author_signal": 0,  # v1: never guess affiliations
+    }
+    scores["final"] = (3 * scores["topic_relevance"] + 2 * scores["abstract_signal"]
+                       + 2 * scores["novelty_practicality"])
+    paper["scores"] = scores
+    paper["_groups"] = sorted(title_groups | abstract_groups)
+    return scores
+
+
+def jaccard_tokens(paper: dict) -> set:
+    words = re.findall(r"[a-z]{4,}", f"{paper['title']} {paper['abstract']}".lower())
+    return {w for w in words if w not in STOP_WORDS}
+
+
+def jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def rank_candidates(papers: list) -> list:
+    """Sort by final score desc, then newer published, then smaller arXiv id
+    (chained stable sorts — fully reproducible for the same input)."""
+    ranked = sorted(papers, key=lambda p: p["id"])
+    ranked.sort(key=lambda p: p.get("published", ""), reverse=True)
+    ranked.sort(key=lambda p: p["scores"]["final"], reverse=True)
+    return ranked
+
+
+def select_papers(papers: list, max_papers: int) -> tuple:
+    relevant = [p for p in papers if score_paper(p)["topic_relevance"] > 0]
+    ranked = rank_candidates(relevant)
+    selected, skipped_dup = [], []
+    for cand in ranked:
+        if len(selected) >= max_papers:
+            break
+        toks = jaccard_tokens(cand)
+        dup_of = next(
+            (s for s in selected if jaccard(toks, jaccard_tokens(s)) > JACCARD_LIMIT),
+            None,
+        )
+        if dup_of is not None:
+            cand["_dup_of"] = dup_of["id"]
+            skipped_dup.append(cand)
+            continue
+        cand["reason"] = (
+            f"final={cand['scores']['final']} "
+            f"(topics: {', '.join(cand['_groups']) or '—'})"
+        )
+        selected.append(cand)
+    # Diversity escape hatch: if duplicates were skipped and we still have
+    # room, take them back in rank order and note the cluster.
+    if len(selected) < max_papers:
+        for cand in skipped_dup:
+            if len(selected) >= max_papers:
+                break
+            cand["reason"] = (
+                f"final={cand['scores']['final']} — near-duplicate cluster with "
+                f"{cand['_dup_of']}, taken to fill the selection"
+            )
+            selected.append(cand)
+    selected_ids = {p["id"] for p in selected}
+    runner_ups = [
+        {"id": p["id"], "title": p["title"], "scores": p["scores"],
+         "reason_rejected": ("near-duplicate of " + p["_dup_of"]) if p.get("_dup_of")
+         else "lower final score"}
+        for p in ranked if p["id"] not in selected_ids
+    ]
+    return selected, runner_ups, len(relevant)
+
+
+# --------------------------------------------------------------------------
+# Deterministic Russian summaries (bounded by title+abstract; no invention)
+# --------------------------------------------------------------------------
+
+def split_sentences(text: str) -> list:
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+
+
+def truncate_sentence(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+    if last > 40:
+        return cut[: last + 1]
+    last_space = cut.rfind(" ")
+    return (cut[:last_space] + "…") if last_space > 0 else cut + "…"
+
+
+def studied_text(paper: dict, limit: int = 240) -> str:
+    sents = split_sentences(paper["abstract"])
+    for s in sents:
+        if PROBLEM_RE.search(s):
+            return truncate_sentence(s, limit)
+    return truncate_sentence(sents[0], limit) if sents else "—"
+
+
+def found_text(paper: dict, limit: int = 240) -> str:
+    sents = split_sentences(paper["abstract"])
+    for s in sents:
+        if RESULT_RE.search(s) and not PROBLEM_RE.search(s):
+            return truncate_sentence(s, limit)
+    for s in sents:
+        if RESULT_RE.search(s):
+            return truncate_sentence(s, limit)
+    return "в аннотации нет явного результата"
+
+
+def why_text(paper: dict) -> str:
+    for name, _rx in TOPIC_GROUPS:
+        if name in paper.get("_groups", []):
+            return WHY_RU[name]
+    return "расширяет картину текущего AI-ресёрча."
+
+
+def studied_display(paper: dict, limit: int = 240) -> str:
+    """Russian summary (Grok bounded translation) when available; otherwise
+    the deterministic English abstract extract — an honest degraded mode,
+    marked in the manifest as summary_source=fallback_en."""
+    if paper.get("studied_ru"):
+        return truncate_sentence(paper["studied_ru"], limit)
+    return studied_text(paper, limit)
+
+
+def found_display(paper: dict, limit: int = 240) -> str:
+    if paper.get("found_ru"):
+        return truncate_sentence(paper["found_ru"], limit)
+    return found_text(paper, limit)
+
+
+def build_summary_ru(paper: dict) -> str:
+    return (
+        f"Что исследовали: {studied_display(paper)} "
+        f"Что выяснили: {found_display(paper)} "
+        f"Зачем тебе: {why_text(paper)}"
+    )
+
+
+def render_authors(authors: list) -> str:
+    if not authors:
+        return "—"
+    if len(authors) <= 3:
+        return ", ".join(authors)
+    return ", ".join(authors[:3]) + " et al."
+
+
+# --------------------------------------------------------------------------
+# Grok social check (one call covering all selected papers)
+# --------------------------------------------------------------------------
+
+def grok_bin() -> str:
+    configured = os.environ.get("KB_LEARNING_ARXIV_GROK_BIN", "").strip()
+    if configured:
+        return configured
+    return str(pathlib.Path.home() / ".grok" / "bin" / "grok")
+
+
+def grok_prompt(date_iso: str, papers: list) -> str:
+    blocks = []
+    for p in papers:
+        phrases = ", ".join(p.get("_groups", [])[:5]) or "AI research"
+        blocks.append(
+            f"- id: {p['id']}\n  title: {p['title']}\n"
+            f"  authors: {render_authors(p['authors'])}\n  link: {p['link']}\n"
+            f"  key phrases: {phrases}\n"
+            f"  abstract: {p['abstract'][:1200]}"
+        )
+    papers_block = "\n".join(blocks)
+    return f"""# Social context check + Russian summaries for today's arXiv learning digest ({date_iso})
+
+For EACH paper below, do two things:
+
+1. Search X/Twitter and Reddit for discussion of the exact paper
+   (title/authors/arXiv id) AND broader prior discussion of its core idea.
+   Separate exact-paper discussion from prior idea discussion.
+2. Summarize the paper in Russian, STRICTLY from the given title+abstract —
+   no outside claims, no invented numbers:
+   - `studied_ru`: одно русское предложение — что именно исследовали (≤ 180 символов)
+   - `found_ru`: одно русское предложение — что выяснили/заявляют (≤ 180 символов)
+
+Papers:
+{papers_block}
+
+Return ONLY one JSON object, no prose before or after, exactly this shape:
+{{"papers": [{{"id": "<arxiv id>", "x_status": "found|weak|not_found|degraded",
+"reddit_status": "found|weak|not_found|degraded", "evidence": "<short links/snippets>",
+"prior_context": "<одна русская фраза о прежнем обсуждении идеи>",
+"studied_ru": "<русское предложение из title/abstract>",
+"found_ru": "<русское предложение из title/abstract>"}}]}}
+
+Rules: use `not_found` only when the search WORKED and found nothing; if a
+search surface failed or was blocked, use `degraded` for that channel.
+`studied_ru`/`found_ru` are translations/compressions of the provided
+abstract only — never add facts the abstract does not state.
+"""
+
+
+def run_grok(date_iso: str, papers: list) -> tuple:
+    """Returns (stdout, rc, stderr_tail). Never raises."""
+    prompt_file = ORCH / f"learning-arxiv-grok-prompt-{date_iso}.md"
+    atomic_write(prompt_file, grok_prompt(date_iso, papers))
+    timeout = int(os.environ.get("KB_LEARNING_ARXIV_GROK_TIMEOUT", "600"))
+    cmd = [
+        grok_bin(),
+        "--cwd", str(HUB),
+        "--prompt-file", str(prompt_file),
+        "--output-format", "plain",
+        "--permission-mode", "acceptEdits",
+        "--max-turns", "120",
+        "--no-subagents",
+        "--no-memory",
+    ]
+    try:
+        # stdin=DEVNULL: CLI agents crash or hang on an inherited closed/open
+        # stdin under background runners (same class as the codex>=0.138
+        # spawner incident 2026-06-11; grok 0.2.22 SIGSEGVs, repro 2026-06-12).
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              check=False, stdin=subprocess.DEVNULL)
+        return proc.stdout, proc.returncode, (proc.stderr or "")[-300:]
+    except subprocess.TimeoutExpired:
+        return "", -1, "grok timeout"
+    except Exception as exc:
+        return "", -1, str(exc)[-300:]
+
+
+def parse_grok(stdout: str) -> dict:
+    """Best-effort: first balanced JSON object → {paper_id: record}."""
+    text = stdout.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
+    out = {}
+    for rec in data.get("papers", []) if isinstance(data, dict) else []:
+        if isinstance(rec, dict) and rec.get("id"):
+            out[str(rec["id"])] = rec
+    return out
+
+
+def social_check(date_iso: str, papers: list) -> tuple:
+    """Mutates papers in place with per-paper social dicts. Returns
+    (social_check_status, grok_rc, stderr_tail, raw_stdout)."""
+    if not papers:
+        return "ok", None, "", ""
+    stdout, rc, stderr_tail = run_grok(date_iso, papers)
+    by_id = parse_grok(stdout) if rc == 0 and stdout.strip() else {}
+    whole_call_failed = rc != 0 or not stdout.strip() or not by_id
+    any_degraded = False
+    all_parsed = True
+    for p in papers:
+        rec = by_id.get(p["id"], {})
+        social = {}
+        for ch in ("x_status", "reddit_status"):
+            val = str(rec.get(ch, "")).strip()
+            if whole_call_failed or val not in SOCIAL_STATUSES:
+                # Search failure or unparseable value is degraded — never an
+                # invented not_found (spec hard rule).
+                social[ch] = "degraded"
+                any_degraded = True
+                all_parsed = False
+            else:
+                social[ch] = val
+                if val == "degraded":
+                    any_degraded = True
+        social["evidence"] = str(rec.get("evidence", "") or "")[:500]
+        social["prior_context"] = truncate_sentence(str(rec.get("prior_context", "") or ""), 200)
+        p["social"] = social
+        # Russian summary is Grok's bounded translation of title+abstract.
+        # Missing/empty → deterministic English-extract fallback, explicitly
+        # marked, so the digest is honest about its degraded summary source.
+        studied_ru = truncate_sentence(str(rec.get("studied_ru", "") or "").strip(), 200)
+        found_ru = truncate_sentence(str(rec.get("found_ru", "") or "").strip(), 200)
+        # Sanity check: accept the summary as Russian only if it actually
+        # contains Cyrillic — a malformed Grok reply with English text must
+        # land in the marked fallback, not masquerade as a translation.
+        if (studied_ru and found_ru
+                and CYRILLIC_RE.search(studied_ru) and CYRILLIC_RE.search(found_ru)):
+            p["studied_ru"] = studied_ru
+            p["found_ru"] = found_ru
+            p["summary_source"] = "grok"
+        else:
+            p["summary_source"] = "fallback_en"
+    if whole_call_failed:
+        status = "degraded"
+    elif any_degraded or not all_parsed:
+        status = "partial"
+    else:
+        status = "ok"
+    return status, rc, stderr_tail, stdout
+
+
+# --------------------------------------------------------------------------
+# Renderers
+# --------------------------------------------------------------------------
+
+def render_status(value: str) -> str:
+    return STATUS_RU.get(value, value)
+
+
+def render_snapshot(date_iso: str, papers: list, runner_ups: list, fetched: int, relevant: int) -> str:
+    lines = [
+        "---",
+        "type: source",
+        "kind: arxiv-learning-snapshot",
+        f"date: {date_iso}",
+        f"total_fetched: {fetched}",
+        f"total_relevant: {relevant}",
+        f"selected: {len(papers)}",
+        "generator: kb-learning-arxiv v1",
+        "---",
+        "",
+        f"# arXiv learning snapshot — {date_iso}",
+        "",
+        "## Selected",
+        "",
+    ]
+    for p in papers:
+        lines.append(
+            f"- **{p['title']}** — {render_authors(p['authors'])}\n"
+            f"  {p['link']} · {p.get('primary_category', '')} · {p.get('published', '')[:10]}\n"
+            f"  scores: {json.dumps(p['scores'])}\n"
+            f"  reason: {p['reason']}\n"
+            f"  {p['abstract'][:600]}\n"
+        )
+    if runner_ups:
+        lines.append("## Runner-ups\n")
+        for r in runner_ups:
+            lines.append(f"- {r['id']} **{r['title']}** — {r['reason_rejected']} (final={r['scores']['final']})")
+    return "\n".join(lines) + "\n"
+
+
+def render_social_source(date_iso: str, papers: list, status: str, rc, stderr_tail: str, raw: str) -> str:
+    lines = [
+        "---",
+        "type: source",
+        "kind: arxiv-learning-social-grok",
+        f"date: {date_iso}",
+        f"social_check: {status}",
+        f"grok_rc: {rc if rc is not None else 'null'}",
+        "generator: kb-learning-arxiv v1",
+        "---",
+        "",
+        f"# Grok social check — {date_iso}",
+        "",
+    ]
+    for p in papers:
+        s = p.get("social", {})
+        lines.append(
+            f"## {p['id']} {p['title']}\n"
+            f"- X: {s.get('x_status', 'degraded')}\n"
+            f"- Reddit: {s.get('reddit_status', 'degraded')}\n"
+            f"- Evidence: {s.get('evidence', '') or '—'}\n"
+            f"- Prior context: {s.get('prior_context', '') or '—'}\n"
+        )
+    if stderr_tail:
+        lines.append(f"## Grok stderr tail\n\n```\n{stderr_tail}\n```\n")
+    lines.append("## Raw stdout\n\n```\n" + (raw or "")[:4000] + "\n```")
+    return "\n".join(lines) + "\n"
+
+
+def render_report(date_iso: str, papers: list, runner_ups: list, social_status: str, relevant: int) -> str:
+    lines = [
+        f"# arXiv learning — разбор {date_iso}",
+        "",
+        f"Выбрано статей: {len(papers)} (релевантных кандидатов: {relevant}). "
+        f"Social check: {social_status}.",
+        "",
+    ]
+    for i, p in enumerate(papers, 1):
+        s = p.get("social", {})
+        lines.extend([
+            f"## {i}. {p['title']}",
+            "",
+            f"- Авторы: {render_authors(p['authors'])}",
+            f"- arXiv: {p['link']}",
+            f"- Категория: {p.get('primary_category', '—')} · {p.get('published', '')[:10]}",
+            f"- Почему выбрана: {p['reason']}",
+            f"- Scores: `{json.dumps(p['scores'])}`",
+            "",
+            f"**Что исследовали:** {studied_display(p, 500)}",
+            "",
+            f"**Что выяснили:** {found_display(p, 500)}",
+            "",
+            f"**X:** {render_status(s.get('x_status', 'degraded'))} · "
+            f"**Reddit:** {render_status(s.get('reddit_status', 'degraded'))}",
+            f"**Прежнее обсуждение:** {s.get('prior_context', '') or '—'}",
+            f"**Evidence:** {s.get('evidence', '') or '—'}",
+            "",
+            f"**Зачем тебе:** {why_text(p)}",
+            "",
+            f"**Abstract:** {p['abstract']}",
+            "",
+        ])
+    if runner_ups:
+        lines.append("## Runner-ups (не вошли)")
+        lines.append("")
+        for r in runner_ups:
+            lines.append(f"- `{r['id']}` {r['title']} — {r['reason_rejected']} (final={r['scores']['final']})")
+        lines.append("")
+    lines.append(f"Источники: [[arxiv-learning-snapshot-{date_iso}]], [[arxiv-learning-social-grok-{date_iso}]]")
+    return "\n".join(lines) + "\n"
+
+
+def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int) -> str:
+    header = [f"🧪 arXiv learning — {date_iso}", ""]
+    if not papers:
+        header.append("Сводка: релевантных статей сегодня нет (после фильтра по AI-agent темам).")
+        header.append("")
+        header.append(f"Полный разбор: reports/learning-arxiv-summary-{date_iso}.md")
+        return "\n".join(header)
+    if len(papers) < max_papers:
+        header.append(f"Сегодня только {len(papers)} релевантных статей — больше не нашлось:")
+    else:
+        header.append(f"Сегодня выбрал {len(papers)} статьи:")
+    header.append("")
+
+    def paper_block(p: dict, idx: int, text_limit: int) -> str:
+        s = p.get("social", {})
+        title = truncate_sentence(p["title"], 160)
+        social_line = (
+            f"X: {render_status(s.get('x_status', 'degraded'))} / "
+            f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
+        )
+        prior = s.get("prior_context", "")
+        if prior:
+            social_line += f" — {prior}"
+        return (
+            f"{idx}. {title} — {render_authors(p['authors'])}\n"
+            f"   arXiv: {p['link']}\n"
+            f"   Что исследовали: {studied_display(p, text_limit)}\n"
+            f"   Что выяснили: {found_display(p, text_limit)}\n"
+            f"   {social_line}\n"
+            f"   Зачем тебе: {why_text(p)}"
+        )
+
+    footer = ["", f"Полный разбор: reports/learning-arxiv-summary-{date_iso}.md"]
+    text_limit = 240
+    while True:
+        blocks = [paper_block(p, i, text_limit) for i, p in enumerate(papers, 1)]
+        digest = "\n".join(header + ["\n\n".join(blocks)] + footer)
+        if len(digest) <= DIGEST_BUDGET or text_limit <= 60:
+            return digest
+        text_limit -= 30
+
+
+# --------------------------------------------------------------------------
+# Delivery
+# --------------------------------------------------------------------------
+
+def process_outputs() -> set:
+    raw = os.environ.get("KB_PROCESS_OUTPUTS", "telegram,file")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def resolve_channel_send_bin() -> str:
+    hub_bin = HUB / "bin" / "kb-channel-send"
+    if hub_bin.exists():
+        return str(hub_bin)
+    default_bin = pathlib.Path.home() / "knowledge" / "bin" / "kb-channel-send"
+    if default_bin.exists():
+        return str(default_bin)
+    return ""
+
+
+def deliver_digest(date_iso: str, digest: str, manifest: dict) -> int:
+    outputs = process_outputs()
+    manifest["outputs"] = sorted(outputs)
+    manifest["digest"] = digest
+    if "telegram" not in outputs:
+        manifest["digest_delivered"] = False
+        manifest["status"] = "completed"
+        manifest["error"] = None
+        save_manifest(date_iso, manifest)
+        log(f"{date_iso}: completed without telegram output (outputs={sorted(outputs)})")
+        return 0
+    sender = resolve_channel_send_bin()
+    if not sender:
+        return _delivery_failed(date_iso, manifest, "kb-channel-send not found")
+    try:
+        proc = subprocess.run(
+            [sender, "learning-arxiv", digest],
+            capture_output=True, text=True, timeout=60, check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        # A hung/crashed sender must record a failed manifest, not crash
+        # the runner with an unwritten state (TimeoutExpired included).
+        return _delivery_failed(date_iso, manifest, f"telegram delivery failed: {exc}")
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
+        return _delivery_failed(date_iso, manifest, f"telegram delivery failed: {detail}")
+    manifest["digest_delivered"] = True
+    manifest["status"] = "completed"
+    manifest["error"] = None
+    save_manifest(date_iso, manifest)
+    log(f"{date_iso}: digest delivered")
+    return 0
+
+
+def _delivery_failed(date_iso: str, manifest: dict, error: str) -> int:
+    manifest["digest_delivered"] = False
+    manifest["status"] = "failed"
+    manifest["error"] = error
+    maybe_suggest_incident(date_iso, manifest)
+    save_manifest(date_iso, manifest)
+    log(f"{date_iso}: {error}")
+    return 1
+
+
+def maybe_suggest_incident(date_iso: str, manifest: dict) -> None:
+    if int(manifest.get("attempts") or 0) >= INCIDENT_ATTEMPTS and not manifest.get("incident_suggested"):
+        manifest["incident_suggested"] = True
+        log(f"{date_iso}: ESCALATE — {manifest['attempts']} failed attempts today; "
+            f"suggest incident review (runner never auto-writes incidents.md)")
+
+
+# --------------------------------------------------------------------------
+# Main flow
+# --------------------------------------------------------------------------
+
+def run(date_iso: str, force: bool, dry_run: bool) -> int:
+    cfg = load_config()
+    if dry_run:
+        print(f"[dry] would fetch arXiv Atom ({cfg['arxiv_categories']}), select up to "
+              f"{cfg['max_papers']} papers, run grok social check, deliver Russian "
+              f"telegram digest, write {rel(report_path(date_iso))}")
+        return 0
+
+    lock_fh = acquire_lock(date_iso)
+    manifest = load_manifest(date_iso)
+    if lock_fh is None:
+        if manifest.get("digest_delivered"):
+            log(f"{date_iso}: lock held but digest already delivered; rc=0")
+            return 0
+        log(f"{date_iso}: another run holds the lock and no delivered digest; rc=1")
+        return 1
+    try:
+        return _run_locked(date_iso, cfg, manifest, force)
+    finally:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
+    if not force:
+        if manifest.get("digest_delivered"):
+            log(f"{date_iso}: digest already delivered; idempotent rc=0")
+            return 0
+        # Terminal-ness follows the CURRENT process outputs: a day completed
+        # file-only stays terminal only while telegram is still not required;
+        # if the config later adds telegram, fall through to the stage cache
+        # and deliver.
+        if manifest.get("status") == "completed" and "telegram" not in process_outputs():
+            log(f"{date_iso}: already completed and telegram not required; rc=0")
+            return 0
+    if force:
+        manifest = {"attempts": int(manifest.get("attempts") or 0)}
+
+    manifest.update({
+        "date": date_iso,
+        "status": manifest.get("status") or "started",
+        "attempts": int(manifest.get("attempts") or 0) + 1,
+        "last_attempt_at": now_iso(),
+        "language": cfg.get("language", "ru"),
+        "learning_topic": cfg.get("learning_topic", "ai_agents"),
+    })
+    manifest.setdefault("incident_suggested", False)
+    manifest.setdefault("arxiv_fetched", 0)
+    manifest.setdefault("arxiv_relevant", 0)
+    save_manifest(date_iso, manifest)
+
+    max_papers = int(cfg.get("max_papers") or MAX_PAPERS_DEFAULT)
+
+    # Stage cache (spec): selection+social already done, only delivery failed
+    # → re-render and re-deliver from the manifest; never re-fetch arXiv or
+    # re-invoke Grok.
+    # `selected_papers is not None` (not truthiness): a completed zero-paper
+    # day must also recover from the cache instead of re-fetching arXiv.
+    cached = (
+        not force
+        and manifest.get("selected_papers") is not None
+        and manifest.get("social_check")
+    )
+    if cached:
+        log(f"{date_iso}: reusing cached selection+social from manifest (stage cache)")
+        papers = manifest["selected_papers"]
+        digest = render_digest(date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)), max_papers)
+        return deliver_digest(date_iso, digest, manifest)
+
+    try:
+        xml_text = fetch_atom(cfg["arxiv_categories"])
+        candidates = parse_atom(xml_text)
+        if not candidates:
+            raise RuntimeError("arXiv feed parsed to zero entries")
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["error"] = f"arxiv fetch failed: {exc}"
+        maybe_suggest_incident(date_iso, manifest)
+        save_manifest(date_iso, manifest)
+        log(f"{date_iso}: arxiv fetch failed: {exc}")
+        return 1
+
+    selected, runner_ups, relevant = select_papers(candidates, max_papers)
+    for p in selected:
+        p["summary_ru"] = build_summary_ru(p)
+    manifest.update({
+        "status": "selected",
+        "arxiv_fetched": len(candidates),
+        "arxiv_relevant": relevant,
+        "selected_papers": [
+            {k: p[k] for k in ("id", "title", "authors", "link", "abstract",
+                               "published", "primary_category", "scores",
+                               "reason", "summary_ru", "_groups")}
+            for p in selected
+        ],
+        "runner_ups": runner_ups,
+        "error": None,
+    })
+    save_manifest(date_iso, manifest)
+    atomic_write(snapshot_path(date_iso),
+                 render_snapshot(date_iso, selected, runner_ups, len(candidates), relevant))
+
+    status, grok_rc, stderr_tail, raw = social_check(date_iso, selected)
+    manifest["social_check"] = status
+    manifest["grok_rc"] = grok_rc
+    manifest["grok_stderr_tail"] = stderr_tail
+    for m_p, p in zip(manifest["selected_papers"], selected):
+        m_p["social"] = p.get("social", {})
+        for k in ("studied_ru", "found_ru", "summary_source"):
+            if k in p:
+                m_p[k] = p[k]
+        # Rebuild now that the Russian translation (or its absence) is known.
+        p["summary_ru"] = build_summary_ru(p)
+        m_p["summary_ru"] = p["summary_ru"]
+    save_manifest(date_iso, manifest)
+    atomic_write(social_path(date_iso),
+                 render_social_source(date_iso, selected, status, grok_rc, stderr_tail, raw))
+
+    atomic_write(report_path(date_iso),
+                 render_report(date_iso, selected, runner_ups, status, relevant))
+    manifest["status"] = "report_written"
+    save_manifest(date_iso, manifest)
+
+    digest = render_digest(date_iso, selected, relevant, max_papers)
+    return deliver_digest(date_iso, digest, manifest)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="arXiv-only scheduled learning digest (3 papers, Russian, Grok social check)."
+    )
+    parser.add_argument("--date", default=today_iso(), help="Date in YYYY-MM-DD.")
+    parser.add_argument("--text-only", action="store_true",
+                        help="Text digest mode (default and only mode in v1; flag kept for the process contract).")
+    parser.add_argument("--force", action="store_true", help="Redo everything for the date, resend digest.")
+    parser.add_argument("--dry-run", action="store_true", help="Print intent, no network/disk/sends.")
+    args = parser.parse_args()
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+        print(f"invalid --date: {args.date}", file=sys.stderr)
+        return 2
+    return run(args.date, force=args.force, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

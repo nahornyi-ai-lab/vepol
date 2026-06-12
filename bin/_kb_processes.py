@@ -67,11 +67,11 @@ DEFAULT_PROCESSES_YAML = """\
   run: kb-retro
   outputs: [telegram, file]
 
-# Text research digest to Telegram; NotebookLM stays manual-only.
+# arXiv-only learning digest to Telegram; NotebookLM stays manual-only.
 - id: learning
   enabled: true
   when: after:daily
-  run: kb-daily-research --text-only
+  run: kb-learning-arxiv --text-only
   outputs: [telegram, file]
 
 # Enable only after watermark bootstrap: kb-extract-people --init-watermarks

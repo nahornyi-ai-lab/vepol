@@ -15,6 +15,15 @@ upgrading.
 ## [Unreleased]
 
 ### Added
+- **arXiv learning runner (`kb-learning-arxiv`)** — the scheduled `learning`
+  process now reads arXiv directly: deterministic regex ranking selects up
+  to three papers per day, one Grok CLI call checks prior X/Twitter and
+  Reddit discussion and produces Russian summaries bounded by each paper's
+  title+abstract, and a short Russian digest is delivered through the
+  configured channel. Grok failures degrade gracefully (statuses marked
+  `degraded`, digest still ships, summary falls back to marked abstract
+  extracts). The old broad-radar `kb-daily-research` stays available for
+  manual runs only.
 - **Background processes runtime** — the routine processes
   (daily brief, evening retro, learning digest, people extraction,
   follow-up reminders, calendar pull) are now declared in a single
@@ -38,6 +47,9 @@ upgrading.
   calls; the NotebookLM notebook + Russian audio recap is an explicit
   on-demand mode. Daily research sources are curated and audio artifacts
   are no longer downloaded locally.
+- **`daily` runs only its declared command.** The hidden arXiv prefetch
+  that `kb-tick` used to run before the morning brief is removed; arXiv
+  ownership lives entirely in the `learning` process.
 - Installer and hub setup hardened for existing/partial/upgraded
   installs: prerequisite version enforcement, never deleting hub
   directories (moved aside instead), custom-hub (`KB_HUB`/`VEPOL_HUB`)

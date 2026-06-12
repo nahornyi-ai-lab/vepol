@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Acceptance #5 (KEY TEST per Codex review): kb-tick failure isolation.
-# Mock kb-arxiv-pull as (a) rc=1, (b) hangs past 60s timeout, (c) FileNotFoundError.
-# In every case: kb-tick still calls kb-brief exactly once; brief_fired
-# remains driven only by kb-brief rc, never by kb-arxiv-pull.
+# kb-tick process-boundary tests for daily/learning.
 #
-# Updated for the processes release (processes-release-spec-2026-06-09):
-# kb-tick is gated by personal/processes.yaml; learning (kb-daily-research
-# --text-only) runs after:daily on the NEXT tick; the background
-# KB_ARXIV_NOTEBOOKLM_ENABLE branch is removed (no background NotebookLM).
+# Contract since learning-arxiv-implementation-spec-2026-06-12 (cross-reviewed
+# round 2): `daily` runs ONLY kb-brief — the historical hidden kb-arxiv-pull
+# prefetch is removed from the daily branch; arXiv ownership moved into the
+# `learning` process (kb-learning-arxiv --text-only). Background NotebookLM
+# stays banned (processes-release-spec-2026-06-09).
 #
 # Strategy: drive kb-tick with a synthetic plan + processes.yaml in a tmp
-# HUB, replace bin/kb-arxiv-pull with various mocks, replace bin/kb-brief
-# with a canary that bumps a counter file. Verify exactly-once invariant.
+# HUB; kb-arxiv-pull is a canary that must NEVER be invoked by the tick;
+# kb-brief is a counting canary. Verify exactly-once brief + zero prefetch.
 #
 # Usage: bash tests/test-arxiv-tick-integration.sh
 #   KB_TICK_SRC_BIN=<dir> to test a different kb-tick source (default:
@@ -52,6 +50,14 @@ echo '{"findings": []}'
 EOF
 chmod +x "$TMPHUB/bin/kb-doctor"
 
+# kb-arxiv-pull canary: present and executable, but the tick must never run it.
+cat > "$TMPHUB/bin/kb-arxiv-pull" <<EOF
+#!/usr/bin/env bash
+touch "$TMPHUB/arxiv-pull-called.marker"
+exit 0
+EOF
+chmod +x "$TMPHUB/bin/kb-arxiv-pull"
+
 write_plan() {
   TODAY=$(date +%Y-%m-%d)
   cat > "$TMPHUB/logs/today-plan.json" <<EOF
@@ -81,19 +87,19 @@ cat > "$TMPHUB/personal/processes.yaml" <<'EOF'
 - id: learning
   enabled: true
   when: after:daily
-  run: kb-daily-research --text-only
+  run: kb-learning-arxiv --text-only
   outputs: [telegram, file]
 EOF
 
-# kb-daily-research stub (used by learning scenarios; rc controlled by marker).
-write_daily_research_stub() { # rc
-  cat > "$TMPHUB/bin/kb-daily-research" <<EOF
+# kb-learning-arxiv stub (used by learning scenarios; rc controlled by arg).
+write_learning_stub() { # rc
+  cat > "$TMPHUB/bin/kb-learning-arxiv" <<EOF
 #!/usr/bin/env bash
 exit $1
 EOF
-  chmod +x "$TMPHUB/bin/kb-daily-research"
+  chmod +x "$TMPHUB/bin/kb-learning-arxiv"
 }
-write_daily_research_stub 0
+write_learning_stub 0
 
 reset_brief_canary() {
   # kb-brief stub: increments counter on every call, exit 0
@@ -121,48 +127,25 @@ run_tick_and_assert_brief_called_once() {
   fi
   # brief_fired must be true since canary returned rc=0
   FIRED=$(python3 -c "import json; print(json.load(open('$TMPHUB/logs/today-plan.json'))['brief_fired'])")
-  [[ "$FIRED" == "True" ]] && ok "$label: brief_fired=True (driven by kb-brief rc=0, not kb-arxiv-pull)" || fail "$label: brief_fired=$FIRED"
+  [[ "$FIRED" == "True" ]] && ok "$label: brief_fired=True (driven by kb-brief rc=0)" || fail "$label: brief_fired=$FIRED"
 }
 
-# === Scenario A: kb-arxiv-pull rc=1 ===
-echo "=== A: kb-arxiv-pull rc=1 ==="
-cat > "$TMPHUB/bin/kb-arxiv-pull" <<'EOF'
-#!/usr/bin/env bash
-exit 1
-EOF
-chmod +x "$TMPHUB/bin/kb-arxiv-pull"
-run_tick_and_assert_brief_called_once "A(rc=1)"
+# === Scenario A: daily branch has NO hidden arXiv prefetch ===
+echo "=== A: daily runs kb-brief only — kb-arxiv-pull canary never invoked ==="
+run_tick_and_assert_brief_called_once "A(no-prefetch)"
+if [[ -f "$TMPHUB/arxiv-pull-called.marker" ]]; then
+  fail "A: kb-arxiv-pull was invoked by the daily branch"
+else
+  ok "A: kb-arxiv-pull never invoked"
+fi
 
-# === Scenario B: kb-arxiv-pull hangs past 60s timeout ===
-# kb-tick hardcodes timeout=60 for the prefetch; patch to timeout=2 and hang
-# for 5s. Verify TimeoutExpired ⇒ brief still fires.
-echo "=== B: kb-arxiv-pull hangs (TimeoutExpired) ==="
-sed 's/timeout=60,/timeout=2,/' "$SRC_BIN/kb-tick" > "$TMPHUB/bin/kb-tick"
-chmod +x "$TMPHUB/bin/kb-tick"
-cat > "$TMPHUB/bin/kb-arxiv-pull" <<'EOF'
-#!/usr/bin/env bash
-sleep 5
-exit 0
-EOF
-chmod +x "$TMPHUB/bin/kb-arxiv-pull"
-run_tick_and_assert_brief_called_once "B(timeout)"
-# Restore real kb-tick
-cp "$SRC_BIN/kb-tick" "$TMPHUB/bin/kb-tick"
-chmod +x "$TMPHUB/bin/kb-tick"
-
-# === Scenario C: kb-arxiv-pull missing (FileNotFoundError) ===
-echo "=== C: kb-arxiv-pull missing ==="
-rm -f "$TMPHUB/bin/kb-arxiv-pull"
-run_tick_and_assert_brief_called_once "C(missing)"
-
-# === Scenario D: kb-arxiv-pull rc=0 (happy path) — sanity ===
-echo "=== D: kb-arxiv-pull rc=0 happy path ==="
-cat > "$TMPHUB/bin/kb-arxiv-pull" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-chmod +x "$TMPHUB/bin/kb-arxiv-pull"
-run_tick_and_assert_brief_called_once "D(rc=0)"
+# === Scenario B: kb-tick source contains no kb-arxiv-pull reference ===
+echo "=== B: kb-tick has no kb-arxiv-pull code path ==="
+if grep -q "kb-arxiv-pull" "$SRC_BIN/kb-tick"; then
+  fail "B: kb-tick still references kb-arxiv-pull"
+else
+  ok "B: kb-tick clean of arXiv prefetch code"
+fi
 
 # === Scenario E: kb-brief rc=1 — brief_fired must STAY false (existing semantics) ===
 echo "=== E: kb-brief rc=1 ⇒ brief_fired stays false ==="
@@ -177,9 +160,6 @@ FIRED_E=$(python3 -c "import json; print(json.load(open('$TMPHUB/logs/today-plan
 [[ "$FIRED_E" == "False" ]] && ok "E: brief_fired stays False on kb-brief rc=7 (retry next tick)" || fail "E: brief_fired=$FIRED_E (expected False)"
 
 # === Scenario F: background NotebookLM branch is GONE ===
-# KB_ARXIV_NOTEBOOKLM_ENABLE used to trigger kb-arxiv-notebooklm from the
-# tick; the processes release bans background NotebookLM. Even with the env
-# set and the binary present, the tick must never invoke it.
 echo "=== F: KB_ARXIV_NOTEBOOKLM_ENABLE no longer triggers background NotebookLM ==="
 export KB_ARXIV_NOTEBOOKLM_ENABLE=1
 cat > "$TMPHUB/bin/kb-arxiv-notebooklm" <<EOF
@@ -198,7 +178,7 @@ unset KB_ARXIV_NOTEBOOKLM_ENABLE
 
 # === Scenario I: learning (after:daily) fires on the NEXT tick, rc=0 sets flag ===
 echo "=== I: learning after:daily ⇒ next tick, daily_research_fired true ==="
-write_daily_research_stub 0
+write_learning_stub 0
 reset_brief_canary
 write_plan
 "$TMPHUB/bin/kb-tick" >/dev/null 2>&1 || true   # tick 1: daily fires
@@ -207,14 +187,22 @@ FIRED_I=$(python3 -c "import json; p=json.load(open('$TMPHUB/logs/today-plan.jso
 [[ "$FIRED_I" == "True True" ]] && ok "I: brief_fired=True, daily_research_fired=True" || fail "I: flags=$FIRED_I"
 
 # === Scenario J: learning rc=1 leaves daily_research_fired false ===
-echo "=== J: kb-daily-research rc=1 ⇒ daily_research_fired false ==="
-write_daily_research_stub 1
+echo "=== J: kb-learning-arxiv rc=1 ⇒ daily_research_fired false ==="
+write_learning_stub 1
 reset_brief_canary
 write_plan
 "$TMPHUB/bin/kb-tick" >/dev/null 2>&1 || true
 "$TMPHUB/bin/kb-tick" >/dev/null 2>&1 || true
 FIRED_J=$(python3 -c "import json; p=json.load(open('$TMPHUB/logs/today-plan.json')); print(p.get('brief_fired'), p.get('daily_research_fired', False))")
 [[ "$FIRED_J" == "True False" ]] && ok "J: brief_fired=True, daily_research_fired=False" || fail "J: flags=$FIRED_J"
+
+# === Scenario K: arXiv-pull canary still untouched after all scenarios ===
+echo "=== K: kb-arxiv-pull canary untouched across every tick ==="
+if [[ -f "$TMPHUB/arxiv-pull-called.marker" ]]; then
+  fail "K: kb-arxiv-pull was invoked at some point"
+else
+  ok "K: zero kb-arxiv-pull invocations total"
+fi
 
 echo
 echo "=== arXiv-tick integration tests: $PASS passed, $FAIL failed ==="
