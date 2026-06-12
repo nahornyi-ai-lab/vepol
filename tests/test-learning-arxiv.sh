@@ -167,9 +167,9 @@ EOF
 }
 
 GROK_FULL='{"papers":[
- {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"https://x.com/somebody/status/1 — thread about agentic planning","prior_context":"Идею agentic-планирования обсуждали на X ещё за месяц до выхода статьи.","studied_ru":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","found_ru":"Метод достигает 87% точности на AgentBench и обходит базовые подходы."},
- {"id":"2606.10002","x_status":"not_found","reddit_status":"found","evidence":"reddit.com/r/LocalLLaMA/abc — memory-RAG тред","prior_context":"Похожие иерархические RAG-индексы уже всплывали на Reddit.","studied_ru":"Изучали персистентную память и RAG для агентных баз знаний.","found_ru":"Иерархический RAG-индекс даёт +12% к точности retrieval."},
- {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Квантизация и reasoning обсуждались поверхностно.","studied_ru":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","found_ru":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности."}
+ {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"https://x.com/somebody/status/1 — thread about agentic planning","prior_context":"Идею agentic-планирования обсуждали на X ещё за месяц до выхода статьи.","title_ru":"Агентное планирование с tool use для LLM-агентов","studied_ru":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","found_ru":"Метод достигает 87% точности на AgentBench и обходит базовые подходы.","why_ru":"Готовый паттерн планирования для твоего оркестратора задач."},
+ {"id":"2606.10002","x_status":"not_found","reddit_status":"found","evidence":"reddit.com/r/LocalLLaMA/abc — memory-RAG тред","prior_context":"Похожие иерархические RAG-индексы уже всплывали на Reddit.","title_ru":"Память с retrieval для агентных баз знаний","studied_ru":"Изучали персистентную память и RAG для агентных баз знаний.","found_ru":"Иерархический RAG-индекс даёт +12% к точности retrieval."},
+ {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Квантизация и reasoning обсуждались поверхностно.","title_ru":"Оценка chain-of-thought в малых локальных моделях","studied_ru":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","found_ru":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности."}
 ]}'
 
 run_runner() { # hub fixture extra-env...
@@ -243,6 +243,21 @@ RU_CONTENT=$(grep -c "Что исследовали: [^ ]*[А-Яа-я]" <<<"$DIG
   || fail "S2: Russian summary content lines=$RU_CONTENT (expected 3)"
 SRC_OK=$(mget "$HUB" "all(p.get('summary_source')=='grok' for p in m['selected_papers'])")
 [[ "$SRC_OK" == "True" ]] && ok "S2: summary_source=grok for all papers" || fail "S2: summary_source"
+# Owner feedback 2026-06-12: stats line, Russian selection reason, Russian
+# titles and Russian status words — no RU/EN mix in the user surface.
+grep -q "Просмотрел .* свежих статей" <<<"$DIGEST" && ok "S2: digest states how many papers were scanned" \
+  || fail "S2: no scanned-stats line"
+grep -q "по темам подошло" <<<"$DIGEST" && ok "S2: digest states relevant count" || fail "S2: no relevant count"
+REASONS=$(grep -c "Почему выбрана:" <<<"$DIGEST" || true)
+[[ "$REASONS" == "3" ]] && ok "S2: per-paper selection reason present (3)" || fail "S2: reasons=$REASONS"
+grep -q "X: есть" <<<"$DIGEST" && ok "S2: statuses rendered in Russian (X: есть)" || fail "S2: English status leaked"
+if grep -qE "(X|Reddit): (found|weak|not_found|degraded)" <<<"$DIGEST"; then
+  fail "S2: raw status token leaked into digest"
+else
+  ok "S2: no raw status tokens in digest"
+fi
+grep -q "Агентное планирование" <<<"$DIGEST" && ok "S2: Russian title from grok rendered" || fail "S2: title_ru not used"
+grep -q "Готовый паттерн планирования" <<<"$DIGEST" && ok "S2: per-paper why_ru from grok rendered" || fail "S2: why_ru not used"
 grep -q "Зачем тебе" <<<"$DIGEST" && ok "S2: digest has 'Зачем тебе'" || fail "S2: no 'Зачем тебе'"
 grep -qE "X: " <<<"$DIGEST" && grep -qE "Reddit: " <<<"$DIGEST" \
   && ok "S2: X and Reddit statuses rendered separately" || fail "S2: X/Reddit not split"
@@ -273,6 +288,8 @@ NF=$(mget "$HUB" "any('not_found' in (p['social']['x_status'],p['social']['reddi
 [[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "S4: digest still delivered" || fail "S4: digest not delivered"
 FB=$(mget "$HUB" "all(p.get('summary_source')=='fallback_en' for p in m['selected_papers'])")
 [[ "$FB" == "True" ]] && ok "S4: degraded summaries marked fallback_en" || fail "S4: summary_source on degraded"
+grep -q "сбой проверки" "$HUB/last-digest.txt" && ok "S4: degraded status rendered in Russian" \
+  || fail "S4: degraded status not Russian"
 
 echo "=== S5: grok rc!=0 → degraded with provenance, digest still sent ==="
 HUB=$(new_hub grok-rc)
@@ -366,12 +383,12 @@ RC=$?
 grep -q "релевантных статей сегодня нет" "$HUB/last-digest.txt" \
   && ok "S10: zero-papers digest says so explicitly" || fail "S10: zero-papers note missing"
 
-echo "=== S11: digest length budget ≤ 3500 ==="
+echo "=== S11: digest length budget ≤ 3900 (single Telegram message) ==="
 HUB=$(new_hub long)
 write_grok "$HUB" '{"papers":[]}' 0
 run_runner "$HUB" "$FIXTURELONG" >/dev/null 2>&1
 LEN=$($PY -c "print(len(open('$HUB/last-digest.txt',encoding='utf-8').read()))" 2>/dev/null || echo 99999)
-[[ "$LEN" -le 3500 ]] && ok "S11: digest length $LEN ≤ 3500" || fail "S11: digest length $LEN > 3500"
+[[ "$LEN" -le 3900 ]] && ok "S11: digest length $LEN ≤ 3900" || fail "S11: digest length $LEN > 3900"
 LINKS=$(grep -o "arxiv.org/abs/[0-9.]*" "$HUB/last-digest.txt" | sort -u | wc -l | tr -d ' ')
 [[ "$LINKS" == "3" ]] && ok "S11: all 3 papers still present" || fail "S11: links=$LINKS"
 

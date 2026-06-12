@@ -62,7 +62,9 @@ ATOM_NS = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schema
 
 DEFAULT_CATEGORIES = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "stat.ML"]
 MAX_PAPERS_DEFAULT = 3
-DIGEST_BUDGET = 3500
+# One Telegram message is 4096 chars; 3900 keeps the digest single-message
+# with headroom (owner 2026-06-12: slightly more detail per paper).
+DIGEST_BUDGET = 3900
 INCIDENT_ATTEMPTS = 8
 HTTP_TIMEOUT = 30
 JACCARD_LIMIT = 0.6
@@ -119,7 +121,26 @@ WHY_RU = {
     "safety": "про safety/alignment — рамки безопасности агентских действий.",
 }
 
-STATUS_RU = {"not_found": "не найдено"}
+# Russian topic labels; stable acronyms (MCP, RAG) stay (language convention).
+GROUP_RU = {
+    "agents": "агенты",
+    "reasoning": "рассуждения и планирование",
+    "memory": "память/RAG",
+    "tools": "инструменты (MCP)",
+    "evaluation": "оценка и бенчмарки",
+    "local": "локальные модели",
+    "safety": "безопасность (alignment)",
+}
+
+# User-facing digest/report rendering is fully Russian; canonical snake_case
+# values stay in the manifest (owner feedback 2026-06-12: no RU/EN mix).
+STATUS_RU = {
+    "found": "есть",
+    "weak": "слабо",
+    "not_found": "не найдено",
+    "degraded": "сбой проверки",
+}
+SOCIAL_CHECK_RU = {"ok": "ок", "partial": "частично", "degraded": "сбой"}
 
 
 def now_iso() -> str:
@@ -464,6 +485,10 @@ def found_text(paper: dict, limit: int = 240) -> str:
 
 
 def why_text(paper: dict) -> str:
+    """Per-paper practical sentence: Grok's specific one when available,
+    else the topic-group template (degraded mode)."""
+    if paper.get("why_ru"):
+        return paper["why_ru"]
     for name, _rx in TOPIC_GROUPS:
         if name in paper.get("_groups", []):
             return WHY_RU[name]
@@ -532,8 +557,10 @@ For EACH paper below, do two things:
    Separate exact-paper discussion from prior idea discussion.
 2. Summarize the paper in Russian, STRICTLY from the given title+abstract —
    no outside claims, no invented numbers:
-   - `studied_ru`: одно русское предложение — что именно исследовали (≤ 180 символов)
-   - `found_ru`: одно русское предложение — что выяснили/заявляют (≤ 180 символов)
+   - `title_ru`: короткий русский перевод заголовка (≤ 120 символов)
+   - `studied_ru`: 1-2 русских предложения — что именно исследовали (≤ 280 символов)
+   - `found_ru`: 1-2 русских предложения — что выяснили/заявляют, с цифрами из abstract если есть (≤ 280 символов)
+   - `why_ru`: одно практичное русское предложение — зачем эта статья пользователю, который строит локального AI-оркестратора с агентами, памятью/KB и tool-use (вывод из abstract, конкретный для ЭТОЙ статьи, ≤ 160 символов)
 
 Papers:
 {papers_block}
@@ -542,13 +569,18 @@ Return ONLY one JSON object, no prose before or after, exactly this shape:
 {{"papers": [{{"id": "<arxiv id>", "x_status": "found|weak|not_found|degraded",
 "reddit_status": "found|weak|not_found|degraded", "evidence": "<short links/snippets>",
 "prior_context": "<одна русская фраза о прежнем обсуждении идеи>",
-"studied_ru": "<русское предложение из title/abstract>",
-"found_ru": "<русское предложение из title/abstract>"}}]}}
+"title_ru": "<русский перевод заголовка>",
+"studied_ru": "<русские предложения из title/abstract>",
+"found_ru": "<русские предложения из title/abstract>",
+"why_ru": "<практичное русское предложение для этой статьи>"}}]}}
 
 Rules: use `not_found` only when the search WORKED and found nothing; if a
 search surface failed or was blocked, use `degraded` for that channel.
 `studied_ru`/`found_ru` are translations/compressions of the provided
 abstract only — never add facts the abstract does not state.
+Пиши их по-настоящему по-русски: переводи формулировки, а не копируй
+английские фразы из abstract; латиница допустима только для имён собственных,
+названий моделей/датасетов/бенчмарков и устоявшихся терминов (MCP, RAG).
 """
 
 
@@ -628,8 +660,8 @@ def social_check(date_iso: str, papers: list) -> tuple:
         # Russian summary is Grok's bounded translation of title+abstract.
         # Missing/empty → deterministic English-extract fallback, explicitly
         # marked, so the digest is honest about its degraded summary source.
-        studied_ru = truncate_sentence(str(rec.get("studied_ru", "") or "").strip(), 200)
-        found_ru = truncate_sentence(str(rec.get("found_ru", "") or "").strip(), 200)
+        studied_ru = truncate_sentence(str(rec.get("studied_ru", "") or "").strip(), 300)
+        found_ru = truncate_sentence(str(rec.get("found_ru", "") or "").strip(), 300)
         # Sanity check: accept the summary as Russian only if it actually
         # contains Cyrillic — a malformed Grok reply with English text must
         # land in the marked fallback, not masquerade as a translation.
@@ -640,6 +672,12 @@ def social_check(date_iso: str, papers: list) -> tuple:
             p["summary_source"] = "grok"
         else:
             p["summary_source"] = "fallback_en"
+        title_ru = truncate_sentence(str(rec.get("title_ru", "") or "").strip(), 140)
+        if title_ru and CYRILLIC_RE.search(title_ru):
+            p["title_ru"] = title_ru
+        why_ru = truncate_sentence(str(rec.get("why_ru", "") or "").strip(), 180)
+        if why_ru and CYRILLIC_RE.search(why_ru):
+            p["why_ru"] = why_ru
     if whole_call_failed:
         status = "degraded"
     elif any_degraded or not all_parsed:
@@ -655,6 +693,30 @@ def social_check(date_iso: str, papers: list) -> tuple:
 
 def render_status(value: str) -> str:
     return STATUS_RU.get(value, value)
+
+
+def title_display(paper: dict, limit: int = 160) -> str:
+    if paper.get("title_ru"):
+        return truncate_sentence(paper["title_ru"], limit)
+    return truncate_sentence(paper.get("title", ""), limit)
+
+
+def reason_ru(paper: dict) -> str:
+    """Human-readable Russian selection reason, computable from manifest
+    fields alone (works on the stage-cache path too)."""
+    groups = [GROUP_RU.get(g, g) for g in paper.get("_groups", [])]
+    s = paper.get("scores", {})
+    parts = []
+    if groups:
+        parts.append(f"темы: {', '.join(groups)}")
+    sig = s.get("abstract_signal")
+    if sig is not None:
+        parts.append(f"внятный abstract ({sig}/4 маркера)")
+    if s.get("final") is not None:
+        parts.append(f"скор {s['final']}")
+    if paper.get("_dup_of"):
+        parts.append(f"кластер-дубль с {paper['_dup_of']}, добран для полноты")
+    return "; ".join(parts) or "релевантна по теме"
 
 
 def render_snapshot(date_iso: str, papers: list, runner_ups: list, fetched: int, relevant: int) -> str:
@@ -718,24 +780,27 @@ def render_social_source(date_iso: str, papers: list, status: str, rc, stderr_ta
     return "\n".join(lines) + "\n"
 
 
-def render_report(date_iso: str, papers: list, runner_ups: list, social_status: str, relevant: int) -> str:
+def render_report(date_iso: str, papers: list, runner_ups: list, social_status: str,
+                  relevant: int, fetched: int = 0) -> str:
     lines = [
         f"# arXiv learning — разбор {date_iso}",
         "",
-        f"Выбрано статей: {len(papers)} (релевантных кандидатов: {relevant}). "
-        f"Social check: {social_status}.",
+        f"Просмотрено свежих статей: {fetched}. Релевантных кандидатов: {relevant}. "
+        f"Выбрано: {len(papers)}. Проверка X/Reddit: "
+        f"{SOCIAL_CHECK_RU.get(social_status, social_status)}.",
         "",
     ]
     for i, p in enumerate(papers, 1):
         s = p.get("social", {})
         lines.extend([
-            f"## {i}. {p['title']}",
+            f"## {i}. {title_display(p, 200)}",
             "",
+            f"- Оригинал: {p['title']}",
             f"- Авторы: {render_authors(p['authors'])}",
             f"- arXiv: {p['link']}",
             f"- Категория: {p.get('primary_category', '—')} · {p.get('published', '')[:10]}",
-            f"- Почему выбрана: {p['reason']}",
-            f"- Scores: `{json.dumps(p['scores'])}`",
+            f"- Почему выбрана: {reason_ru(p)}",
+            f"- Скоры: `{json.dumps(p['scores'])}`",
             "",
             f"**Что исследовали:** {studied_display(p, 500)}",
             "",
@@ -744,15 +809,15 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
             f"**X:** {render_status(s.get('x_status', 'degraded'))} · "
             f"**Reddit:** {render_status(s.get('reddit_status', 'degraded'))}",
             f"**Прежнее обсуждение:** {s.get('prior_context', '') or '—'}",
-            f"**Evidence:** {s.get('evidence', '') or '—'}",
+            f"**Подтверждения:** {s.get('evidence', '') or '—'}",
             "",
             f"**Зачем тебе:** {why_text(p)}",
             "",
-            f"**Abstract:** {p['abstract']}",
+            f"**Аннотация (EN):** {p['abstract']}",
             "",
         ])
     if runner_ups:
-        lines.append("## Runner-ups (не вошли)")
+        lines.append("## Не вошли (runner-ups)")
         lines.append("")
         for r in runner_ups:
             lines.append(f"- `{r['id']}` {r['title']} — {r['reason_rejected']} (final={r['scores']['final']})")
@@ -761,22 +826,27 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
     return "\n".join(lines) + "\n"
 
 
-def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int) -> str:
+def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
+                  fetched: int = 0) -> str:
     header = [f"🧪 arXiv learning — {date_iso}", ""]
+    scanned = (
+        f"Просмотрел {fetched} свежих статей arXiv, по темам подошло {relevant}."
+        if fetched else
+        f"По темам подошло {relevant} статей."
+    )
     if not papers:
-        header.append("Сводка: релевантных статей сегодня нет (после фильтра по AI-agent темам).")
+        header.append(f"{scanned} Итог: релевантных статей сегодня нет (фильтр по AI-agent темам).")
         header.append("")
         header.append(f"Полный разбор: reports/learning-arxiv-summary-{date_iso}.md")
         return "\n".join(header)
     if len(papers) < max_papers:
-        header.append(f"Сегодня только {len(papers)} релевантных статей — больше не нашлось:")
+        header.append(f"{scanned} Сегодня только {len(papers)} релевантных статей — больше не нашлось:")
     else:
-        header.append(f"Сегодня выбрал {len(papers)} статьи:")
+        header.append(f"{scanned} Выбрал {len(papers)} лучших:")
     header.append("")
 
     def paper_block(p: dict, idx: int, text_limit: int) -> str:
         s = p.get("social", {})
-        title = truncate_sentence(p["title"], 160)
         social_line = (
             f"X: {render_status(s.get('x_status', 'degraded'))} / "
             f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
@@ -785,8 +855,9 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int) -
         if prior:
             social_line += f" — {prior}"
         return (
-            f"{idx}. {title} — {render_authors(p['authors'])}\n"
+            f"{idx}. {title_display(p)} — {render_authors(p['authors'])}\n"
             f"   arXiv: {p['link']}\n"
+            f"   Почему выбрана: {reason_ru(p)}\n"
             f"   Что исследовали: {studied_display(p, text_limit)}\n"
             f"   Что выяснили: {found_display(p, text_limit)}\n"
             f"   {social_line}\n"
@@ -794,7 +865,7 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int) -
         )
 
     footer = ["", f"Полный разбор: reports/learning-arxiv-summary-{date_iso}.md"]
-    text_limit = 240
+    text_limit = 320
     while True:
         blocks = [paper_block(p, i, text_limit) for i, p in enumerate(papers, 1)]
         digest = "\n".join(header + ["\n\n".join(blocks)] + footer)
@@ -944,7 +1015,10 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     if cached:
         log(f"{date_iso}: reusing cached selection+social from manifest (stage cache)")
         papers = manifest["selected_papers"]
-        digest = render_digest(date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)), max_papers)
+        digest = render_digest(
+            date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)),
+            max_papers, fetched=int(manifest.get("arxiv_fetched") or 0),
+        )
         return deliver_digest(date_iso, digest, manifest)
 
     try:
@@ -986,7 +1060,7 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     manifest["grok_stderr_tail"] = stderr_tail
     for m_p, p in zip(manifest["selected_papers"], selected):
         m_p["social"] = p.get("social", {})
-        for k in ("studied_ru", "found_ru", "summary_source"):
+        for k in ("title_ru", "studied_ru", "found_ru", "why_ru", "summary_source"):
             if k in p:
                 m_p[k] = p[k]
         # Rebuild now that the Russian translation (or its absence) is known.
@@ -997,11 +1071,13 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
                  render_social_source(date_iso, selected, status, grok_rc, stderr_tail, raw))
 
     atomic_write(report_path(date_iso),
-                 render_report(date_iso, selected, runner_ups, status, relevant))
+                 render_report(date_iso, selected, runner_ups, status, relevant,
+                               fetched=len(candidates)))
     manifest["status"] = "report_written"
     save_manifest(date_iso, manifest)
 
-    digest = render_digest(date_iso, selected, relevant, max_papers)
+    digest = render_digest(date_iso, selected, relevant, max_papers,
+                           fetched=len(candidates))
     return deliver_digest(date_iso, digest, manifest)
 
 
