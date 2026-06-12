@@ -215,8 +215,11 @@ mkdir -p "$HUB"/{bin,raw,concepts,people,companies,solutions,projects,personal,d
 mkdir -p "$HUB/_template/knowledge" "$HUB/.orchestrator"
 if [[ $HUB_EXISTED -eq 1 ]]; then ok "  $HUB already exists — preserving"; else ok "  created $HUB"; fi
 
-# Symlink bin scripts (overwrite — these are managed by repo)
-for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki; do
+# Symlink bin scripts (overwrite — these are managed by repo).
+# _kb_*.py shared modules are linked too: shell runners invoke them as
+# files ($HUB/bin/_kb_profile.py), and Python runners that are executed
+# through the $HUB/bin symlink expect them next to the script.
+for script in "$VEPOL_DIR"/bin/kb-* "$VEPOL_DIR"/bin/new-wiki "$VEPOL_DIR"/bin/_kb_*.py; do
   [[ -f "$script" ]] || continue
   scriptname="$(basename "$script")"
   ln -sf "$script" "$HUB/bin/$scriptname"
@@ -354,6 +357,28 @@ KB_FALLBACK_TZ=
 SECEOF
   chmod 600 "$HUB/personal/.secrets"
   ok "  $HUB/personal/.secrets created (mode 600)"
+fi
+
+# User language — set once, every user-facing process delivers in it
+# (spec: user-language-setting-2026-06-12). Derived from the system locale
+# with an English fallback; an existing profile is never overwritten —
+# edit personal/profile.yaml to change the language any time.
+if [[ ! -f "$HUB/personal/profile.yaml" ]]; then
+  _locale_lang="${LANG:-}"            # unset LANG -> en fallback below
+  _locale_lang="${_locale_lang%%.*}"  # e.g. ru_RU.UTF-8 -> ru_RU
+  _locale_lang="${_locale_lang%%_*}"  # ru_RU -> ru
+  _locale_lang=$(printf '%s' "$_locale_lang" | tr '[:upper:]' '[:lower:]')
+  if [[ ! "$_locale_lang" =~ ^[a-z]{2,3}$ || "$_locale_lang" == "c" || "$_locale_lang" == "posix" ]]; then
+    _locale_lang="en"
+  fi
+  cat > "$HUB/personal/profile.yaml" <<PROFEOF
+# Vepol user profile — set once, read by every user-facing process.
+# language: short code (en, ru, es, uk, de, ...). Change it any time;
+# the next scheduled run delivers in the new language.
+language: $_locale_lang
+PROFEOF
+  chmod 600 "$HUB/personal/profile.yaml"
+  ok "  $HUB/personal/profile.yaml created (language: $_locale_lang — edit to change)"
 fi
 
 # ─────────────────────────────────────────
@@ -689,6 +714,7 @@ _enforce_mode "$HUB/personal" 700
 _enforce_mode "$HUB/personal/.secrets" 600
 _enforce_mode "$HUB/personal/daily-research.yaml" 600
 _enforce_mode "$HUB/personal/processes.yaml" 600
+_enforce_mode "$HUB/personal/profile.yaml" 600
 
 _enforce_mode "$HOME_DIR/.orchestrator" 700
 _enforce_mode "$HOME_DIR/.orchestrator/multibot" 700

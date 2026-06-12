@@ -31,6 +31,34 @@ INBOX="$HUB/personal/daily-inbox/$TODAY.md"
 ADDRESS="${USER_NAME:+ $USER_NAME}"
 LOCATION="${USER_CITY:+, $USER_CITY}"
 
+# User language — set once in personal/profile.yaml, read by every
+# user-facing process (spec: user-language-setting-2026-06-12).
+# ${0:A:h} = this script's REAL directory (resolves the $HUB/bin symlink),
+# so the shared module is found on fresh installs where bin entries are
+# symlinks into the repo checkout.
+_PROFILE_PY="${0:A:h}/_kb_profile.py"
+[[ -f "$_PROFILE_PY" ]] || _PROFILE_PY="$HUB/bin/_kb_profile.py"
+UI_LANG=$(python3 "$_PROFILE_PY" "$HUB" 2>/dev/null || echo en)
+UI_LANG_NAME=$(python3 "$_PROFILE_PY" "$HUB" --name 2>/dev/null || echo English)
+
+# Deterministic wrapper/error strings are user-facing delivery too.
+case "$UI_LANG" in
+  ru)
+    L_HEADER="☀️ Брифинг"
+    L_ERR_RC2="⚠️ Брифинг не запущен: ошибка вызова (rc=2, caller-bug). Проверь"
+    L_ERR_RC75="⚠️ Оба оркестратора не ответили (rc=75, exhausted). Проверь"
+    L_ERR_OTHER="⚠️ Оркестратор упал"
+    L_ERR_CHECK="Проверь"
+    ;;
+  *)
+    L_HEADER="☀️ Briefing"
+    L_ERR_RC2="⚠️ Briefing not started: caller error (rc=2). Check"
+    L_ERR_RC75="⚠️ Both orchestrators failed to answer (rc=75, exhausted). Check"
+    L_ERR_OTHER="⚠️ Orchestrator failed"
+    L_ERR_CHECK="Check"
+    ;;
+esac
+
 send_tg() {
   local text="$1"
   if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
@@ -49,12 +77,13 @@ PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодн�
 # Обязательный вход (прочитай ВСЁ перед Pass 1)
 1. \`$HUB/registry.md\` — фильтр по status ∈ {live, seeded}, это active-проекты (должно быть ~14).
 2. Для каждого active-проекта: \`<project_path>/knowledge/state.md\` — первые ~30 строк (одной строкой + ключевые метрики).
-3. Вывод \`$HUB/bin/kb-backlog --open\` — все открытые задачи всех проектов. Извлеки дедлайны: явные \`due: YYYY-MM-DD\` + текстовые (\`до DD.MM\`, \`через N дней\`, weekdays).
+3. Вывод \`$HUB/bin/kb-backlog-board list --all --open\` — все открытые задачи всех проектов из Plane (canonical с 2026-05-12). Извлеки дедлайны: явные \`due: YYYY-MM-DD\` + текстовые (\`до DD.MM\`, \`через N дней\`, weekdays).
 4. \`$HUB/personal/goals.md\`, \`$HUB/personal/roadmap.md\`, \`$HUB/personal/context.md\`.
 5. Для каждого active-проекта: секция \`## Open\` в \`<project_path>/knowledge/escalations.md\` (если файл есть).
 6. Последние 3 \`$HUB/daily/*.md\` (если не пустой) + последние 80 строк \`$HUB/log.md\`.
 7. \`$INBOX\` — если файл существует.
 8. \`$HUB/personal/habits.md\` — только если не пустой (0-скип, иначе включить).
+9. \`$HUB/.orchestrator/arxiv-brief-$TODAY.md\` — если файл существует и его mtime ≤6h, прочитай его содержимое (готовый блок 🧪 arXiv от kb-arxiv-pull). Если файл отсутствует / старше 6h / пуст — секцию 🧪 arXiv в Pass 2 НЕ выпускай.
 
 # Pass 1 — internal scan (ОБЯЗАТЕЛЬНО, идёт первым в твоём ответе)
 
@@ -91,38 +120,47 @@ PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодн�
 
 # Pass 2 — user-facing brief (после разделителя, ≤${BRIEF_CHAR_LIMIT} символов Unicode)
 
-Пиши строго на основе Pass 1, без повторного обращения к файлам. Структура в этом порядке, пустые секции ВЫПУСКАЙ ЦЕЛИКОМ (без \"—\"/\"нет\"):
+Пиши строго на основе Pass 1, без повторного обращения к файлам.
+
+**Главное правило: это сообщение читает живой человек утром в Telegram. Язык пользователя — ${UI_LANG_NAME}: весь брифинг (заголовки секций, формулировки, названия проектов) пиши на этом языке. Должен быть связный, читаемый текст. Никаких слагов проектов в сыром виде, никаких CLI-имён, никаких сырых формулировок задач из backlog'а на других языках — переводи и перефразируй на ${UI_LANG_NAME}. Названия проектов — человеческие (из \`registry.md\` поле описания, не slug). Если в задаче есть терминология (Bizum, ITV, DGT, Renfe и т.п. — оставляй, это реалии), но обрамляй её контекстом на языке пользователя, не вываливай списком через \`;\`. Шаблон секций ниже показан по-русски как образец СТРУКТУРЫ — названия секций переводи на ${UI_LANG_NAME} (для русского используй их как есть). Строка-разделитель \`---BRIEF---\` — технический токен: копируй байт-в-байт, никогда не переводи (never translate it).**
+
+Структура в этом порядке. Пустые секции ВЫПУСКАЙ ЦЕЛИКОМ (без «—»/«нет»). Каждая секция — это связный абзац или 1–3 человеческих буллета, не свалка.
 
 \`\`\`
 ☀️ Брифинг $TODAY $NOW
 
-⏰ Today (hard deadline ≤24ч)
-  • HH:MM <точная задача> (<project>) — <откуда пришла>
+🔥 Сегодня
+  Один абзац или 2–4 буллета. Каждый буллет — одна осмысленная задача с дедлайном сегодня, на ${UI_LANG_NAME}, с человеческим названием проекта в скобках. Если у одного проекта несколько задач — сгруппируй в ОДИН буллет с осмысленной формулировкой (например: «Авто (покупка машины): сегодня закрыть страховку, перевод денег и Bizum-готовность, договор купли-продажи»), не перечисляй через \`;\`.
 
-📅 This week (hard deadline ≤7 дней, не Today)
-  • <YYYY-MM-DD>: <точная задача> (<project>)
+📅 На этой неделе
+  1–4 буллета, формат «<дата>: <задача> (<проект>)». Только задачи с жёстким дедлайном до 7 дней.
 
-🎯 Strategic focus (2–3 проекта из LATER)
-  1. <project>: <конкретный следующий шаг>. Привязка к цели: <goal>.
+🎯 Стратегический фокус
+  2–3 пункта из LATER (top по score). Формат: «<проект>: <следующий шаг одной фразой>. Зачем: <привязка к цели>.» Названия проектов — человеческие.
 
-🧱 Открытые escalations
-  • <project>: <ask одной строкой> — opened <YYYY-MM-DD>
+🧱 Висящие эскалации
+  1–3 буллета. Формат: «<проект>: <чего ждём, одной фразой> — открыто <дата>». Если 4+ — упомяни числом и оставь топ-3.
 
-🟡 Idle — в памяти
-  <slug1>, <slug2>, <slug3>… (одна строка, без описаний)
+🧪 arXiv за сутки — ТОЛЬКО если на входе #9 был свежий непустой arxiv-brief файл; иначе секцию ЦЕЛИКОМ выпускай
+  Скопируй строки из файла 1:1, не перефразируй URL'ы.
 
-🔁 Life-напоминание
-  <из habits/goals — здоровье, сон, фокус-блок>
+🟡 На паузе
+  Одна строка с человеческими названиями проектов через запятую (не slug'и). Без описаний.
 
-❓ <Open-вопрос ТОЛЬКО если не разрешим из Pass 1. Иначе секцию НЕ писать.>
+🔁 Напоминание про жизнь
+  1–2 предложения из habits/goals — про здоровье, сон, фокус-блок.
+
+❓ Вопрос — ТОЛЬКО если есть реальная развилка, требующая решения Vadim'а. Иначе НЕ писать.
 \`\`\`
 
 # Жёсткие правила Pass 2
-- **Не врать оптимистичнее state.md.** Запрещённые слова без прямого подтверждения в state.md проекта: \`live\`, \`готов\`, \`ready\`, \`submitted\`, \`закрыто\`, \`пайплайн\`, \`работает\`. Если state говорит \"не верифицировано\" — пиши \"не верифицировано\".
-- **Задачи — точные.** Не \"сделать шаг\", а \"купить билеты Renfe на 27.04\". Копируй формулировку из backlog.
-- **Open-вопрос — conditional.** Если в Pass 1 есть данные для ответа, секцию НЕ писать. Не перекладывай на пользователя то, что просчитал сам.
-- **Idle обязательна**, если есть active-проекты вне TODAY/THIS_WEEK.
-- **Escalations обязательны**, если Pass 1 нашёл открытые asks.
+- **Язык пользователя: ${UI_LANG_NAME}. Читаемый.** Заголовки секций, формулировки задач, названия проектов — на ${UI_LANG_NAME}. Технические реалии (Bizum, ITV, DGT, Renfe, Las Naves, OBD2, MCP, и т.п.) оставляй как есть, но в обрамлении на языке пользователя. Никогда не оставляй задачу выглядеть как «Seguro pre-quote; transferencia readiness; Bizum readiness» — это сырьё, а не брифинг.
+- **Названия проектов — человеческие.** Slug \`grants\` → «Гранты», \`auto\` → «Автомобиль» (или «Покупка машины»), \`family\` → «Семья / жильё», \`vepol-dev\` → «Vepol», \`gestoria\` → «Бухгалтерия (gestoría)», \`leadgen\` / \`leadgen-leads\` → «Лидогенерация», \`nahornyi-ailab-landing\` → «Сайт Nahornyi AI Lab», \`mafia-hub\` → «Mafia Hub», \`talkbot\` → «TalkBot», \`n8n\` → «n8n / автоматизации», \`health-agent\` → «Здоровье», \`garmin\` → «Garmin», \`winox\` → «Winox» (этот список — русские примеры; для другого языка пользователя переведи такие имена на ${UI_LANG_NAME}). Если проекта в этом списке нет — придумай разумное имя на ${UI_LANG_NAME} из его описания в registry.md.
+- **Группировка по проекту.** Если у одного проекта 3+ задач в TODAY — пиши ОДНУ строку «Проект X: <обобщающая фраза, что нужно закрыть>», а не дамп списка через \`;\`.
+- **Никаких внутренних меток.** Не пиши «— kb-backlog-board», «— hub», «(by self)», \`plan_item_id\`, и подобное. Это внутренняя кухня — пользователь её не видит.
+- **Не врать оптимистичнее state.md.** Запрещённые слова без прямого подтверждения в state.md проекта: \`live\`, \`готов\`, \`ready\`, \`submitted\`, \`закрыто\`, \`пайплайн\`, \`работает\`. Если state говорит «не верифицировано» — пиши «не верифицировано».
+- **Идле обязательна**, если есть active-проекты вне TODAY/THIS_WEEK.
+- **Эскалации обязательны**, если Pass 1 нашёл открытые asks.
 
 Начни ответ сразу с markdown-таблицы Pass 1. Никакой преамбулы."
 
@@ -136,12 +174,12 @@ if [ "$RC" -ne 0 ]; then
   echo "[$(date -Iseconds)] orchestrator failed rc=$RC" >> "$LOG"
   echo "$RAW" >> "$LOG"
   case "$RC" in
-    2)  BRIEF="⚠️ Брифинг не запущен: ошибка вызова (rc=2, caller-bug). Проверь $LOG" ;;
-    75) BRIEF="⚠️ Оба оркестратора не ответили (rc=75, exhausted). Проверь $LOG" ;;
-    *)  BRIEF="⚠️ Оркестратор упал (rc=$RC). Проверь $LOG" ;;
+    2)  BRIEF="$L_ERR_RC2 $LOG" ;;
+    75) BRIEF="$L_ERR_RC75 $LOG" ;;
+    *)  BRIEF="$L_ERR_OTHER (rc=$RC). $L_ERR_CHECK $LOG" ;;
   esac
   # short path — send error and exit
-  send_tg "☀️ Брифинг $TODAY $NOW
+  send_tg "$L_HEADER $TODAY $NOW
 
 $BRIEF"
   exit 0
@@ -190,3 +228,19 @@ if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
   DELIVERY="dry-run"
 fi
 echo "[$(date -Iseconds)] brief ${DELIVERY} (${CHAR_COUNT} chars, split=${SPLIT})" >> "$LOG"
+
+BRIEFS_DIR="$HUB/briefs"
+mkdir -p "$BRIEFS_DIR"
+BRIEF_FILE="$BRIEFS_DIR/$TODAY.md"
+{
+  print -- "---"
+  print -- "date: $TODAY"
+  print -- "sent_at: $(date -Iseconds)"
+  print -- "char_count: $CHAR_COUNT"
+  print -- "split: $SPLIT"
+  print -- "delivery: $DELIVERY"
+  print -- "reflection: pending"
+  print -- "---"
+  print -- ""
+  print -- "$BRIEF"
+} > "$BRIEF_FILE"

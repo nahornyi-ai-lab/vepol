@@ -20,22 +20,25 @@ INBOX="$HUB/personal/daily-inbox/$TODAY.md"
 ADDRESS="${USER_NAME:+ $USER_NAME}"
 LOCATION="${USER_CITY:+, $USER_CITY}"
 
-# Snapshot open backlog across hub + all projects (unified Jira-style view).
-BACKLOG_SNAPSHOT=$("$HUB/bin/kb-backlog" --open 2>/dev/null | sed $'s/\x1b\\[[0-9;]*m//g' || echo "(kb-backlog failed)")
+# Snapshot open backlog from Plane (canonical with 2026-05-12, see kb-board.md).
+# Plane is the source of truth; .md files are stale snapshots until Phase 6 cleanup.
+BACKLOG_SNAPSHOT=$("$HUB/bin/kb-backlog-board" list --all --open 2>/dev/null || echo "(kb-backlog-board failed)")
 
-# Today's closed items + session events across hub + all live projects.
-# Grep lines starting with "- [x] ... closed YYYY-MM-DD" from hub/project backlog.md,
-# plus session-log lines for today from hub/project log.md.
+# Today's closed items via Plane + session events from hub/project log.md.
+# Plane has completed_at timestamp; we filter via Python helper.
 DONE_TODAY=$(
   {
-    grep -Hn "closed $TODAY" "$HUB/backlog.md" 2>/dev/null || true
-    for link in "$HUB/projects"/*; do
-      [ -L "$link" ] || continue
-      slug="${link##*/}"
-      tgt="$(readlink "$link")"
-      grep -Hn "closed $TODAY" "$tgt/backlog.md" 2>/dev/null | sed "s|$tgt|[$slug]|g" || true
-    done
+    python3 -c "
+import sys, json, datetime as dt
+sys.path.insert(0, '$HUB/bin')
+from _kb_board import integration
+today = '$TODAY'
+rows = integration.read_closed_on_date(today)
+for r in rows:
+    print(f\"[{r['slug']}] {r['name']} — closed {r['completed_at'][:10]} — plan_item_id: {r['plan_item_id']}\")
+" 2>/dev/null || true
     echo "---"
+    # log.md events are still grep-based — log.md remains active (different concern from backlog.md)
     grep -H "^## \[$TODAY" "$HUB/log.md" 2>/dev/null || true
     for link in "$HUB/projects"/*; do
       [ -L "$link" ] || continue
@@ -47,13 +50,33 @@ DONE_TODAY=$(
   } 2>/dev/null | head -80 || true
 )
 
+# User language — set once in personal/profile.yaml (spec:
+# user-language-setting-2026-06-12). ${0:A:h} resolves the bin symlink so
+# the shared module is found on fresh installs.
+_PROFILE_PY="${0:A:h}/_kb_profile.py"
+[[ -f "$_PROFILE_PY" ]] || _PROFILE_PY="$HUB/bin/_kb_profile.py"
+UI_LANG=$(python3 "$_PROFILE_PY" "$HUB" 2>/dev/null || echo en)
+UI_LANG_NAME=$(python3 "$_PROFILE_PY" "$HUB" --name 2>/dev/null || echo English)
+case "$UI_LANG" in
+  ru)
+    L_RETRO_HEADER="🌙 Ретро"
+    L_ERR_RETRO="⚠️ Ретро не собралось"
+    L_ERR_CHECK="Проверь"
+    ;;
+  *)
+    L_RETRO_HEADER="🌙 Retro"
+    L_ERR_RETRO="⚠️ Retro could not be assembled"
+    L_ERR_CHECK="Check"
+    ;;
+esac
+
 PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодня $TODAY, $NOW${LOCATION}. Вечер — время ретроспективы.
 
 Прочитай:
 - $INBOX (всё что писали боту сегодня — сигнал того, что делали/думали)
 - последние 50 строк $HUB/log.md
 - сегодняшний файл $HUB/daily/$TODAY.md (если есть — это авто-компилированный extract сессий Claude Code)
-- утренний брифинг в $HUB/logs/brief.log (последняя запись)
+- утренний брифинг \`$HUB/briefs/$TODAY.md\` (полный текст, что был отправлен утром в Telegram)
 
 Кроме того, используй готовые снэпшоты (НЕ перечитывай их из файлов):
 
@@ -65,24 +88,45 @@ $BACKLOG_SNAPSHOT
 $DONE_TODAY
 </closed_today_and_log_events>
 
-Выдай вечернее ретро по-русски, ≤900 символов:
+НИЧЕГО НЕ ЗАПИСЫВАЙ В ФАЙЛЫ. Только два текстовых блока в stdout, ровно в этом формате:
+
+---RETRO---
+<вечернее ретро на языке пользователя — ${UI_LANG_NAME}, ≤900 символов, 6 секций; названия секций тоже на ${UI_LANG_NAME} (русские формулировки ниже — образец структуры); токены ---RETRO--- и ---REFLECTION--- — технические разделители, копируй их байт-в-байт, никогда не переводи (never translate)>:
 1. ✅ Что закрыто сегодня — 2–4 самых значимых пункта по факту из \`closed_today_and_log_events\`, не по плану.
 2. 📋 Backlog сейчас — одной строкой сколько open всего, и 1–2 проекта с наибольшей нагрузкой.
 3. ⏸ Что висит / перенесено — 1–2 важных open-пункта, которые требуют внимания (приоритет: hub > user > self).
 4. 💡 1 инсайт или паттерн, замеченный сегодня.
-5. 🌙 1 вопрос для рефлексии перед сном.
+5. ☀️ Брифинг-рефлексия: попал ли утренний brief в реальность дня (1 строка) + 1 конкретное улучшение для завтрашнего brief'а.
+6. 🌙 1 вопрос для рефлексии перед сном.
+---REFLECTION---
+<одна строка — та же брифинг-рефлексия из секции 5, без эмодзи и нумерации, для записи в frontmatter-секцию Reflection утреннего brief'а>
 
-Если inbox пустой, backlog пустой, в логах ничего — скажи это прямо, не выдумывай.
-
-НЕ пиши в файлы. Только текст ретро."
+Если inbox пустой, backlog пустой, в логах ничего — скажи это прямо в RETRO, не выдумывай. Делай свою основную работу через stdout-вывод, никаких побочных правок файлов и никаких мета-комментариев про «я записал» / «я не записал»."
 
 cd "$HUB"
-RETRO=$("$ORCH" --cwd "$HUB" --timeout 180 "$PROMPT" 2>&1) || {
-  echo "[$(date -Iseconds)] orchestrator failed: $RETRO" >> "$LOG"
-  RETRO="⚠️ Ретро не собралось. Проверь $LOG"
-}
+set +e
+RAW=$("$ORCH" --cwd "$HUB" --timeout 180 "$PROMPT" 2>&1)
+RC=$?
+set -e
 
-MSG="🌙 Ретро $TODAY $NOW
+if [ "$RC" -ne 0 ]; then
+  echo "[$(date -Iseconds)] orchestrator failed rc=$RC: $RAW" >> "$LOG"
+  RETRO="$L_ERR_RETRO (rc=$RC). $L_ERR_CHECK $LOG"
+  REFLECTION=""
+else
+  if print -- "$RAW" | grep -q '^---RETRO---$'; then
+    RETRO=$(print -- "$RAW" | awk '/^---RETRO---$/{flag=1; next} /^---REFLECTION---$/{flag=0} flag')
+    REFLECTION=$(print -- "$RAW" | awk '/^---REFLECTION---$/{flag=1; next} flag')
+    RETRO=$(print -- "$RETRO" | awk 'NF {p=1} p' | sed -e :a -e '/^\s*$/{$d;N;ba' -e '}')
+    REFLECTION=$(print -- "$REFLECTION" | awk 'NF {p=1} p' | sed -e :a -e '/^\s*$/{$d;N;ba' -e '}')
+  else
+    echo "[$(date -Iseconds)] WARN: ---RETRO--- delimiter missing, sending full output" >> "$LOG"
+    RETRO="$RAW"
+    REFLECTION=""
+  fi
+fi
+
+MSG="$L_RETRO_HEADER $TODAY $NOW
 
 $RETRO"
 
@@ -94,4 +138,19 @@ else
     -d "chat_id=${TELEGRAM_CHAT_ID}" \
     --data-urlencode "text=$MSG" > /dev/null
   echo "[$(date -Iseconds)] retro sent ($(echo -n "$RETRO" | wc -c) chars)" >> "$LOG"
+fi
+
+# Append Reflection-section to today's brief and flip frontmatter reflection: pending → done.
+BRIEF_FILE="$HUB/briefs/$TODAY.md"
+if [ -n "${REFLECTION:-}" ] && [ -f "$BRIEF_FILE" ]; then
+  {
+    print -- ""
+    print -- "## Reflection ($NOW)"
+    print -- ""
+    print -- "$REFLECTION"
+  } >> "$BRIEF_FILE"
+  /usr/bin/sed -i '' 's/^reflection: pending$/reflection: done/' "$BRIEF_FILE"
+  echo "[$(date -Iseconds)] reflection appended to $BRIEF_FILE ($(echo -n "$REFLECTION" | wc -c) chars)" >> "$LOG"
+elif [ -z "${REFLECTION:-}" ] && [ -n "${RAW:-}" ] && [ "${RC:-0}" -eq 0 ]; then
+  echo "[$(date -Iseconds)] WARN: REFLECTION block empty, brief frontmatter not flipped" >> "$LOG"
 fi

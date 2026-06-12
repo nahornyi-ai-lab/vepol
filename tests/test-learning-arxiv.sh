@@ -128,9 +128,13 @@ write_atom "$FIXTURELONG" "$E/L1.xml" "$E/L2.xml" "$E/L3.xml"
 # Hub factory + shims
 # --------------------------------------------------------------------------
 
-new_hub() { # name → prints hub dir
-  local d="$TMP/hub-$1"
+new_hub() { # name [lang] → prints hub dir
+  local d="$TMP/hub-$1" lang="${2:-ru}"
   mkdir -p "$d"/{bin,logs,personal,reports,sources,.orchestrator}
+  echo "language: $lang" > "$d/personal/profile.yaml"
+  if [[ -f "$SRC_BIN/_kb_profile.py" ]]; then
+    cp "$SRC_BIN/_kb_profile.py" "$d/bin/_kb_profile.py"
+  fi
   # channel-send shim: records every send, rc from marker file
   cat > "$d/bin/kb-channel-send" <<EOF
 #!/usr/bin/env bash
@@ -167,9 +171,9 @@ EOF
 }
 
 GROK_FULL='{"papers":[
- {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"https://x.com/somebody/status/1 — thread about agentic planning","prior_context":"Идею agentic-планирования обсуждали на X ещё за месяц до выхода статьи.","title_ru":"Агентное планирование с tool use для LLM-агентов","studied_ru":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","found_ru":"Метод достигает 87% точности на AgentBench и обходит базовые подходы.","why_ru":"Готовый паттерн планирования для твоего оркестратора задач."},
- {"id":"2606.10002","x_status":"not_found","reddit_status":"found","evidence":"reddit.com/r/LocalLLaMA/abc — memory-RAG тред","prior_context":"Похожие иерархические RAG-индексы уже всплывали на Reddit.","title_ru":"Память с retrieval для агентных баз знаний","studied_ru":"Изучали персистентную память и RAG для агентных баз знаний.","found_ru":"Иерархический RAG-индекс даёт +12% к точности retrieval."},
- {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Квантизация и reasoning обсуждались поверхностно.","title_ru":"Оценка chain-of-thought в малых локальных моделях","studied_ru":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","found_ru":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности."}
+ {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"https://x.com/somebody/status/1 — thread about agentic planning","prior_context":"Идею agentic-планирования обсуждали на X ещё за месяц до выхода статьи.","title_loc":"Агентное планирование с tool use для LLM-агентов","studied_loc":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","found_loc":"Метод достигает 87% точности на AgentBench и обходит базовые подходы.","why_loc":"Готовый паттерн планирования для твоего оркестратора задач."},
+ {"id":"2606.10002","x_status":"not_found","reddit_status":"found","evidence":"reddit.com/r/LocalLLaMA/abc — memory-RAG тред","prior_context":"Похожие иерархические RAG-индексы уже всплывали на Reddit.","title_loc":"Память с retrieval для агентных баз знаний","studied_loc":"Изучали персистентную память и RAG для агентных баз знаний.","found_loc":"Иерархический RAG-индекс даёт +12% к точности retrieval."},
+ {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Квантизация и reasoning обсуждались поверхностно.","title_loc":"Оценка chain-of-thought в малых локальных моделях","studied_loc":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","found_loc":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности."}
 ]}'
 
 run_runner() { # hub fixture extra-env...
@@ -216,7 +220,7 @@ case "$SEL_IDS" in
   *) ok "S1: near-duplicate pair not both selected" ;;
 esac
 # per-paper required fields
-FIELDS_OK=$(mget "$HUB" "all(p.get('title') and p.get('authors') and p.get('link','').startswith('https://arxiv.org/abs/') and p.get('abstract') and p.get('summary_ru') and p.get('reason') and isinstance(p.get('scores',{}).get('final'),int) for p in m['selected_papers'])")
+FIELDS_OK=$(mget "$HUB" "all(p.get('title') and p.get('authors') and p.get('link','').startswith('https://arxiv.org/abs/') and p.get('abstract') and p.get('summary_loc') and p.get('reason') and isinstance(p.get('scores',{}).get('final'),int) for p in m['selected_papers'])")
 [[ "$FIELDS_OK" == "True" ]] && ok "S1: every paper has title/authors/link/abstract/summary_ru/reason/scores" \
   || fail "S1: missing per-paper fields"
 AS=$(mget "$HUB" "m['selected_papers'][0]['scores'].get('author_signal')")
@@ -363,7 +367,7 @@ RC=$?
 DELIVERED=$(mget "$HUB" "m['digest_delivered']")
 [[ "$DELIVERED" == "True" ]] && ok "S9: recovery delivered" || fail "S9: recovery not delivered"
 GROK_CALLS_AFTER=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
-[[ "$GROK_CALLS_AFTER" == "$GROK_CALLS_BEFORE" ]] && ok "S9: grok not re-invoked on recovery" || fail "S9: grok re-invoked ($GROK_CALLS_BEFORE→$GROK_CALLS_AFTER)"
+[[ "$GROK_CALLS_AFTER" == "$GROK_CALLS_BEFORE" ]] && ok "S9: grok not re-invoked on recovery" || fail "S9: grok re-invoked (${GROK_CALLS_BEFORE} -> ${GROK_CALLS_AFTER})"
 SENDS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
 [[ "$SENDS" == "2" ]] && ok "S9: exactly one successful delivery after recovery (2 attempts total)" || fail "S9: sends=$SENDS"
 
@@ -451,9 +455,9 @@ RC=$?
 
 echo "=== S18: English studied_ru/found_ru from grok → marked fallback_en, not grok ==="
 GROK_EN='{"papers":[
- {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"x","prior_context":"ok","studied_ru":"They studied planning for agents.","found_ru":"The method achieves 87% accuracy."},
- {"id":"2606.10002","x_status":"weak","reddit_status":"found","evidence":"","prior_context":"ok","studied_ru":"Memory and RAG for agents.","found_ru":"12% retrieval gain."},
- {"id":"2606.10003","x_status":"weak","reddit_status":"weak","evidence":"","prior_context":"ok","studied_ru":"CoT under quantization.","found_ru":"9 points better."}
+ {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"x","prior_context":"ok","studied_loc":"They studied planning for agents.","found_loc":"The method achieves 87% accuracy."},
+ {"id":"2606.10002","x_status":"weak","reddit_status":"found","evidence":"","prior_context":"ok","studied_loc":"Memory and RAG for agents.","found_loc":"12% retrieval gain."},
+ {"id":"2606.10003","x_status":"weak","reddit_status":"weak","evidence":"","prior_context":"ok","studied_loc":"CoT under quantization.","found_loc":"9 points better."}
 ]}'
 HUB=$(new_hub grok-en)
 write_grok "$HUB" "$GROK_EN" 0
@@ -484,6 +488,92 @@ print('kb-learning-arxiv --text-only' in mod.DEFAULT_PROCESSES_YAML and 'kb-dail
 ")
 [[ "$DEFAULT_OK" == "True" ]] && ok "S13: default learning run = kb-learning-arxiv --text-only" \
   || fail "S13: default learning command still legacy"
+
+echo "=== S19: profile en → fully English digest, prompt asks for English ==="
+GROK_EN_LOC='{"papers":[
+ {"id":"2606.10001","x_status":"found","reddit_status":"weak","evidence":"x link","prior_context":"The agentic-planning idea circulated on X a month before the paper.","title_loc":"Agentic Planning with Tool Use for LLM Agents","studied_loc":"They studied long-horizon planning for autonomous agents with tool use and MCP calls.","found_loc":"The method reaches 87% accuracy on AgentBench and beats the baselines.","why_loc":"A ready planning pattern for your task orchestrator."},
+ {"id":"2606.10002","x_status":"not_found","reddit_status":"found","evidence":"reddit thread","prior_context":"Similar hierarchical RAG indexes surfaced on Reddit before.","title_loc":"Memory-Augmented Retrieval for KB Agents","studied_loc":"They studied persistent memory and RAG for agent knowledge bases.","found_loc":"A hierarchical RAG index gives +12% retrieval accuracy.","why_loc":"Directly applicable to the KB architecture."},
+ {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Quantization and reasoning were discussed in passing.","title_loc":"Evaluating CoT in Small Local Models","studied_loc":"They evaluated chain-of-thought quality under quantization on-device.","found_loc":"Their method improves reasoning by 9 points while staying efficient.","why_loc":"Useful for local model choices."}
+]}'
+HUB=$(new_hub lang-en en)
+write_grok "$HUB" "$GROK_EN_LOC" 0
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S19: rc=0 with en profile" || fail "S19: rc=$RC"
+DIGEST_EN=$(cat "$HUB/last-digest.txt" 2>/dev/null || echo "")
+grep -q "Scanned .* fresh arXiv papers" <<<"$DIGEST_EN" && ok "S19: English stats line" || fail "S19: stats line"
+grep -q "Why selected:" <<<"$DIGEST_EN" && ok "S19: English reason label" || fail "S19: reason label"
+grep -q "What they studied:" <<<"$DIGEST_EN" && ok "S19: English studied label" || fail "S19: studied label"
+grep -q "X: found" <<<"$DIGEST_EN" && ok "S19: English status words" || fail "S19: statuses"
+if grep -q "[А-Яа-я]" <<<"$DIGEST_EN"; then
+  fail "S19: Cyrillic leaked into en digest"
+else
+  ok "S19: zero Cyrillic in en digest"
+fi
+grep -q "in English" "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md" \
+  && ok "S19: grok prompt requests English" || fail "S19: prompt language"
+if grep -q "[А-Яа-я]" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
+  fail "S19: Cyrillic leaked into en report"
+else
+  ok "S19: en report fully English"
+fi
+
+echo "=== S20: KB_LANG=sr → English labels, ISO-safe directive, rc=0 ==="
+HUB=$(new_hub lang-sr)
+write_grok "$HUB" "$GROK_EN_LOC" 0
+run_runner "$HUB" "$FIXTURE5" KB_LANG=sr >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S20: rc=0 with KB_LANG=sr" || fail "S20: rc=$RC"
+grep -q "Why selected:" "$HUB/last-digest.txt" && ok "S20: English labels for unmapped code" || fail "S20: labels"
+grep -q "ISO 639 code 'sr'" "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md" \
+  && ok "S20: ISO-safe directive in prompt" || fail "S20: directive"
+
+echo "=== S21: stage cache is language-gated ==="
+HUB=$(new_hub lang-gate)
+write_grok "$HUB" "$GROK_FULL" 0
+echo 3 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1   # ru run, delivery fails, cache filled
+G1=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
+echo 0 > "$HUB/channel-rc"
+write_grok "$HUB" "$GROK_EN_LOC" 0
+run_runner "$HUB" "$FIXTURE5" KB_LANG=en >/dev/null 2>&1   # target switched → cache bypass
+RC=$?
+G2=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
+[[ "$RC" == "0" ]] && ok "S21: en recovery rc=0" || fail "S21: rc=$RC"
+[[ "$G2" -gt "$G1" ]] && ok "S21: language mismatch re-invoked grok (no stale cache)" || fail "S21: stale cache reused (${G1} -> ${G2})"
+if grep -q "[А-Яа-я]" "$HUB/last-digest.txt"; then
+  fail "S21: Russian leaked into en digest from ru cache"
+else
+  ok "S21: no Cyrillic after language switch"
+fi
+# same-language cache still works (ru → ru, fixture removed)
+HUB=$(new_hub lang-gate-ru)
+write_grok "$HUB" "$GROK_FULL" 0
+echo 3 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+echo 0 > "$HUB/channel-rc"
+run_runner "$HUB" "$TMP/removed-again.xml" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S21: same-language cache recovery still works" || fail "S21: ru cache broken rc=$RC"
+
+echo "=== S22: language switch + failed re-fetch must not resurrect old-language cache ==="
+HUB=$(new_hub lang-switch-fail)
+write_grok "$HUB" "$GROK_FULL" 0
+echo 3 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1            # ru cache filled, delivery failed
+echo 0 > "$HUB/channel-rc"
+run_runner "$HUB" "$TMP/gone.xml" KB_LANG=en >/dev/null 2>&1   # switch to en, fetch FAILS
+RC=$?
+[[ "$RC" != "0" ]] && ok "S22: switch + fetch failure → rc!=0" || fail "S22: rc=0"
+write_grok "$HUB" "$GROK_EN_LOC" 0
+run_runner "$HUB" "$FIXTURE5" KB_LANG=en >/dev/null 2>&1       # retry with fixture back
+RC=$?
+[[ "$RC" == "0" ]] && ok "S22: en retry rc=0" || fail "S22: retry rc=$RC"
+if grep -q "[А-Яа-я]" "$HUB/last-digest.txt"; then
+  fail "S22: stale ru cache resurrected after failed re-fetch"
+else
+  ok "S22: no stale-language content after failed re-fetch + retry"
+fi
 
 echo
 echo "=== kb-learning-arxiv tests: $PASS passed, $FAIL failed ==="

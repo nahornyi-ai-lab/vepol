@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import click
+import _kb_profile
 from _kb_people import card
 from _kb_people.channel import send
 
@@ -24,6 +25,26 @@ from _kb_people.channel import send
 # defaults to ~/knowledge/people otherwise.
 if os.environ.get("KB_HUB"):
     card.PEOPLE_DIR = Path(os.environ["KB_HUB"]).expanduser() / "people"
+
+# User language (spec: user-language-setting-2026-06-12). The whole message
+# is user-facing delivery, so every string goes through the pack.
+REMIND_LABELS = {
+    "ru": {
+        "header": "👤 Напоминания о контактах ({n}):\n",
+        "line": "  • {name} — срок {due}{tags}",
+        "send_failed": "kb-people-remind: доставка в канал не удалась",
+    },
+    "en": {
+        "header": "👤 Follow-up reminders ({n} contact{plural}):\n",
+        "line": "  • {name} — due {due}{tags}",
+        "send_failed": "kb-people-remind: channel delivery failed",
+    },
+}
+
+
+def _labels():
+    lang = _kb_profile.get_language(os.environ.get("KB_HUB"))
+    return REMIND_LABELS.get(lang, REMIND_LABELS["en"])
 
 
 @click.command()
@@ -38,10 +59,12 @@ def main(horizon, dry_run):
     if not due_contacts:
         return
 
-    lines = [f"👤 Follow-up reminders ({len(due_contacts)} contact{'s' if len(due_contacts) > 1 else ''}):\n"]
+    labels = _labels()
+    lines = [labels["header"].format(
+        n=len(due_contacts), plural="s" if len(due_contacts) > 1 else "")]
     for c in due_contacts:
         tags = f"  [{', '.join(c['tags'])}]" if c.get("tags") else ""
-        lines.append(f"  • {c['name']} — due {c['due']}{tags}")
+        lines.append(labels["line"].format(name=c["name"], due=c["due"], tags=tags))
 
     message = "\n".join(lines)
 
@@ -52,7 +75,7 @@ def main(horizon, dry_run):
         # delivery must surface as a non-zero exit so kb-tick does not
         # mark the process fired and retries on the next tick.
         if not send("contact-reminder", message):
-            click.echo("kb-people-remind: channel delivery failed", err=True)
+            click.echo(labels["send_failed"], err=True)
             sys.exit(1)
 
 

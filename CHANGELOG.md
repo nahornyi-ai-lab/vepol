@@ -15,6 +15,13 @@ upgrading.
 ## [Unreleased]
 
 ### Added
+- **User language setting** — set your language once in
+  `personal/profile.yaml` (`language: en|ru|es|uk|de|...`; the installer
+  derives a default from your system locale) and every user-facing process
+  — morning brief, evening retro, learning digest, people reminders —
+  delivers in it. Invalid or missing values fall back to English and never
+  block delivery. Deterministic labels currently ship in English and
+  Russian; other languages get English labels with native LLM content.
 - **arXiv learning runner (`kb-learning-arxiv`)** — the scheduled `learning`
   process now reads arXiv directly: deterministic regex ranking selects up
   to three papers per day, one Grok CLI call checks prior X/Twitter and

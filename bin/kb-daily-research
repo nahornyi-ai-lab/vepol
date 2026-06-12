@@ -21,6 +21,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 CONFIG_PATH = HUB / "personal" / "daily-research.yaml"
 REPORTS = HUB / "reports"
@@ -72,7 +74,6 @@ DEFAULT_CONFIG = {
     "focus_project": "auto",
     "mode": "ai_agents_radar",
     "topic_override": "",
-    "language": "ru",
     "research_mode": "deep",
     "source_mode": "curated",
     "max_attempts": str(MAX_ATTEMPTS_DEFAULT),
@@ -120,6 +121,7 @@ def load_config() -> dict[str, str]:
     if not CONFIG_PATH.is_file():
         write_config(DEFAULT_CONFIG.copy())
     cfg = DEFAULT_CONFIG.copy()
+    seen_keys = set()
     for raw in CONFIG_PATH.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or ":" not in line:
@@ -133,6 +135,17 @@ def load_config() -> dict[str, str]:
             val = val[1:-1]
         if key:
             cfg[key] = val
+            seen_keys.add(key)
+    # Legacy exception (spec: user-language-setting-2026-06-12): an explicit
+    # process-local `language` still wins for MANUAL runs of this legacy
+    # runner; when absent, resolve through the canonical profile.
+    if "language" not in seen_keys:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import _kb_profile
+            cfg["language"] = _kb_profile.get_language(HUB)
+        except Exception:
+            pass
     return cfg
 
 
@@ -147,7 +160,6 @@ def write_config(cfg: dict[str, str]) -> None:
         "focus_project",
         "mode",
         "topic_override",
-        "language",
         "research_mode",
         "source_mode",
         "max_attempts",
@@ -160,6 +172,18 @@ def write_config(cfg: dict[str, str]) -> None:
             lines.append(f"{key}: {val}")
     atomic_write(CONFIG_PATH, "\n".join(lines) + "\n")
 
+
+
+
+def user_lang_name() -> str:
+    """Prompt-ready user language name (legacy exception: explicit config
+    key wins; absent -> profile via load_config)."""
+    code = str(load_config().get("language", "en"))
+    try:
+        import _kb_profile
+        return _kb_profile.language_directive(code)
+    except Exception:
+        return code
 
 def resolve_notebooklm_bin() -> str:
     configured = os.environ.get("KB_NOTEBOOKLM_BIN", "").strip()
@@ -376,7 +400,7 @@ Vepol — локальная Markdown-first система памяти и ор�
 
 ## Инструкция для NotebookLM
 
-Сделай русский аудиообзор как практический research recap для Vepol.
+Сделай аудиообзор на языке пользователя ({user_lang_name()}) как практический research recap для Vepol.
 
 Обязательная структура смысла:
 
@@ -793,7 +817,7 @@ Vepol — локальная Markdown-first система памяти и ор�
 
 ## Инструкция для NotebookLM
 
-Сделай короткий русский аудиообзор как практический AI-agent radar для пользователя Vepol.
+Сделай короткий аудиообзор на языке пользователя ({user_lang_name()}) как практический AI-agent radar для пользователя Vepol.
 
 Обязательная структура смысла:
 
@@ -1054,7 +1078,7 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
         "focus_project": focus_project,
         "research_mode": research_mode,
         "source_mode": source_mode,
-        "language": cfg.get("language", "ru"),
+        "language": cfg.get("language", "en"),
         "packet_path": rel(packet),
         error_key: None,
     })
@@ -1147,13 +1171,13 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
 
         if radar_mode:
             prompt = (
-                "Сделай короткий русский AI-agent radar для Vepol: что случилось за сутки/неделю, "
+                f"Сделай короткий AI-agent radar на языке пользователя ({user_lang_name()}) для Vepol: что случилось за сутки/неделю, "
                 "что сейчас на пике обсуждения, кого/что отслеживать дальше, что это значит для Vepol, "
                 "что не раздувать, следующие действия."
             )
         else:
             prompt = (
-                "Сделай короткий русский аудиообзор daily research для Vepol: "
+                f"Сделай короткий аудиообзор daily research на языке пользователя ({user_lang_name()}) для Vepol: "
                 "что нашли, как применить в Vepol, что не брать, следующие действия."
             )
         generated = run_notebooklm(
@@ -1167,7 +1191,7 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
                 "--length",
                 "short",
                 "--language",
-                cfg.get("language", "ru") or "ru",
+                cfg.get("language", "en") or "en",
                 "--wait",
                 "--retry",
                 "2",
