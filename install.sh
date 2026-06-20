@@ -519,7 +519,18 @@ if [[ -L "$HUB/orchestrator-seed" || ! -e "$HUB/orchestrator-seed" ]]; then
   ln -sfn "$VEPOL_DIR" "$HUB/orchestrator-seed"
   ok "  orchestrator-seed pointer: $HUB/orchestrator-seed -> $VEPOL_DIR"
 else
-  warn "  $HUB/orchestrator-seed exists and is not a symlink — leaving it unchanged"
+  # A real (non-symlink) file/dir is in the way. A correctly wired install needs a
+  # symlink-to-seed here (verify requires it), so move the conflict aside to a
+  # timestamped backup and place the pointer — same self-heal pattern as the _kb_*
+  # managed dirs above. Never DELETE the user's file.
+  bak="$HUB/orchestrator-seed.pre-vepol.$(date +%Y%m%d%H%M%S)"
+  if mv "$HUB/orchestrator-seed" "$bak" 2>/dev/null; then
+    warn "  moved existing non-symlink $HUB/orchestrator-seed aside to $(basename "$bak")"
+    ln -sfn "$VEPOL_DIR" "$HUB/orchestrator-seed"
+    ok "  orchestrator-seed pointer: $HUB/orchestrator-seed -> $VEPOL_DIR"
+  else
+    warn "  $HUB/orchestrator-seed is not a symlink and could not be moved — leaving it (verify will flag)"
+  fi
 fi
 
 # Scanner signatures (context-injection detector) — copy so user hub

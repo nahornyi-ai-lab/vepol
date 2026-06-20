@@ -83,6 +83,17 @@ printf '%s' "$sout2" | grep -q "seed-pointer-not-symlink" && [[ "$src2" -eq 13 ]
   && p "--verify catches replaced non-symlink seed locator → exit 13" || f "--verify seed-pointer non-symlink (rc=$src2)"
 rm -f "$HOME/knowledge/orchestrator-seed"; ln -sfn "$REPO" "$HOME/knowledge/orchestrator-seed"   # restore
 
+# apply/verify consistency: a pre-existing non-symlink seed pointer must be self-healed
+# by --apply (backed up + replaced with the correct symlink) so --verify then passes —
+# verify must never reject a state that a fresh --apply leaves behind.
+cons="$WORK/conshome"; mkdir -p "$cons/knowledge"
+printf 'old\n' > "$cons/knowledge/orchestrator-seed"
+HOME="$cons" "$INSTALL" --apply >/dev/null 2>&1
+HOME="$cons" "$INSTALL" --verify --json >/dev/null 2>&1; cvrc=$?
+cbak="$(ls "$cons/knowledge/orchestrator-seed.pre-vepol."* 2>/dev/null | head -1)"
+[[ -L "$cons/knowledge/orchestrator-seed" && "$cvrc" -eq 0 && -n "$cbak" && "$(cat "$cbak")" == "old" ]] \
+  && p "apply self-heals non-symlink seed pointer (backup) → verify passes (apply/verify consistent)" || f "apply/verify seed-pointer consistency (verify rc=$cvrc)"
+
 # AC8 — C-01 deferred (legacy bypass, --apply, no flag): no abort, unchanged, marker=1
 c01="$WORK/c01"; mkdir -p "$c01/.claude"
 printf '{ "permissions": { "defaultMode": "bypassPermissions" } }\n' > "$c01/.claude/settings.json"
