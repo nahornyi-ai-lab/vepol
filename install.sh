@@ -173,6 +173,16 @@ else:  # verify
                 problems.append("bin-missing:" + n)
             elif os.path.realpath(link) != os.path.realpath(want):
                 problems.append("bin-tampered:" + n)
+        # orchestrator-seed pointer ($HUB/orchestrator-seed -> seed) — how agents
+        # locate the seed. install creates it, uninstall removes it; verify it too.
+        sp = os.path.join(hub, "orchestrator-seed")
+        if not os.path.islink(sp):
+            # missing entirely (broken install). A real (non-symlink) file here is
+            # a user's own and install leaves it alone, so don't flag that case.
+            if not os.path.exists(sp):
+                problems.append("seed-pointer-missing")
+        elif os.path.realpath(sp) != os.path.realpath(seed):
+            problems.append("seed-pointer-tampered")
     if not managed:
         problems.append("claude-managed-missing")
     else:
@@ -183,6 +193,9 @@ else:  # verify
             problems.append("claude-managed-unreadable")
     if not include_ok: problems.append("claude-include-missing")
     out["verify_problems"] = problems
+    out["verify_scope"] = ("core operating substrate: hub, bin->seed links, "
+                           "orchestrator-seed pointer, claude managed file + include block. "
+                           "For full manifest/skills/launchd health run: kb-doctor install-health")
     rc = 0 if not problems else 13
 print(json.dumps(out, indent=2))
 sys.exit(rc)

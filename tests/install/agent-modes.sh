@@ -71,6 +71,13 @@ printf '%s' "$vout" | grep -q "bin-tampered:kb-doctor" && [[ "$vrc" -eq 13 ]] \
   && p "--verify catches tampered managed link (retargeted) → exit 13" || f "--verify tamper (rc=$vrc)"
 ln -sfn "$REPO/bin/kb-doctor" "$HOME/knowledge/bin/kb-doctor"   # restore clean install for later steps
 
+# --verify must also catch a tampered orchestrator-seed pointer (managed seed locator)
+ln -sfn "$WORK/decoy" "$HOME/knowledge/orchestrator-seed"
+sout="$("$INSTALL" --verify --json 2>/dev/null)"; src=$?
+printf '%s' "$sout" | grep -q "seed-pointer-tampered" && [[ "$src" -eq 13 ]] \
+  && p "--verify catches tampered orchestrator-seed pointer → exit 13" || f "--verify seed-pointer (rc=$src)"
+ln -sfn "$REPO" "$HOME/knowledge/orchestrator-seed"   # restore
+
 # AC8 — C-01 deferred (legacy bypass, --apply, no flag): no abort, unchanged, marker=1
 c01="$WORK/c01"; mkdir -p "$c01/.claude"
 printf '{ "permissions": { "defaultMode": "bypassPermissions" } }\n' > "$c01/.claude/settings.json"
