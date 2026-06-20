@@ -243,18 +243,13 @@ You don't install Vepol by hand — your AI agent does. The tested
 happy path today is Claude Code, or Codex on a machine where the
 Claude CLI is available. Antigravity CLI and other agents can participate
 as reviewers/workers once configured, because the handoff contract is
-file-based. Start by telling your agent:
-
-> *"Install Vepol from github.com/nahornyi-ai-lab/vepol on this
-> machine. Read AGENTS.md first; before modifying ~/knowledge or
-> ~/.claude, show me detected conflicts and ask."*
-
-The agent reads [`AGENTS.md`](AGENTS.md) (this repo's setup manual
-written for AI agents), checks prerequisites, clones the repo,
-runs the installer, troubleshoots any issues, and walks you through
-the first-run aha sequence. From there, the agent stays with you —
-adding skills, tracking projects, and evolving Vepol to your
-specific workflow over time.
+file-based. Copy the setup prompt from **[`SETUP.prompt.md`](SETUP.prompt.md)** and paste it
+to your agent. It tells the agent exactly how to install Vepol safely: look at your
+machine without changing anything (`./install.sh --probe --json`), show you a plan,
+ask before each step, drive the deterministic installer (`--apply`), verify, and read
+you back a receipt. The agent asks before every change; you approve. From there it
+stays with you — adding skills, tracking projects, and evolving Vepol to your workflow
+over time. (Full details: [`docs/getting-started.md`](docs/getting-started.md).)
 
 If you'd rather drive the install yourself:
 
@@ -273,8 +268,10 @@ managers — that decision stays with you.
 > from another system:** the installer will not overwrite your
 > data, but you should review what's there first. The agent path
 > (above) handles this conflict-check automatically; if you're
-> running `install.sh` manually, back up `~/knowledge/` first or
-> set `VEPOL_HUB=~/path/to/new` to install into a different hub.
+> running `install.sh` manually, back up `~/knowledge/` first.
+> (Installing into a non-default hub is not supported yet in v1 — the
+> installer uses `~/knowledge`; `VEPOL_HUB` is honored only by the
+> read-only `--probe`/`--dry-run`/`--verify` modes.)
 
 After install, your first 5 minutes:
 

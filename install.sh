@@ -38,6 +38,236 @@ else
   C_OK=''; C_INFO=''; C_WARN=''; C_ERR=''; C_DIM=''; C_OFF=''
 fi
 
+# ─────────────────────────────────────────
+# Agent-mode dispatch (prompt-first install)
+# Read-only modes (probe/dry-run/verify/capabilities) emit JSON and exit BEFORE
+# any mutation or log truncation. Unknown flags exit 2 with EMPTY stdout, so an
+# agent can detect "this installer is too old for prompt-first install" instead
+# of silently running a full install. (spec: agent-self-install, blockers B1/B2/B3)
+# ─────────────────────────────────────────
+MODE=""; WANT_JSON=0
+_set_mode() {  # reject conflicting mode flags (e.g. --probe --apply) — exit 2, empty stdout
+  if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
+    printf 'install.sh: conflicting mode flags (%s and %s)\n' "$MODE" "$1" >&2
+    exit 2
+  fi
+  MODE="$1"
+}
+for arg in "$@"; do
+  case "$arg" in
+    --probe)        _set_mode probe ;;
+    --dry-run)      _set_mode dry-run ;;
+    --verify)       _set_mode verify ;;
+    --capabilities) _set_mode capabilities ;;
+    --apply)        _set_mode apply ;;
+    --json)         WANT_JSON=1 ;;
+    -h|--help)      _set_mode help ;;
+    *) printf 'install.sh: unknown option: %s\n' "$arg" >&2
+       printf 'Run "./install.sh --capabilities --json" to see supported modes.\n' >&2
+       exit 2 ;;
+  esac
+done
+[[ -z "$MODE" ]] && MODE="apply-interactive"
+
+_json_esc() {  # minimal JSON string escaping for shell-emitted JSON (backslash, quote)
+  local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"
+}
+
+_emit_capabilities() {
+  # Shell-only (no python3 dependency) — capabilities must work on a bare machine
+  # so an agent can detect support before any prereq is installed.
+  cat <<CAPS
+{
+  "tool": "vepol-install",
+  "version": "$VEPOL_VERSION",
+  "schema_version": 1,
+  "modes": ["--probe", "--dry-run", "--apply", "--verify", "--capabilities", "--help"],
+  "json_modes": ["--probe", "--dry-run", "--verify", "--capabilities"],
+  "opt_in_env": ["VEPOL_ENABLE_LAUNCHD", "VEPOL_ENABLE_TELEGRAM", "VEPOL_ENABLE_MEMORY_COMPILER", "VEPOL_APPLY_C01"],
+  "exit_codes": {"0": "ok", "2": "unknown-option", "10": "missing-required-prereq", "11": "partial-install", "12": "plan-conflict", "13": "verify-failed"}
+}
+CAPS
+}
+
+_probe_or_verify() {
+  # $1 = probe|verify. Emits JSON to stdout only; reads nothing it shouldn't,
+  # writes nothing. Returns a typed exit code.
+  if ! command -v python3 >/dev/null 2>&1; then
+    # python3 is a required prereq; without it, still emit minimal JSON so the
+    # agent sees the gap instead of an empty failure.
+    local _rc=10; [[ "$1" == "verify" ]] && _rc=13
+    local _hub; _hub="$(_json_esc "$HUB")"
+    cat <<PJ
+{
+  "mode": "$1",
+  "os": "$(uname)",
+  "arch": "$(uname -m)",
+  "vepol_version": "$(_json_esc "$VEPOL_VERSION")",
+  "prereqs_missing_required": ["python3"],
+  "hub_path": "$_hub",
+  "hub_exists": $([[ -d "$HUB" ]] && echo true || echo false),
+  "note": "python3 not found — install it (see docs/dependency-matrix.md), then re-run"
+}
+PJ
+    return "$_rc"
+  fi
+  KIND="$1" HUB="$HUB" HOME_DIR="$HOME_DIR" VEPOL_DIR="$VEPOL_DIR" \
+  VEPOL_VERSION="$VEPOL_VERSION" python3 <<'PY'
+import json, os, shutil, subprocess, sys
+hub  = os.environ["HUB"]; home = os.environ["HOME_DIR"]; kind = os.environ["KIND"]
+def have(c): return shutil.which(c) is not None
+req = ["git", "claude", "node", "bun", "rg", "python3"]
+missing = [c for c in req if not have(c)]
+opt = [c for c in ["codex", "uv", "jq", "gh", "agy", "grok"] if not have(c)]
+def sw():
+    try:
+        return (subprocess.run(["sw_vers", "-productVersion"], capture_output=True,
+                               text=True).stdout.strip() or "unknown")
+    except Exception:
+        return "unknown"
+hub_exists = os.path.isdir(hub)
+managed = os.path.isfile(os.path.join(home, ".claude/.vepol/CLAUDE.managed.md"))
+cm = os.path.join(home, ".claude/CLAUDE.md"); include_ok = False
+if os.path.isfile(cm):
+    try: include_ok = "BEGIN VEPOL MANAGED" in open(cm, encoding="utf-8", errors="ignore").read()
+    except Exception: include_ok = False
+needs_sec = False
+sj = os.path.join(home, ".claude/settings.json")
+if os.path.isfile(sj):
+    try:
+        d = json.loads(open(sj, encoding="utf-8-sig").read())
+        p = d.get("permissions") if isinstance(d, dict) else None
+        if isinstance(p, dict) and p.get("defaultMode") == "bypassPermissions": needs_sec = True
+        if isinstance(d, dict) and d.get("skipDangerousModePermissionPrompt") is True: needs_sec = True
+    except Exception:
+        needs_sec = False
+bin_linked = os.path.islink(os.path.join(hub, "bin", "kb-doctor"))
+out = {
+    "mode": kind, "os": os.uname().sysname, "os_version": sw(), "arch": os.uname().machine,
+    "vepol_version": os.environ["VEPOL_VERSION"],
+    "prereqs_missing_required": missing, "prereqs_missing_optional": opt,
+    "hub_path": hub, "hub_exists": hub_exists,
+    "claude_managed_present": managed, "claude_include_block": include_ok,
+    "bin_symlinked": bin_linked, "needs_security_migration": needs_sec,
+}
+rc = 0
+if kind == "probe":
+    if missing: rc = 10
+    elif hub_exists and not bin_linked: rc = 11
+else:  # verify
+    problems = []
+    if not hub_exists: problems.append("hub-missing")
+    if not bin_linked: problems.append("bin-not-symlinked")
+    # Integrity, not just existence: a managed bin symlink must RESOLVE to the seed.
+    # A retargeted/replaced link ("is a symlink" but points elsewhere) is a tamper
+    # that the existence check alone would pass. Seed-existence-guarded so the core
+    # list can't produce false positives if the seed drops a tool.
+    seed = os.environ.get("VEPOL_DIR", "")
+    if seed:
+        for n in ("kb-doctor", "kb-task", "kb-search", "kb-board", "_kb_backlog"):
+            want = os.path.join(seed, "bin", n)
+            if not os.path.exists(want):
+                continue
+            link = os.path.join(hub, "bin", n)
+            if not os.path.islink(link):
+                problems.append("bin-missing:" + n)
+            elif os.path.realpath(link) != os.path.realpath(want):
+                problems.append("bin-tampered:" + n)
+    if not managed:
+        problems.append("claude-managed-missing")
+    else:
+        try:
+            if os.path.getsize(os.path.join(home, ".claude/.vepol/CLAUDE.managed.md")) == 0:
+                problems.append("claude-managed-empty")
+        except OSError:
+            problems.append("claude-managed-unreadable")
+    if not include_ok: problems.append("claude-include-missing")
+    out["verify_problems"] = problems
+    rc = 0 if not problems else 13
+print(json.dumps(out, indent=2))
+sys.exit(rc)
+PY
+}
+
+_dry_run() {
+  # Plan only — no mutation, writes nothing. Shell-only (no python3 dependency).
+  local hub; hub="$(_json_esc "$HUB")"
+  cat <<DRY
+{
+  "mode": "dry-run",
+  "mutates": false,
+  "hub_path": "$hub",
+  "planned_actions": [
+    "ensure hub dirs under $hub (bin, raw, sources, personal, ...)",
+    "symlink $hub/bin/* -> seed bin/ (managed)",
+    "install ~/.claude/.vepol/CLAUDE.managed.md + include block in ~/.claude/CLAUDE.md",
+    "install Claude skills",
+    "optional, OFF unless VEPOL_ENABLE_* set: scheduled tasks, telegram scaffold, memory-compiler",
+    "write install manifest, run kb-doctor, first-run aha, write receipt"
+  ]
+}
+DRY
+}
+
+_print_help() {
+  cat <<'HLP'
+Vepol installer.
+
+Usage:
+  ./install.sh                       Interactive install (asks before optional features).
+  ./install.sh --apply               Non-interactive core install; opt-ins via env (below).
+  ./install.sh --probe --json        Read-only environment/state report (writes nothing).
+  ./install.sh --dry-run --json      Plan only (no mutation).
+  ./install.sh --verify --json       Check an existing install.
+  ./install.sh --capabilities --json List supported modes.
+
+Opt-in env for --apply (all default OFF):
+  VEPOL_ENABLE_LAUNCHD=1   scheduled background tasks
+  VEPOL_ENABLE_TELEGRAM=1  telegram channel scaffold
+  VEPOL_ENABLE_MEMORY_COMPILER=1  auto session capture
+  VEPOL_APPLY_C01=1        apply the settings.json security migration
+HLP
+}
+
+_want() {
+  # _want <ENV_VAR> <ask-prompt> → 0 if the feature is requested.
+  # Non-interactive apply (MODE=apply): truthy env var. Interactive: ask the user.
+  local var="$1" prompt="$2"
+  if [[ "$MODE" == "apply" ]]; then
+    local val
+    val="$(printf '%s' "${!var:-}" | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$val" && "$val" != "0" && "$val" != "no" && "$val" != "false" && "$val" != "off" ]]
+    return
+  fi
+  ask "$prompt"
+}
+
+case "$MODE" in
+  capabilities) _emit_capabilities; exit 0 ;;
+  probe)        set +e; _probe_or_verify probe;  rc=$?; set -e; exit "$rc" ;;
+  verify)       set +e; _probe_or_verify verify; rc=$?; set -e; exit "$rc" ;;
+  dry-run)      _dry_run; exit 0 ;;
+  help)         _print_help; exit 0 ;;
+esac
+
+# ── Apply path (MODE=apply or apply-interactive) only, below this line ──
+NEEDS_SECURITY_MIGRATION=0
+# Track actual opt-in decisions (works for both env and interactive) for the receipt.
+OPT_LAUNCHD=off; OPT_TELEGRAM=off; OPT_MEMORY=off
+
+# v1 scope: installation supports the DEFAULT hub (~/knowledge) only. A custom
+# VEPOL_HUB is not yet threaded through the CLAUDE.md/settings/launchd/manifest
+# templates, so installing into one would leave runtime files pointing at the
+# default hub. Refuse fast rather than produce a half-wired install. (Read-only
+# --probe/--dry-run/--verify still accept VEPOL_HUB.) Follow-up: full custom-hub plumbing.
+if [[ "$HUB" != "$HOME_DIR/knowledge" ]]; then
+  # NB: use inline printf+exit, not die() — die() is defined further below and is
+  # not yet in scope at this point in the apply path.
+  printf 'install.sh: custom VEPOL_HUB (%s) is not supported for install in v1 — ' "$HUB" >&2
+  printf 'unset VEPOL_HUB to install into ~/knowledge. (read-only --probe/--dry-run/--verify still accept VEPOL_HUB.)\n' >&2
+  exit 1
+fi
+
 # Truncate log on each fresh run (keep last run only)
 : > "$LOG"
 
@@ -525,7 +755,11 @@ PYEOF
     echo "  Atomic write: tempfile → chmod to ORIGINAL mode → rename."
     echo "  Original file mode is preserved (not silently downgraded to 0600)."
     echo ""
-    if [[ "${VEPOL_YES:-}" == "1" ]] || ask "Apply this migration now?"; then
+    # In non-interactive --apply, ONLY the explicit VEPOL_APPLY_C01=1 applies the
+    # migration (VEPOL_YES is a legacy interactive convenience, never a silent
+    # apply-mode trigger). Interactive install asks.
+    if [[ "${VEPOL_APPLY_C01:-}" == "1" ]] \
+       || { [[ "$MODE" != "apply" ]] && { [[ "${VEPOL_YES:-}" == "1" ]] || ask "Apply this migration now?"; }; }; then
       snapshot="$HOME_DIR/.claude/settings.json.bak-$(date +%Y-%m-%d-%H%M%S)"
       cp -p "$HOME_DIR/.claude/settings.json" "$snapshot"
       ok "  snapshot: $snapshot"
@@ -583,9 +817,10 @@ PYEOF
       python3 -c "$migrate_script" "$HOME_DIR/.claude/settings.json"
       ok "  $HOME_DIR/.claude/settings.json migrated (original mode preserved)"
     else
-      warn "  migration declined — install aborted."
-      warn "  re-run install.sh when ready to apply C-01."
-      exit 1
+      warn "  security migration deferred — legacy bypass keys still present."
+      warn "  apply later with: VEPOL_APPLY_C01=1 ./install.sh --apply"
+      warn "  (or fix ~/.claude/settings.json manually). Install continues."
+      NEEDS_SECURITY_MIGRATION=1
     fi
   fi
 fi
@@ -614,8 +849,17 @@ if [[ -d "$VEPOL_DIR/claude/skills" ]]; then
   for skill_dir in "$VEPOL_DIR"/claude/skills/*; do
     [[ -d "$skill_dir" && -f "$skill_dir/SKILL.md" ]] || continue
     skill_name="$(basename "$skill_dir")"
-    mkdir -p "$HOME_DIR/.claude/skills/$skill_name"
-    cp "$skill_dir/SKILL.md" "$HOME_DIR/.claude/skills/$skill_name/SKILL.md"
+    dest="$HOME_DIR/.claude/skills/$skill_name"
+    mkdir -p "$dest"
+    # Ownership marker: only SKILL.md files Vepol installed carry .vepol-managed.
+    # Never clobber a pre-existing user SKILL.md we don't own — back it up first.
+    if [[ -f "$dest/SKILL.md" && ! -f "$dest/.vepol-managed" ]]; then
+      bak="$dest/SKILL.md.pre-vepol.$(date +%Y%m%d%H%M%S)"
+      mv "$dest/SKILL.md" "$bak"
+      warn "  preserved your existing $skill_name/SKILL.md as $(basename "$bak")"
+    fi
+    cp "$skill_dir/SKILL.md" "$dest/SKILL.md"
+    : > "$dest/.vepol-managed"
     ok "  $skill_name skill ready"
   done
 fi
@@ -635,7 +879,8 @@ echo "    • cycle launch (twice a day — brief + retro)"
 # since the 2026-06-10 processes release — no standalone people-remind
 # LaunchAgent is installed anymore (its /usr/bin/env python3 invocation broke
 # under launchd's default PATH: no frontmatter/click in system Python).
-if ask "Install scheduled tasks?"; then
+if _want VEPOL_ENABLE_LAUNCHD "Install scheduled tasks?"; then
+  OPT_LAUNCHD=on
   rm -f "$HUB/.orchestrator/launchagents.opted-out"
   LA_DIR="$HOME_DIR/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
@@ -670,7 +915,8 @@ echo
 echo "  Vepol can send daily briefs and accept commands via a Telegram bot."
 echo "  Setup: create bot via @BotFather, paste token into a config file."
 
-if ask "Set up Telegram channel scaffold (you can fill the token later)?"; then
+if _want VEPOL_ENABLE_TELEGRAM "Set up Telegram channel scaffold (you can fill the token later)?"; then
+  OPT_TELEGRAM=on
   TG_DIR="$HOME_DIR/.claude/channels/telegram"
   mkdir -p "$TG_DIR/approved"
   if [[ ! -f "$TG_DIR/.env" ]]; then
@@ -731,7 +977,8 @@ echo
 echo "  Vepol can auto-capture every Claude Code session into your daily log"
 echo "  via a small open-source companion tool (claude-memory-compiler)."
 
-if ask "Install claude-memory-compiler for automatic session capture?"; then
+if _want VEPOL_ENABLE_MEMORY_COMPILER "Install claude-memory-compiler for automatic session capture?"; then
+  OPT_MEMORY=on
   rm -f "$HUB/.orchestrator/memory-compiler.opted-out"
   COMPILER="$HOME_DIR/claude-memory-compiler"
   if [[ ! -d "$COMPILER/.git" ]]; then
@@ -774,7 +1021,7 @@ INTRO
 
 if [[ -x "$HUB/bin/kb-bootstrap-manifest" ]]; then
   say "Bootstrapping install manifest…"
-  "$HUB/bin/kb-bootstrap-manifest" --force --seed-path "$VEPOL_DIR" >/dev/null
+  KB_HUB="$HUB" "$HUB/bin/kb-bootstrap-manifest" --force --seed-path "$VEPOL_DIR" >/dev/null
   ok "install manifest written"
 fi
 
@@ -782,7 +1029,7 @@ fi
 if [[ -x "$HUB/bin/kb-doctor" ]]; then
   say "Running kb-doctor (system health check)…"
   set +e
-  "$HUB/bin/kb-doctor" install-health --strict 2>&1 | tee -a "$LOG" | tail -15
+  KB_HUB="$HUB" "$HUB/bin/kb-doctor" install-health --strict 2>&1 | tee -a "$LOG" | tail -15
   RC=$?
   set -e
   if [[ "$RC" -eq 0 ]]; then
@@ -792,6 +1039,25 @@ if [[ -x "$HUB/bin/kb-doctor" ]]; then
   fi
 else
   warn "kb-doctor not executable — check $HUB/bin/kb-doctor"
+fi
+
+# 8a-receipt. Install receipt — written by the installer (spine), safe even on a
+# partial hub. The prompt-first agent reads this back to the user. (spec A6)
+mkdir -p "$HUB/install/receipts" 2>/dev/null || true
+RECEIPT="$HUB/install/receipts/$(date +%Y-%m-%d-%H%M%S).md"
+if cat > "$RECEIPT" <<RECEOF 2>/dev/null
+# Vepol install receipt
+
+- version: $VEPOL_VERSION
+- mode: $MODE
+- when: $(date -Iseconds 2>/dev/null || date)
+- hub: $HUB
+- kb_doctor_exit: ${RC:-NA}
+- needs_security_migration: ${NEEDS_SECURITY_MIGRATION:-0}
+- opt_ins: launchd=$OPT_LAUNCHD telegram=$OPT_TELEGRAM memory_compiler=$OPT_MEMORY
+RECEOF
+then
+  ok "  install receipt: $RECEIPT"
 fi
 
 # 8b. Suggested next steps

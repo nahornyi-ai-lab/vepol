@@ -109,6 +109,10 @@ echo "=== Installer idempotency smoke ==="
 bash install/idempotency.sh > /dev/null && pass "install/idempotency.sh" || { fail "install/idempotency.sh"; exit 1; }
 
 echo
+echo "=== Installer agent modes (prompt-first: probe/dry-run/verify/apply, C-01, managed-only uninstall) ==="
+bash install/agent-modes.sh > /dev/null && pass "install/agent-modes.sh (20 cases)" || { fail "install/agent-modes.sh"; exit 1; }
+
+echo
 echo "=== Phase 8 kb-doctor periodic checks ==="
 python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (7 fixtures)" || { fail "phase8"; exit 1; }
 
