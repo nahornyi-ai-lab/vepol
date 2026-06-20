@@ -177,10 +177,12 @@ else:  # verify
         # locate the seed. install creates it, uninstall removes it; verify it too.
         sp = os.path.join(hub, "orchestrator-seed")
         if not os.path.islink(sp):
-            # missing entirely (broken install). A real (non-symlink) file here is
-            # a user's own and install leaves it alone, so don't flag that case.
-            if not os.path.exists(sp):
-                problems.append("seed-pointer-missing")
+            # A correctly wired install has this as a symlink to the seed. Anything
+            # else — absent, or replaced by a real file/dir — means agents can't
+            # follow it to the seed, so verify must flag it (not "is a symlink"
+            # but "resolves to the seed").
+            problems.append("seed-pointer-missing" if not os.path.exists(sp)
+                            else "seed-pointer-not-symlink")
         elif os.path.realpath(sp) != os.path.realpath(seed):
             problems.append("seed-pointer-tampered")
     if not managed:
