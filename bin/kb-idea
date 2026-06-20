@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""kb-idea — Vepol Idea Intake command-line surface."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+from _kb_ideas import card
+
+
+def emit(result: object, json_out: bool) -> None:
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    elif isinstance(result, dict):
+        print(" ".join(f"{k}={v}" for k, v in result.items()))
+    else:
+        print(result)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Capture, triage, promote, and close Vepol Idea Intake cards.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("capture", help="capture raw idea text into a canonical card")
+    p.add_argument("text")
+    p.add_argument("--source", default="chat")
+    p.add_argument("--now")
+    p.add_argument("--title")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("triage", help="score and route an idea")
+    p.add_argument("idea_id")
+    p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"])
+    p.add_argument("--materiality", default="cheap-test", choices=["trivial", "cheap-test", "material"])
+    p.add_argument("--line", dest="strategic_lines", action="append", default=[])
+    p.add_argument("--next-action", default="")
+    p.add_argument("--evidence", default="")
+    p.add_argument("--why", default="")
+    p.add_argument("--status", choices=["captured", "triage", "critique", "ready", "promoted", "parked", "killed", "merged", "done"])
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("render", help="render personal/ideas.md from cards")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("brief", help="print ready/promoted idea proposals for daily brief")
+    p.add_argument("--limit", type=int, default=3)
+
+    p = sub.add_parser("promote", help="promote a ready idea by recording a kb-board plan_item_id")
+    p.add_argument("idea_id")
+    p.add_argument("--project", default="hub")
+    p.add_argument("--plan-item-id")
+    p.add_argument("--create-task", action="store_true", help="create a Ready task in the target kb-board")
+    p.add_argument("--priority", choices=["P0", "P1", "P2", "P3"])
+    p.add_argument("--context", default="")
+    p.add_argument("--json", action="store_true")
+
+    cal = sub.add_parser("calendar", help="calendar proposal and approval")
+    cal_sub = cal.add_subparsers(dest="calendar_cmd", required=True)
+    p = cal_sub.add_parser("propose", help="attach a calendar proposal without creating an event")
+    p.add_argument("idea_id")
+    p.add_argument("--title", required=True)
+    p.add_argument("--start", required=True)
+    p.add_argument("--end", required=True)
+    p.add_argument("--proposal-id")
+    p.add_argument("--timezone", default="Europe/Madrid")
+    p.add_argument("--json", action="store_true")
+
+    p = cal_sub.add_parser("approve", help="approve a calendar proposal and record/create the event pointer")
+    p.add_argument("idea_id")
+    p.add_argument("proposal_id")
+    p.add_argument("--event-id")
+    p.add_argument("--approved-at")
+    p.add_argument("--apply", action="store_true", help="create the Google Calendar event through Claude MCP")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("done", help="write terminal outcome back to the idea card")
+    p.add_argument("idea_id")
+    p.add_argument("--outcome", required=True)
+    p.add_argument("--json", action="store_true")
+
+    args = parser.parse_args()
+
+    if args.cmd == "capture":
+        emit(card.capture(args.text, source=args.source, now=args.now, title=args.title), args.json)
+    elif args.cmd == "triage":
+        emit(
+            card.triage(
+                args.idea_id,
+                priority=args.priority,
+                materiality=args.materiality,
+                strategic_lines=args.strategic_lines,
+                next_action=args.next_action,
+                expected_evidence=args.evidence,
+                why_it_matters=args.why,
+                status=args.status,
+            ),
+            args.json,
+        )
+    elif args.cmd == "render":
+        emit({"path": str(card.render_dashboard())}, args.json)
+    elif args.cmd == "brief":
+        print(card.brief(limit=args.limit))
+    elif args.cmd == "promote":
+        emit(
+            card.promote(
+                args.idea_id,
+                project_slug=args.project,
+                plan_item_id=args.plan_item_id,
+                create_task=args.create_task,
+                priority=args.priority,
+                context=args.context,
+            ),
+            args.json,
+        )
+    elif args.cmd == "calendar" and args.calendar_cmd == "propose":
+        emit(
+            card.propose_calendar(
+                args.idea_id,
+                title=args.title,
+                start=args.start,
+                end=args.end,
+                proposal_id=args.proposal_id,
+                timezone=args.timezone,
+            ),
+            args.json,
+        )
+    elif args.cmd == "calendar" and args.calendar_cmd == "approve":
+        emit(
+            card.approve_calendar(
+                args.idea_id,
+                proposal_id=args.proposal_id,
+                event_id=args.event_id,
+                approved_at=args.approved_at,
+                apply=args.apply,
+            ),
+            args.json,
+        )
+    elif args.cmd == "done":
+        emit(card.mark_done(args.idea_id, outcome=args.outcome), args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"kb-idea: {exc}", file=sys.stderr)
+        sys.exit(1)

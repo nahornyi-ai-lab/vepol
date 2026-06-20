@@ -253,7 +253,7 @@ fi
 # Internal Python packages + prompt templates — symlink directories. If an older
 # install left a REAL directory at a managed target, replace it: `ln -sfn` onto an
 # existing real dir would create the link nested inside it, not replace it.
-for pkg in _kb_backlog _kb_board _kb_people _kb_mcp _kb_scanner templates; do
+for pkg in _kb_backlog _kb_board _kb_people _kb_ideas _kb_mcp _kb_scanner templates; do
   [[ -d "$VEPOL_DIR/bin/$pkg" ]] || continue
   if [[ -d "$HUB/bin/$pkg" && ! -L "$HUB/bin/$pkg" ]]; then
     # Never DELETE a real directory — we can't be sure we own this hub. Move it
@@ -801,6 +801,9 @@ ${C_INFO}━━━ Try these next ━━━${C_OFF}
 
   ${C_DIM}# Write your first task into the knowledge base:${C_OFF}
   $HUB/bin/kb-task "My first Vepol task"
+
+  ${C_DIM}# Capture your first idea into the structured idea store:${C_OFF}
+  $HUB/bin/kb-idea capture "My first Vepol idea" --source chat
 
   ${C_DIM}# Confirm retrieval works:${C_OFF}
   $HUB/bin/kb-search "first Vepol"

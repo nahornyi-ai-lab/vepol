@@ -14,7 +14,17 @@ upgrading.
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.3.0] — 2026-06-20
+
 ### Added
+- **Idea Intake (`kb-idea`)** — a Software 3.0 event-driven process
+  for ideas you write or dictate: atomic canonical cards under
+  `personal/ideas/`, rendered `personal/ideas.md` dashboard, triage/priority,
+  ready/promoted digest for `kb-brief`, markdown `kb-board` promotion through
+  `--create-task`, explicit calendar proposal / approval, and terminal outcome
+  write-back.
 - **User language setting** — set your language once in
   `personal/profile.yaml` (`language: en|ru|es|uk|de|...`; the installer
   derives a default from your system locale) and every user-facing process
@@ -269,11 +279,12 @@ commercial use, professional services to clients, modifications, and
 non-competing forks. Restricted for competing products or services
 made available to others (hosted SaaS substituting for Vepol, branded
 resale). Each release auto-converts to MIT on its second anniversary:
-v0.1.0 converts on **2028-05-02** and v0.2.x converts on
-**2028-05-29**. See `LICENSE` and `COMMERCIAL.md` for the authoritative
-wording and common scenarios.
+v0.1.0 converts on **2028-05-02**, v0.2.x converts on **2028-05-29**,
+and v0.3.0 converts on **2028-06-20**. See `LICENSE` and
+`COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nahornyi-ai-lab/vepol/releases/tag/v0.1.0

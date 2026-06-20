@@ -93,6 +93,10 @@ echo "=== Daily-plan generator v0.1 (E2E-1..E2E-15) ==="
 python3 daily-plan-gen/fixtures.py > /dev/null && pass "daily-plan-gen/fixtures.py" || { fail "daily-plan-gen"; exit 1; }
 
 echo
+echo "=== Vepol Idea Intake acceptance vertical ==="
+python3 idea-os/idea_os.py > /dev/null && pass "idea-os/idea_os.py" || { fail "idea-os"; exit 1; }
+
+echo
 echo "=== Evolution Loop v0-minimal fixtures ==="
 python3 evolution/fixtures.py > /dev/null && pass "evolution/fixtures.py" || { fail "evolution"; exit 1; }
 

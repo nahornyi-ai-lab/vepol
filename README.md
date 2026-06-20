@@ -59,6 +59,11 @@ any single model's private memory.
   tasks, deadlines, what got done yesterday — and writes a short brief.
   Not "what do you want to do?" — "this is what's worth doing today,
   given what I know about your work."
+- **Captures ideas before they disappear.** When an idea arrives in chat,
+  dictation, or a future voice adapter, Vepol can write it into a structured
+  idea card immediately. Captured does not mean committed: the idea can be
+  triaged, critiqued, parked, killed, promoted into the task board, or proposed
+  as a calendar block only after approval.
 - **Researches one useful topic every day.** By default Vepol runs a
   curated radar over the AI-agent space, imports web research, and
   delivers a digest: what it found, how it applies to your work, what
@@ -114,6 +119,14 @@ unit tests. The list grows release by release; see
   are text-first by default; NotebookLM audio is an explicit on-demand
   step, never a silent background cost. A missing config self-heals
   with safe defaults.
+
+- **Idea Intake** — an event-driven process for ideas you write or dictate:
+  `kb-idea capture` creates canonical markdown cards under `personal/ideas/`,
+  `personal/ideas.md` renders the dashboard, `kb-idea brief` feeds
+  ready/promoted ideas into the morning brief, and `kb-idea promote --create-task`
+  creates a normal markdown `kb-board` task. It is always available, but not a
+  periodic scheduled job.
+  [`docs/modules/idea-intake.md`](docs/modules/idea-intake.md)
 
 - **People** — durable markdown card per person Vepol encounters,
   with `kb-contact` (add / log / remind / search / due / show /
@@ -268,6 +281,8 @@ After install, your first 5 minutes:
 ```bash
 kb-doctor              # verify install is healthy
 kb-task "first task"   # write your first item
+kb-idea capture "first idea" --source chat
+kb-idea brief          # shows ready/promoted idea proposals after triage
 kb-search "first"      # confirm retrieval works
 kb-demo brief          # see what a synthesized brief looks like
                        # (uses the demo wiki — your real one is empty at first)
