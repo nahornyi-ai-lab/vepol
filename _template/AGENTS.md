@@ -20,6 +20,7 @@ _(1–3 предложения: что это, зачем, для кого, в �
 │   ├── raw/                 # immutable источники
 │   │   └── assets/          # картинки
 │   ├── sources/             # саммари raw-документов
+│   ├── agents/              # одна карточка проекта: agent-card.md (общая для всех runtime; identity = роль проекта, не вендор)
 │   └── <категории>/         # специфичные для проекта
 └── <code-dirs>/             # код проекта — сиблинги к knowledge/
 ```
@@ -38,6 +39,22 @@ _(перечислить, какие подпапки в `knowledge/` имеют
 - **Свободно:** создавать/обновлять страницы в `knowledge/`, апдейтить `log.md`, `state.md`, `index.md`.
 - **С подтверждением:** изменения в code-dirs проекта, создание новых категорий в `knowledge/`, удаление страниц.
 - **Никогда:** трогать `knowledge/raw/`, пушить в git без команды, удалять чужие файлы вне `knowledge/`.
+
+## Agent card
+
+В проекте — **одна карточка на роль** (не одна на runtime): `knowledge/agents/agent-card.md`. Identity привязана к роли проекта; Claude Code, Codex, Antigravity CLI и будущие runtime работают по одной и той же карточке. Runtime-различия (что доступно Claude, что — Codex, …) живут в секции `## Operating notes` внутри карточки.
+
+При каждом старте новой сессии — до первого содержательного ответа или действия — агент обязан иметь startup context: agent card, `knowledge/state.md`, свежий срез `knowledge/log.md`, active work/open escalations и компактный incident-срез. Нормальный путь — hook-injected `Startup Context Manifest`; если manifest есть, перечисленные в нём срезы считаются прочитанными, и агент не перечитывает `knowledge/index.md`, полный `knowledge/incidents.md` или весь `knowledge/backlog.md` только ради формальности. Если manifest нет (hook-less runtime), запусти `~/knowledge/bin/kb-session-start --print --cwd "$PWD"` или вручную прочитай: карточку по иерархии `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → явный fallback «карточки нет», `knowledge/state.md`, `tail -n 80 knowledge/log.md` (fallback 160 при <3 датированных записей), active work через `kb-board`, открытые эскалации и `## Prevention rules` / `## Ongoing` из `knowledge/incidents.md` при наличии. `knowledge/index.md` и полный `knowledge/incidents.md` — on-demand навигация/диагностика, не startup load. Вопрос «кто ты / представься» не является триггером чтения: отвечать по уже прочитанному `## Self-introduction`, не generic-описанием вендора. Полная схема — в [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md#session-startup-context).
+
+Если карточки в проекте ещё нет — агент явно сообщает об этом и предлагает завести. Образец — `~/knowledge/_template/knowledge/agents/_example.md` (после `new-wiki` он автоматически копируется в `knowledge/agents/_example.md`). Первая операция: `cp knowledge/agents/_example.md knowledge/agents/agent-card.md` и заполнить под проект.
+
+## State contract
+
+`knowledge/state.md` — текущая приборная панель проекта, не лог и не архив. Пиши overwrite-only: когда реальность меняется, записывай событие в `knowledge/log.md` (если оно durable), затем заменяй устаревшую строку в `state.md`. Исторические даты, proof, review results, resolved blockers и старые snapshots уходят в `log.md`, `reports/`, `decisions/`, `sources/` или тематические страницы. Текущие дедлайны, активные офферы, метрики, freshness дат и `Last Updated` допустимы.
+
+## Owner-approved spec gate
+
+For non-trivial work, the path is mandatory: research -> owner-approved spec -> `knowledge/spec-approvals.md` with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path -> implementation. The owner can approve in chat; the active agent records the decision as scribe. Any material drift after approval returns to spec review and owner approval.
 
 ## Cross-orchestrator CLI launch
 

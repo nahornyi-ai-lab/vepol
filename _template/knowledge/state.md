@@ -1,27 +1,40 @@
-# {{PROJECT_NAME}} — текущее состояние
+# {{PROJECT_NAME}} — current state
 
-> Снапшот «где мы сейчас». Обновляется при значимых изменениях. Не лог — здесь только актуальное.
+> Permanent contract: present-tense, overwrite-only. This file answers
+> "where are we right now?" It is not a log, report, proof list, or archive.
+> Historical dates, completed work, review results, test proof, resolved
+> blockers, and old snapshots belong in `log.md`, `reports/`, `decisions/`,
+> `sources/`, or thematic pages. Current deadlines, active offers, metric
+> timestamps, source freshness, and `Last Updated` dates are allowed.
 
-## Одной строкой
+## Current Snapshot
 
-_(что это и в каком состоянии — буквально одно предложение)_
+_(One current statement. Replace it when reality changes. Do not append history.)_
 
-## Ключевые метрики
+## Active Focus
 
-_(таблица: метрика / значение / дата / тренд / источник)_
+_(What is actively being worked or watched now.)_
 
-## Активные гипотезы
+## Key Facts And Constraints
 
-_(что сейчас проверяем, со ссылками на страницы в `experiments/`)_
+_(Current constraints only. Old constraints go to `log.md`, `reports/`, or `decisions/`.)_
 
-## Next steps
+## Next Actions
 
-_(3–7 пунктов, что делаем дальше)_
+_(3-7 current actions. Done items leave state and go to `log.md`.)_
 
-## Open questions
+## Waiting / Blockers
 
-_(что не ясно, что исследовать, где нужны данные)_
+_(Only live blockers. Resolved blockers leave state.)_
 
-## Последнее обновление
+## Open Questions
 
-{{DATE}}
+_(Only unresolved questions. When resolved, remove and log the resolution.)_
+
+## References
+
+_(Links to current canonical decisions/reports/sources; no long summaries.)_
+
+## Last Updated
+
+{{DATE}} — initialized.

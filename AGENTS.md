@@ -10,6 +10,16 @@ The user is unlikely to run shell commands themselves. **You** are
 the installer. **You** are the troubleshooter. **You** are the
 ongoing system that grows with the user.
 
+## Agent card startup rule
+
+At every new session start, before the first substantive answer or task action, have startup context: the applicable agent card, `knowledge/state.md`, a recent `knowledge/log.md` slice, active work/open escalations, and a compact incident slice. Prefer the hook-injected `Startup Context Manifest`; when it is present, treat listed slices as already read and do not reread `knowledge/index.md`, full `knowledge/incidents.md`, or the entire backlog just to satisfy startup policy. If the manifest is absent (hook-less runtime), run `~/knowledge/bin/kb-session-start --print --cwd "$PWD"` or manually read: the applicable card (`knowledge/agents/agent-card.md` -> `~/knowledge/agents/agent-card.md` -> explicit no-card fallback), `knowledge/state.md`, `tail -n 80 knowledge/log.md` (fallback 160 when fewer than 3 dated entries are present), active work via `kb-board`, open escalations, and `## Prevention rules` / `## Ongoing` from `knowledge/incidents.md` when present. `knowledge/index.md` and full `knowledge/incidents.md` are on-demand navigation/diagnostics, not startup load. Do not wait for a "who are you" question to load the card; that question only uses the already-read `## Self-introduction`.
+
+## Agent card and state contract
+
+`agent-card.md` is the full startup-loaded project-role passport. Do not intentionally clip it during normal startup. It contains project identity, scope, boundaries, skills, subagents, and runtime notes; generic workflow policy belongs in `AGENTS.md`, not pasted into every card.
+
+`knowledge/state.md` is the current-state dashboard, not a log or archive. Keep it present-tense and overwrite-only: when reality changes, write durable events to `knowledge/log.md` and replace stale state lines. Historical dates, completed work, review/test proof, resolved blockers, and old snapshots belong in `log.md`, `reports/`, `decisions/`, `sources/`, or thematic pages. Current deadlines, active offers, metric timestamps, source freshness, and `Last Updated` dates are allowed.
+
 ## Your role in three sentences
 
 1. **Set up Vepol cleanly on the user's machine** by reading this
@@ -44,6 +54,13 @@ single source of truth and is mutated through `kb-board`, not
 through a database or legacy one-line writer. The universal statuses
 are `Backlog`, `Ready`, `In Progress`, `Blocked`, `Review`, `Done`,
 and `Cancelled`; `Review` is the verification state.
+
+The owner-approved spec gate is mandatory for non-trivial work. The
+path is: research -> owner-approved spec -> `knowledge/spec-approvals.md`
+with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path
+-> implementation. Owner approval can be given in chat; the
+agent records it as scribe. Material drift after approval returns to
+spec review and owner approval.
 
 The architecture (which you will install): user's `~/knowledge/`
 holds all knowledge as markdown files; this repo's `bin/` provides
