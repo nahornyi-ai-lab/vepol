@@ -1,5 +1,20 @@
 # LLM Wiki Hub — мастер-схема
 
+## Session startup context
+
+При каждом старте новой сессии, до первого содержательного ответа или действия, агент обязан иметь startup context: agent card, `state.md`, recent `log.md`, active work/open escalations и компактный incident-срез.
+
+Нормальный путь — hook `~/knowledge/bin/kb-session-start`, который отдаёт markdown bundle с `## Startup Context Manifest`. Если manifest уже есть во входном контексте:
+
+- считать перечисленные slices уже прочитанными;
+- не перечитывать `knowledge/index.md`, полный `knowledge/incidents.md` или весь `knowledge/backlog.md` только ради формальности;
+- использовать `knowledge/index.md` только on-demand для навигации/поиска релевантных страниц;
+- открывать полный `knowledge/incidents.md` только для диагностики, risky work или когда startup-срез указывает на ongoing incident.
+
+Если manifest нет (hook-less runtime), запусти `__HOME__/knowledge/bin/kb-session-start --print --cwd "$PWD"` перед содержательной работой. Ручной fallback, если скрипт недоступен: прочитать agent card по иерархии `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → явный fallback «карточки нет», `knowledge/state.md`, последние **80 физических строк** `knowledge/log.md` (`tail -n 80`, расширить до 160 если в 80 строках меньше 3 датированных записей `## [`), active work через `kb-board`, открытые эскалации и только `## Prevention rules` / `## Ongoing` из `knowledge/incidents.md` при наличии.
+
+Вопрос «кто ты / представься» не является триггером чтения карточки или лога: к этому моменту startup context уже должен быть прочитан. Число 80 выбрано по локальному замеру 24 реальных project logs: `tail -20` даёт медиану 8 свежих событий, `tail -40` — 14, `tail -80` — 20; `tail -120/160` заметно раздувает контекст без пропорциональной пользы.
+
 Это центральный хаб персональной базы знаний («второй мозг»). Паттерн — [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): LLM инкрементально строит и поддерживает связный набор markdown-файлов, человек курирует источники и задаёт вопросы.
 
 ## Telegram messaging — mention placement (hard rule)
@@ -84,9 +99,22 @@ Rules:
 - `Review` is the testing/verification state; do not create separate `Testing` or `Verification` sections.
 - Run `kb-board check <backlog.md>` before ending substantive board work.
 
+### Owner-approved spec gate
+
+For non-trivial work, the path is mandatory: research -> owner-approved spec -> `knowledge/spec-approvals.md` with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path -> implementation. The owner can approve in chat; the active agent records the decision as scribe. Any material drift after approval returns to spec review and owner approval.
+
 **`strategies.md`** — «куда двигаемся и почему» + проверяемые гипотезы о собственной работе агента. Обновляется самим проектом (не хабом): раз в неделю через skill `agent-review` (когда он появится), или при значимом pivot'е. Формат — в `_template/knowledge/strategies.md`. Конвенция лога для стратегии/гипотез/экспериментов: `## [YYYY-MM-DD] strategy | <project> | ...`, `## [YYYY-MM-DD] hypothesis | <project> | ...`, `## [YYYY-MM-DD] experiment | <project> | start|result | ...`.
 
 **`agents/`** — карточка роли проекта. Полная схема, имя файла, поведение при старте сессии, иерархия project→baseline→generic, multi-orchestrator edit protocol — в разделе [«Agent self-identification»](#agent-self-identification) ниже. Короткая версия: **один файл `agent-card.md` на проект**, идентичность привязана к роли (а не к runtime), runtime-различия (Claude Code / Codex / Antigravity CLI) живут в секции `## Operating notes` внутри карточки.
+
+### State contract
+
+`state.md` — текущая приборная панель проекта, не лог и не архив. Он отвечает на вопрос: **где мы сейчас?**
+
+- Писать в настоящем времени, overwrite-only: когда реальность меняется, заменить устаревшую строку.
+- Исторические даты, `since`, `fixed`, `shipped`, test proof, review result, incident narrative, resolved blockers and old snapshots go to `log.md`, `reports/`, `decisions/`, `strategies.md`, `sources/`, or entity pages.
+- Current dates are allowed for `Last Updated`, active deadlines, active offers, metric timestamps, and source freshness.
+- State edit rule: first record the event in `log.md` when it matters, then leave only the current truth in `state.md`.
 
 **Ключевое правило**: всё, что LLM пишет или читает как «знание», живёт внутри `knowledge/`. Всё, что является рабочим кодом/контентом/артефактом — сиблинги к `knowledge/`.
 
@@ -189,7 +217,7 @@ Acceptance — ответ должен содержать все эти подс
 Из этого следуют жёсткие правила:
 
 - Нет отдельной памяти под каждого оркестратора. Источник правды всегда один: `~/knowledge/` и проектные `knowledge/`.
-- Любой агент перед работой читает тот же curated context, который читал бы Claude через SessionStart: `README.md`, `state.md`, `index.md`, свежий `log.md`, при необходимости `backlog.md`, `escalations.md`, `incidents.md`, recent `daily/`.
+- Любой агент перед работой использует тот же startup bundle, который формирует `kb-session-start`: agent card, project state, recent log, active work/open escalations, compact prevention/ongoing incident slice, CLI roster/recent daily при наличии. Если bundle уже пришёл с `Startup Context Manifest`, эти срезы считаются прочитанными; `index.md` и полный `incidents.md` открываются on-demand.
 - Любой агент после значимой работы обязан оставить след в той же системе: `log.md` для событий и решений, `state.md` для изменившегося статуса, тематические страницы для нового знания, `incidents.md` для поломок и ручных обходов.
 - Если у конкретного инструмента нет автоматических хуков SessionStart/SessionEnd, агент компенсирует это вручную. Отсутствие автоматики не освобождает от дисциплины памяти.
 - Цель — **zero split-brain**: любой второй оркестратор должен уметь продолжить работу только по файлам, без доступа к прошлому чату.
@@ -204,7 +232,9 @@ Acceptance — ответ должен содержать все эти подс
 
 ## Agent self-identification
 
-«Карточка агента» = одна Markdown-страница, где описана **роль проекта**: что я тут делаю, на чём специализируюсь, какие у меня скиллы, кого зову как сабагентов, чего не делаю. При старте сессии любой оркестратор обязан прочитать эту карточку до первого ответа; на вопрос «кто ты / представься» отвечает по `## Self-introduction` карточки, а не generic-описанием вендора.
+«Карточка агента» = одна Markdown-страница, где описана **роль проекта**: что я тут делаю, на чём специализируюсь, какие у меня скиллы, кого зову как сабагентов, чего не делаю. При каждом старте новой сессии любой оркестратор обязан найти и прочитать карточку по иерархии ниже до первого содержательного ответа. Это не ленивое действие по вопросу «кто ты / представься»: такой вопрос только использует уже прочитанный `## Self-introduction` карточки вместо generic-описания вендора.
+
+`agent-card.md` — полный startup-loaded паспорт роли проекта. Его нельзя намеренно резать при нормальной работе. Generic process policy belongs in `AGENTS.md`; the card contains project-specific identity, scope, boundaries, skills, subagents, and runtime deltas. `inherits: hub-baseline@<version>` is a provenance/policy pointer, not runtime merge semantics: if project card exists, it still must stand alone.
 
 Этот раздел — единственный канон конвенции для всех проектов на машине.
 
@@ -223,6 +253,8 @@ Acceptance — ответ должен содержать все эти подс
 
 | Поле | Тип | Назначение |
 |------|-----|-----------|
+| `schema_version` | string | card schema marker for new cards, currently `agent-card/v1` |
+| `inherits` | string | provenance/policy pointer such as `hub-baseline@0.4.0`; not runtime merge |
 | `name` | string (slug) | id проекта/роли в `knowledge/agents/`, lowercase-kebab, совпадает с `<slug>` или `<slug>-<role>` |
 | `display_name` | string | человекочитаемое имя роли («example-project orchestrator», не «Claude Code в example-project») |
 | `version` | string | semver карточки, **bump patch при любой правке frontmatter** |
@@ -242,7 +274,7 @@ Acceptance — ответ должен содержать все эти подс
 # <display_name>
 
 ## Self-introduction
-Одно-два предложения от первого лица: «Я — <role>. Я занимаюсь <goal>». Этим текстом агент представляется при старте сессии или явном вопросе «кто ты?». Явно отметить: «карточка одна, исполнителей может быть несколько; runtime-различия — в Operating notes».
+Одно-два предложения от первого лица: «Я — <role>. Я занимаюсь <goal>». После обязательного стартового чтения карточки этот текст используется как canonical self-introduction, в том числе для явного вопроса «кто ты?». Явно отметить: «карточка одна, исполнителей может быть несколько; runtime-различия — в Operating notes».
 
 ## Specialization
 3-7 строк: на чём агент специализируется **именно в этом проекте** (не вообще). Что отличает работу здесь от работы в других проектах на машине.
@@ -279,9 +311,9 @@ Acceptance — ответ должен содержать все эти подс
 3. **Conflict resolution.** Если два оркестратора правят одновременно и файл показывает конфликт — никто не перезаписывает молча. Конфликт фиксируется в `knowledge/incidents.md` строкой `agent-card conflict: <runtime>, <date>, <fields>`, resolution обсуждается человеком или эскалируется в `escalations.md`.
 4. **Ownership.** В первой версии нет formal ownership: любой оркестратор может править карточку. Закреплять «Codex владеет X, Claude — Y» — только при появлении реальных конфликтов, не раньше.
 
-### Reliability escalation
+### Startup enforcement
 
-Если хотя бы **одна свежая сессия** регрессит (представляется generic-описанием вендора при наличии карточки) — поднимается обязательный SessionStart-hook, читающий `agent-card.md` и кладущий её содержимое в системный контекст до первого turn'а. До регрессии — мастер-правила здесь и в `~/.claude/CLAUDE.md` достаточно.
+Чтение `agent-card.md` при старте — обязательный startup contract, не troubleshooting escalation. Runtime'ы с SessionStart-hook должны класть найденную карточку в системный контекст до первого turn'а. Runtime'ы без hook'а обязаны прочитать карточку напрямую в начале сессии, до ответа пользователю или выполнения задачи. На вопрос «кто ты / представься» нельзя впервые загружать карточку: к этому моменту она уже должна быть прочитана, либо отсутствие карточки должно быть явно зафиксировано.
 
 ### Failure modes
 
@@ -290,6 +322,7 @@ Acceptance — ответ должен содержать все эти подс
 | Карточка отсутствует | Identity-drift | При старте — агент явно говорит «карточки нет, завести?» |
 | `description` — лейбл, не trigger | Auto-delegation не работает | Lint `kb-doctor agent-cards` (future): проверка что `description` начинается с глагола |
 | Карточка дублирует `AGENTS.md` | Drift между двумя источниками | `AGENTS.md` ссылается на карточку, не дублирует |
+| Карточка копирует generic policy вместо project identity | Card bloat, stale duplicated rules | Replace copied policy with a link or `inherits`; keep only project-specific meaning |
 | Per-runtime файлы (legacy) | Split-brain между Claude и Codex | Смержить в `agent-card.md`, удалить старые файлы, version bump, запись в `log.md` |
 | Карточка привязана к вендору в `display_name` («Codex — X») | Identity ломается при смене runtime | `display_name` = роль проекта; вендор — только в `## Operating notes` |
 | Frontmatter ломает YAML | Карточку не прочитать | `python -c "import yaml; yaml.safe_load(open('....md').read().split('---')[1])"` |
@@ -443,7 +476,7 @@ Vault открывается **на уровне `~/knowledge/`**. Благод�
 
 В проектах, где уже есть `<project>/knowledge/log.md`, Codex и Claude Code сессии **автоматически захватываются** через [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler). Antigravity CLI (`agy`) хука пока не имеет — после стабилизации экосистемы (curl-installed v1.0.0 from 2026-05-19) добавить аналогичный adapter:
 
-**SessionStart** — хук `~/knowledge/bin/kb-session-start` читает `README.md`, `state.md`, `index.md`, последние 80 строк `log.md` и последние `daily/YYYY-MM-DD.md`, отдаёт как `additionalContext` в новую сессию. Claude начинает работу, уже «помня» контекст проекта.
+**SessionStart** — хук `~/knowledge/bin/kb-session-start` формирует manifest-aware startup bundle: agent card, `state.md`, recent `log.md`, active work/open escalations, compact prevention/ongoing incident slice, CLI roster/recent `daily/` при наличии бюджета. `index.md` и полный `incidents.md` не грузятся на старте; они остаются on-demand навигацией/диагностикой.
 
 **SessionEnd / PreCompact** — хуки `kb-session-end` / `kb-pre-compact` экспортят:
 - `CLAUDE_KB_DAILY_DIR=<project>/knowledge/daily`
