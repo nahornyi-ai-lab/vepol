@@ -63,10 +63,11 @@ considered + why this one won. Manufacturing a "contradiction" to tick the box
 is an anti-pattern.
 
 **3. Specification.** Write the spec before code, into `knowledge/decisions/`
-(decision + spec live together). Include acceptance criteria and known failure
-modes. The spec is versioned: reviews bind to its content hash (Phase 4), so a
-material edit after approval is detectable. See
-[spec-driven-workflow.md](spec-driven-workflow.md).
+(decision + spec live together). Include product context, Place in Vepol,
+Software 3.0 / agentic-software fit, acceptance criteria, failure modes, test
+plan, and the mandatory E2E path. The spec is versioned with a `spec-contract`
+hash: reviews and owner approval bind to that exact contract, so material drift
+is detectable. See [spec-driven-workflow.md](spec-driven-workflow.md).
 
 **4. Cross-agent review of the spec — ≥2 independent reviewers, before the
 human.** A material decision's spec/plan is reviewed by **at least two
@@ -98,9 +99,24 @@ count toward the gate.
   `[Blocker-Re-Review-Unavailable: <who, original verdict, what was fixed,
   risk>]` — the human lifts the block, appoints a third agent, or waits.
 
-**5. Tests → implementation.** Red tests first, implement to green, then
-revisions. Small verifiable steps; empty/failed output is a real failure, not
-"no result." See [spec-driven-workflow.md](spec-driven-workflow.md).
+**4.5. Owner approval.** After non-blocking cross-agent review, non-trivial
+work enters the owner-approved specification gate. The reviewed spec is listed
+in `knowledge/spec-approvals.md`; approval is valid only for the exact
+`spec-contract` hash. The owner can approve or request changes in chat; the
+active agent records the decision as scribe in the queue and spec. No RED tests
+or implementation start before this owner approval.
+
+**4.6. Build plan.** After owner approval and before coding, create the
+post-approval build plan: ordered steps, file/artifact list, concrete RED tests,
+mandatory E2E path, and verification commands. This is the HOW layer, not a
+second owner approval. If planning changes scope, acceptance, risk, public
+behavior, security/privacy, data migration, or the E2E path, stop and return to
+spec review and owner approval.
+
+**5. Tests -> implementation.** RED tests including E2E, or a documented process
+smoke for methodology/docs work, come first. Implement to green, then revisions.
+Small verifiable steps; empty/failed output is a real failure, not "no result."
+See [spec-driven-workflow.md](spec-driven-workflow.md).
 
 **5.5. Implementation review.** Specs don't ship — diffs do. For non-trivial
 work whose Phase 5 produced code/tests/configs: after green and before

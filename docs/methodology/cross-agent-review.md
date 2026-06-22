@@ -81,6 +81,8 @@ fields:
 - What was concretely checked
 - Top risks (≥2)
 - At least one failure mode or negative test case
+- Whether the mandatory E2E path is present, proportionate, and strong
+  enough to prove the user/process outcome
 - What was NOT checked
 - Findings, each tagged `[blocker]` or `[nit]`
 
@@ -142,6 +144,16 @@ unsure about."
 The verdict's "what was checked" field must enumerate which checklist
 items were actually exercised against this diff. The verdict binds to
 `spec:<algo>:<hash> diff:<ref>`.
+
+## Owner approval handoff
+
+After the spec review gate is non-blocking, the author hands the owner the
+reviewed spec path, exact contract hash, and approval queue row in
+`knowledge/spec-approvals.md`. The queue status moves to owner approval only for
+the reviewed contract hash. The owner may approve, reject, or request `Changes requested`
+in chat; the active agent records the owner decision as scribe in the
+queue and spec. A build plan and RED tests are not started until the owner
+approval is recorded for the same contract hash.
 
 ## Why two layers, not one
 

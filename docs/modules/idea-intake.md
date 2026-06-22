@@ -24,6 +24,10 @@ text or voice event
   -> triage / priority
   -> optional critique
   -> daily brief proposal
+  -> research
+  -> owner-approved specification
+  -> post-approval build plan
+  -> RED tests including E2E
   -> kb-board task
   -> calendar approval
   -> outcome
@@ -147,6 +151,28 @@ and the terminal outcome mirror.
 
 This prevents a split-brain state where one file says "in progress" and another
 file says "done".
+
+## Material Idea Path
+
+Cheap or reversible ideas can still be triaged, killed, parked, or promoted as
+small tasks. Material ideas — new methodology, public behavior, infrastructure,
+security-sensitive work, scheduler/task-board logic, user-facing claims, or work
+that needs more than a trivial fix — must pass through the owner-approved
+specification gate before execution.
+
+For those ideas the path is:
+
+```text
+capture -> triage -> research -> owner-approved specification
+  -> knowledge/spec-approvals.md exact spec-contract hash
+  -> post-approval build plan
+  -> RED tests including E2E
+  -> kb-board task owns execution state
+  -> verification -> outcome
+```
+
+The card can point to the research, spec, approval hash, build plan, and
+`plan_item_id`, but the kb-board task owns execution state once work starts.
 
 ## What This Is Not
 

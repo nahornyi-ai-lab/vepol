@@ -51,6 +51,13 @@ A spec lives in a markdown file (in your knowledge base for project-
 specific specs, or in `concepts/` for cross-project concerns). It
 must contain:
 
+- **Product context.** What product/capability is being built, for
+  whom, and why it matters now.
+- **Place in Vepol.** Which process/module/surface it belongs to, what
+  it connects to, and what owns the resulting state.
+- **Software 3.0 fit.** How the change uses or responds to modern
+  agentic workflows while preserving Vepol's deterministic,
+  inspectable, markdown-backed constraints.
 - **What we're building.** One paragraph in plain language.
 - **Scope (in / out).** What's included, what's explicitly excluded.
   Out-of-scope is as important as in-scope — it constrains the
@@ -60,6 +67,18 @@ must contain:
   at the p95."
 - **Failure modes.** What could go wrong, and what the system does
   when it does. (This catches half the bugs before they're written.)
+- **Test plan and mandatory E2E path.** State which tests should be RED
+  before implementation and the end-to-end user/process scenario that
+  proves the change from trigger/input through durable outcome. Runtime
+  or user-facing changes require executable E2E automation unless
+  technically impossible. If technically impossible, record who judged
+  that, why, residual risk, and the exact manual E2E or process-smoke
+  substitute.
+- **Owner approval fields.** Non-trivial development specs enter
+  `knowledge/spec-approvals.md` after cross-agent review. Approval is
+  tied to the exact `spec-contract` hash. The owner can approve,
+  request `Changes requested`, reject, or supersede in chat; the active
+  agent records the decision as scribe.
 - **Open questions.** Things you didn't decide. Each gets a default
   position so the spec can move forward; the open question is
   marked for later resolution.
@@ -68,6 +87,19 @@ If you can't write the spec — if the acceptance criteria are vague
 and the failure modes are "we'll see what happens" — you don't
 understand the problem well enough to build it yet. Stop and learn
 more.
+
+### 1.5 Owner approval and build plan
+
+After cross-agent review is non-blocking, the owner-approved spec gate
+must pass before coding starts. Approval is valid only for the exact
+`spec-contract` hash recorded in `knowledge/spec-approvals.md`.
+
+After owner approval, write a lightweight build plan before RED tests:
+ordered steps, file/artifact list, concrete RED tests, mandatory E2E
+path, and verification commands. The build plan is HOW; the approved
+spec owns WHAT and DONE. If the build plan changes scope, acceptance,
+risk, public behavior, security/privacy, data migration, or the E2E
+path, return to spec review and owner approval.
 
 ### 2. Tests before code (RED)
 

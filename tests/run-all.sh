@@ -97,6 +97,10 @@ echo "=== Vepol Idea Intake acceptance vertical ==="
 python3 idea-os/idea_os.py > /dev/null && pass "idea-os/idea_os.py" || { fail "idea-os"; exit 1; }
 
 echo
+echo "=== Owner-approved spec gate methodology contract ==="
+python3 methodology/owner_spec_gate.py > /dev/null && pass "methodology/owner_spec_gate.py" || { fail "owner-spec-gate"; exit 1; }
+
+echo
 echo "=== Evolution Loop v0-minimal fixtures ==="
 python3 evolution/fixtures.py > /dev/null && pass "evolution/fixtures.py" || { fail "evolution"; exit 1; }
 

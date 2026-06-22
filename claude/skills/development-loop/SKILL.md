@@ -29,9 +29,10 @@ same loop from `AGENTS.md` natively.
    decisions or a real trade-off conflict; otherwise "2–3 alternatives + why
    this one." Don't manufacture contradictions.
 
-3. **Spec** before code into `knowledge/decisions/`, with acceptance criteria
-   and failure modes. Reviews bind to the spec's content hash
-   (`git hash-object` / `shasum -a 256`).
+3. **Spec** before code into `knowledge/decisions/`, with product context,
+   Place in Vepol, Software 3.0 fit, acceptance criteria, failure modes, test
+   plan, and mandatory E2E path. Reviews and owner approval bind to the
+   `spec-contract` hash.
 
 4. **Spec review — ≥2 independent reviewers (material decisions), before the
    human.** Reviewers exclude the author. Structured verdict required
@@ -43,8 +44,19 @@ same loop from `AGENTS.md` natively.
    `[Single-Agent Fallback]`; blocker unreachable for re-review after ≥2 logged
    attempts → `[Blocker-Re-Review-Unavailable]`. Never silently proceed.
 
-5. **Tests → implementation.** Red first, green, revisions. Empty/failed
-   output = real failure.
+4.5. **Owner approval.** After non-blocking spec review, list the spec in
+   `knowledge/spec-approvals.md`. The owner approves the exact
+   `spec-contract` hash in chat; the active agent records the decision as
+   scribe. No RED tests or implementation before this approval.
+
+4.6. **Build plan.** After owner approval, write the HOW layer before coding:
+   ordered steps, file/artifact list, concrete RED tests, mandatory E2E path,
+   and verification commands. If planning changes scope, acceptance, risk,
+   public/security/privacy behavior, migration, or E2E path, return to spec
+   review and owner approval.
+
+5. **Tests → implementation.** Red first, including E2E/process smoke coverage,
+   green, revisions. Empty/failed output = real failure.
 
 5.5. **Implementation review — the diff, not just the spec.** Non-trivial work
    that produced code/tests/configs: send the diff to ≥1 independent reviewer
