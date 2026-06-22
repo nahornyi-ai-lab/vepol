@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """kb-learning-arxiv — scheduled learning: arXiv-only 3-paper digest in the
-user's language, with a Grok X/Twitter + Reddit social-context check.
+user's language, with TWO independent LLM calls — Codex for translation/
+analysis and Grok for an X/Twitter + Reddit social-context check.
 
 Specs: learning-arxiv-implementation-spec-2026-06-12 +
-user-language-setting-2026-06-12 (KB decisions; both cross-reviewed).
+user-language-setting-2026-06-12 + split-translation-social-2026-06-17
+(KB decisions; all cross-reviewed).
 
 Flow: fetch arXiv Atom → deterministic regex ranking → select up to 3 papers
-→ one Grok call for X/Reddit context + user-language summaries per paper
-(bounded by title+abstract) → short Telegram digest + file artifacts. The
-digest/report language comes from personal/profile.yaml via _kb_profile.
+→ (1) one Codex call (offline, --sandbox read-only) for user-language
+study/method/result summaries per paper, bounded by title+abstract; (2) one
+Grok call for X/Reddit social context only → short Telegram digest + file artifacts. The two calls
+are INDEPENDENT: a Codex failure degrades only the translation, a Grok failure
+degrades only the social lines (this decoupling is the 2026-06-17 fix — one
+combined Grok call used to time out and degrade everything). The digest/report
+language comes from personal/profile.yaml via _kb_profile.
 
 Primary selection is arXiv-only by construction: no RSS/HN/GitHub/news
 collector exists in this runner, so official-source links can never outrank
@@ -16,6 +22,7 @@ papers. NotebookLM is never called here — audio stays manual-only.
 
 Artifacts per date:
   sources/arxiv-learning-snapshot-<DATE>.md
+  sources/arxiv-learning-translation-codex-<DATE>.md
   sources/arxiv-learning-social-grok-<DATE>.md
   reports/learning-arxiv-summary-<DATE>.md
   .orchestrator/learning-arxiv-<DATE>.json (+ .lock)
@@ -25,7 +32,9 @@ Env:
   KB_LEARNING_ARXIV_FIXTURE         path to Atom XML — bypasses network fetch
   KB_LEARNING_ARXIV_DISABLE_NETWORK 1 = fail fetch unless fixture is set
   KB_LEARNING_ARXIV_GROK_BIN        grok binary override (tests use a fake)
-  KB_LEARNING_ARXIV_GROK_TIMEOUT    seconds (default 600)
+  KB_LEARNING_ARXIV_GROK_TIMEOUT    grok social seconds (default 600)
+  KB_LEARNING_ARXIV_TRANSLATE_BIN   codex binary override (tests use a fake)
+  KB_LEARNING_ARXIV_CODEX_TIMEOUT   codex translation seconds (default 300)
   KB_PROCESS_OUTPUTS / KB_PROCESS_BACKGROUND  set by kb-tick
 """
 from __future__ import annotations
@@ -72,6 +81,17 @@ DIGEST_BUDGET = 3900
 INCIDENT_ATTEMPTS = 8
 HTTP_TIMEOUT = 30
 JACCARD_LIMIT = 0.6
+# Manifest contract version. v2 moved translation out of Grok into Codex.
+# v3 adds first-class method/setup summaries (`method_loc`). Older manifests
+# must NOT satisfy the stage cache, or they would keep delivering abstract-only
+# paper explanations.
+MANIFEST_VERSION = 3
+# Grok now does X/Reddit social ONLY (translation moved to Codex), so its
+# default timeout drops 900→600s. Codex translation is offline text work,
+# fast; 300s is generous. Both overridable via env. Sequential worst case
+# 300+600=900s fits the kb-tick PROCESS_TIMEOUT=1800s wrapper ceiling.
+GROK_TIMEOUT_DEFAULT = 600
+CODEX_TIMEOUT_DEFAULT = 300
 
 # Keys in personal/daily-research.yaml that belong to the legacy runner only.
 # `language` is legacy too: personal/profile.yaml is the single source of
@@ -139,7 +159,11 @@ LABELS = {
         "picked": "Выбрал {n} лучших:",
         "reason": "Почему выбрана",
         "studied": "Что исследовали",
+        "method": "Как исследовали",
         "found": "Что выяснили",
+        "abstract": "Аннотация",
+        "abstract_unavailable": "Перевод abstract недоступен: модель перевода не вернула корректный текст; оригинал сохранён в snapshot.",
+        "method_unavailable": "В abstract не указано, на каких данных, benchmark или setup это проверяли.",
         "why": "Зачем тебе",
         "footer": "Полный разбор: {path}",
         "topics": "темы",
@@ -174,7 +198,7 @@ LABELS = {
         "report_scores": "Скоры",
         "report_prior": "Прежнее обсуждение",
         "report_evidence": "Подтверждения",
-        "report_abstract": "Аннотация (EN)",
+        "report_abstract": "Аннотация (перевод)",
         "report_runner_ups": "Не вошли (runner-ups)",
         "report_sources": "Источники",
     },
@@ -186,7 +210,11 @@ LABELS = {
         "picked": "Picked the {n} best:",
         "reason": "Why selected",
         "studied": "What they studied",
+        "method": "How they studied it",
         "found": "What they found",
+        "abstract": "Abstract",
+        "abstract_unavailable": "Abstract translation unavailable: the translation model did not return valid target-language text; the original is saved in the snapshot.",
+        "method_unavailable": "The abstract does not specify the data, benchmark, or setup used.",
         "why": "Why it matters to you",
         "footer": "Full breakdown: {path}",
         "topics": "topics",
@@ -221,7 +249,7 @@ LABELS = {
         "report_scores": "Scores",
         "report_prior": "Prior discussion",
         "report_evidence": "Evidence",
-        "report_abstract": "Abstract (EN)",
+        "report_abstract": "Abstract",
         "report_runner_ups": "Runner-ups (not selected)",
         "report_sources": "Sources",
     },
@@ -334,6 +362,10 @@ def snapshot_path(d: str) -> pathlib.Path:
 
 def social_path(d: str) -> pathlib.Path:
     return SOURCES / f"arxiv-learning-social-grok-{d}.md"
+
+
+def translation_path(d: str) -> pathlib.Path:
+    return SOURCES / f"arxiv-learning-translation-codex-{d}.md"
 
 
 def load_manifest(d: str) -> dict:
@@ -568,6 +600,14 @@ def found_text(paper: dict, limit: int = 240) -> str:
     return L("no_result")
 
 
+def method_text(paper: dict, limit: int = 240) -> str:
+    sents = split_sentences(paper["abstract"])
+    for s in sents:
+        if METHOD_RE.search(s):
+            return truncate_sentence(s, limit)
+    return L("method_unavailable")
+
+
 def why_text(paper: dict) -> str:
     """Per-paper practical sentence: Grok's specific one when available,
     else the topic-group template (degraded mode)."""
@@ -582,7 +622,7 @@ def why_text(paper: dict) -> str:
 
 
 def studied_display(paper: dict, limit: int = 240) -> str:
-    """Localized summary (Grok bounded translation) when available; otherwise
+    """Localized summary (Codex bounded translation) when available; otherwise
     the deterministic English abstract extract — an honest degraded mode,
     marked in the manifest as summary_source=fallback_en."""
     loc = _loc_field(paper, "studied")
@@ -598,9 +638,24 @@ def found_display(paper: dict, limit: int = 240) -> str:
     return found_text(paper, limit)
 
 
+def method_display(paper: dict, limit: int = 240) -> str:
+    loc = _loc_field(paper, "method")
+    if loc:
+        return truncate_sentence(loc, limit)
+    return method_text(paper, limit)
+
+
+def abstract_display(paper: dict, limit: int = 700) -> str:
+    loc = _loc_field(paper, "abstract")
+    if loc:
+        return truncate_sentence(loc, limit)
+    return L("abstract_unavailable")
+
+
 def build_summary(paper: dict) -> str:
     return (
         f"{L('studied')}: {studied_display(paper)} "
+        f"{L('method')}: {method_display(paper)} "
         f"{L('found')}: {found_display(paper)} "
         f"{L('why')}: {why_text(paper)}"
     )
@@ -625,7 +680,61 @@ def grok_bin() -> str:
     return str(pathlib.Path.home() / ".grok" / "bin" / "grok")
 
 
+def codex_bin() -> str:
+    configured = os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_BIN", "").strip()
+    if configured:
+        return configured
+    return "/Applications/Codex.app/Contents/Resources/codex"
+
+
+def run_codex(date_iso: str, papers: list) -> tuple:
+    """Offline translation/analysis via Codex. Returns (message, rc,
+    stderr_tail). Never raises. `codex exec --sandbox read-only` (no edits)
+    with `--output-last-message <file>` capturing ONLY the final agent message
+    (clean; smoke-confirmed it writes under read-only). stdin=DEVNULL is
+    mandatory (codex 0.138+ hangs on open stdin). Prompt is a positional arg.
+    Falls back to stdout if the capture file is empty — parse_loc tolerates
+    banner noise via outermost-brace extraction."""
+    prompt = codex_prompt(date_iso, papers)
+    prompt_file = ORCH / f"learning-arxiv-codex-prompt-{date_iso}.md"
+    atomic_write(prompt_file, prompt)
+    out_file = ORCH / f"learning-arxiv-codex-out-{date_iso}.txt"
+    try:
+        out_file.unlink()
+    except OSError:
+        pass
+    timeout = int(os.environ.get("KB_LEARNING_ARXIV_CODEX_TIMEOUT", str(CODEX_TIMEOUT_DEFAULT)))
+    cmd = [
+        codex_bin(), "exec",
+        "-C", str(HUB),
+        "--skip-git-repo-check",
+        "--sandbox", "read-only",
+        "--output-last-message", str(out_file),
+        prompt,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              check=False, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "", -1, "codex timeout"
+    except Exception as exc:
+        return "", -1, str(exc)[-300:]
+    msg = ""
+    try:
+        if out_file.is_file():
+            msg = out_file.read_text(encoding="utf-8")
+    except OSError:
+        msg = ""
+    if not msg.strip():
+        msg = proc.stdout or ""
+    return msg, proc.returncode, (proc.stderr or "")[-300:]
+
+
 def grok_prompt(date_iso: str, papers: list) -> str:
+    """X/Reddit social-context prompt ONLY. Translation/analysis moved to the
+    Codex call (spec: learning-arxiv-split-translation-social-2026-06-17), so
+    Grok no longer carries any *_loc field — only the social search it alone
+    can do. prior_context stays in the user's language."""
     blocks = []
     for p in papers:
         phrases = ", ".join(p.get("_groups", [])[:5]) or "AI research"
@@ -636,21 +745,14 @@ def grok_prompt(date_iso: str, papers: list) -> str:
             f"  abstract: {p['abstract'][:1200]}"
         )
     papers_block = "\n".join(blocks)
-    return f"""# Social context check + user-language summaries for today's arXiv learning digest ({date_iso})
+    return f"""# Social context check for today's arXiv learning digest ({date_iso})
 
 The user's language is: {UI_LANG_NAME}.
 
-For EACH paper below, do two things:
-
-1. Search X/Twitter and Reddit for discussion of the exact paper
-   (title/authors/arXiv id) AND broader prior discussion of its core idea.
-   Separate exact-paper discussion from prior idea discussion.
-2. Summarize the paper in {UI_LANG_NAME}, STRICTLY from the given
-   title+abstract — no outside claims, no invented numbers:
-   - `title_loc`: short title translation in {UI_LANG_NAME} (<= 120 chars)
-   - `studied_loc`: 1-2 sentences in {UI_LANG_NAME} — what exactly they studied (<= 280 chars)
-   - `found_loc`: 1-2 sentences in {UI_LANG_NAME} — what they found/claim, with numbers from the abstract when present (<= 280 chars)
-   - `why_loc`: one practical sentence in {UI_LANG_NAME} — why THIS paper matters to a user building a local AI orchestrator with agents, memory/KB and tool-use (derived from the abstract, <= 160 chars)
+For EACH paper below, search X/Twitter and Reddit for discussion of the exact
+paper (title/authors/arXiv id) AND broader prior discussion of its core idea.
+Separate exact-paper discussion from prior idea discussion. Do NOT translate or
+summarize the paper — that is handled elsewhere; only report social signal.
 
 Papers:
 {papers_block}
@@ -658,18 +760,65 @@ Papers:
 Return ONLY one JSON object, no prose before or after, exactly this shape:
 {{"papers": [{{"id": "<arxiv id>", "x_status": "found|weak|not_found|degraded",
 "reddit_status": "found|weak|not_found|degraded", "evidence": "<short links/snippets>",
-"prior_context": "<one sentence in {UI_LANG_NAME} about prior discussion of the idea>",
+"prior_context": "<one sentence in {UI_LANG_NAME} about prior discussion of the idea>"}}]}}
+
+Rules: use `not_found` only when the search WORKED and found nothing; if a
+search surface failed or was blocked, use `degraded` for that channel. Never
+invent a `not_found` for a search you could not run.
+"""
+
+
+def codex_prompt(date_iso: str, papers: list) -> str:
+    """Offline translation/analysis prompt for Codex. Bounded strictly to the
+    given title+abstract — no web, no social, no invented numbers. Emits the
+    same `{{"papers": [...]}}` envelope Grok used so parse_loc()'s outermost-
+    brace extraction works (a bare top-level array would break find/rfind)."""
+    blocks = []
+    for p in papers:
+        blocks.append(
+            f"- id: {p['id']}\n  title: {p['title']}\n"
+            f"  abstract: {p['abstract'][:1200]}"
+        )
+    papers_block = "\n".join(blocks)
+    return f"""# Translate + analyze today's arXiv papers ({date_iso})
+
+The user's language is: {UI_LANG_NAME}. For EACH paper below, summarize it in
+{UI_LANG_NAME}, STRICTLY from the given title+abstract — no outside claims, no
+invented numbers, no web search:
+- `title_loc`: short title translation in {UI_LANG_NAME} (<= 120 chars)
+- `abstract_loc`: 2-4 sentences in {UI_LANG_NAME} translating/compressing the abstract only, with every acronym and technical term expanded inline on first mention per paper (<= 800 chars)
+- `studied_loc`: 1-2 sentences in {UI_LANG_NAME} — what exactly they studied (<= 280 chars)
+- `method_loc`: 1-2 sentences in {UI_LANG_NAME} — how they studied it and on what exact data/benchmark/experiment/model/setup, if stated in the abstract; if not stated, say that the abstract does not specify this (<= 280 chars)
+- `found_loc`: 1-2 sentences in {UI_LANG_NAME} — what they found/claim, with numbers from the abstract when present (<= 280 chars)
+- `why_loc`: one practical sentence in {UI_LANG_NAME} — why THIS paper matters to a user building a local AI orchestrator with agents, memory/KB and tool-use (derived from the abstract, <= 160 chars)
+
+Papers:
+{papers_block}
+
+Return ONLY one JSON object, no prose before or after, exactly this shape:
+{{"papers": [{{"id": "<arxiv id>",
 "title_loc": "<title in {UI_LANG_NAME}>",
+"abstract_loc": "<translated/compressed abstract in {UI_LANG_NAME}, terms expanded inline>",
 "studied_loc": "<sentences in {UI_LANG_NAME}>",
+"method_loc": "<how it was researched, and on what data/benchmark/experiment/setup; or 'not specified in the abstract' in {UI_LANG_NAME}>",
 "found_loc": "<sentences in {UI_LANG_NAME}>",
 "why_loc": "<practical sentence in {UI_LANG_NAME}>"}}]}}
 
-Rules: use `not_found` only when the search WORKED and found nothing; if a
-search surface failed or was blocked, use `degraded` for that channel.
-`studied_loc`/`found_loc` are translations/compressions of the provided
-abstract only — never add facts the abstract does not state.
-Write them genuinely in {UI_LANG_NAME}: translate the phrasing, do not copy
-English sentences from the abstract; keep Latin script only for proper
+Rules: `studied_loc`/`method_loc`/`found_loc`/`abstract_loc` are
+translations/compressions of the provided abstract only — never add facts the
+abstract does not state. For `method_loc`, prefer concrete nouns from the
+abstract such as dataset, benchmark, experiment, user study, simulation, proof,
+corpus, model family, evaluation setup, or deployment setup. If the abstract
+does not say how/on what the work was evaluated, explicitly say that this is
+not specified in the abstract.
+`abstract_loc` is the user's main quick-understanding field. Expand acronyms
+and technical terms inline on first mention for each paper in the form
+`ACRONYM (English expansion, rendering in {UI_LANG_NAME})` — e.g.
+`LLM (large language model, …)`, `RAG (retrieval-augmented generation, …)`,
+`MCP (Model Context Protocol, …)` — filling each `…` with the
+{UI_LANG_NAME} rendering (when the target IS English, the two parts coincide).
+Write the prose genuinely in {UI_LANG_NAME}: translate the phrasing, do not
+copy English sentences from the abstract; keep Latin script only for proper
 nouns, model/dataset/benchmark names and established terms (MCP, RAG).
 """
 
@@ -678,7 +827,7 @@ def run_grok(date_iso: str, papers: list) -> tuple:
     """Returns (stdout, rc, stderr_tail). Never raises."""
     prompt_file = ORCH / f"learning-arxiv-grok-prompt-{date_iso}.md"
     atomic_write(prompt_file, grok_prompt(date_iso, papers))
-    timeout = int(os.environ.get("KB_LEARNING_ARXIV_GROK_TIMEOUT", "600"))
+    timeout = int(os.environ.get("KB_LEARNING_ARXIV_GROK_TIMEOUT", str(GROK_TIMEOUT_DEFAULT)))
     cmd = [
         grok_bin(),
         "--cwd", str(HUB),
@@ -702,9 +851,13 @@ def run_grok(date_iso: str, papers: list) -> tuple:
         return "", -1, str(exc)[-300:]
 
 
-def parse_grok(stdout: str) -> dict:
-    """Best-effort: first balanced JSON object → {paper_id: record}."""
-    text = stdout.strip()
+def parse_papers_json(text: str) -> dict:
+    """Best-effort: outermost JSON object → {paper_id: record}. Used for both
+    the Codex translation message (clean -o capture) and Grok social stdout.
+    A bare top-level array would NOT parse here — both prompts pin the
+    {"papers": [...]} envelope on purpose (a malformed/array envelope degrades
+    ALL papers wholesale, not per-paper)."""
+    text = (text or "").strip()
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         return {}
@@ -719,13 +872,78 @@ def parse_grok(stdout: str) -> dict:
     return out
 
 
+def accept_loc(text: str) -> bool:
+    """For ru the Cyrillic check reliably catches an English slip; for all
+    other targets accept non-empty (documented degraded validation — spec:
+    user-language-setting-2026-06-12)."""
+    if not text:
+        return False
+    if UI_LANG == "ru":
+        return bool(CYRILLIC_RE.search(text))
+    return True
+
+
+def translate_check(date_iso: str, papers: list) -> tuple:
+    """Codex offline translation/analysis. Mutates papers in place with the
+    *_loc fields + per-paper abstract_source (codex|unavailable) and
+    summary_source (codex|fallback_en). Returns (status, codex_rc,
+    stderr_tail, raw_message). INDEPENDENT of the Grok social call: a Codex
+    failure degrades only translation, never the social signal. status is
+    `degraded` (whole call failed), `partial` (some papers fell back to the
+    deterministic English extract), or `ok`."""
+    if not papers:
+        return "ok", None, "", ""
+    msg, rc, stderr_tail = run_codex(date_iso, papers)
+    by_id = parse_papers_json(msg) if rc == 0 and msg.strip() else {}
+    whole_call_failed = rc != 0 or not msg.strip() or not by_id
+    any_fallback = False
+    for p in papers:
+        rec = by_id.get(p["id"], {})
+        # Codex's bounded translation of title+abstract. Missing/rejected →
+        # deterministic English-extract fallback, explicitly marked, so the
+        # digest is honest about its source.
+        abstract_loc = truncate_sentence(str(rec.get("abstract_loc", "") or "").strip(), 800)
+        if accept_loc(abstract_loc):
+            p["abstract_loc"] = abstract_loc
+            p["abstract_source"] = "codex"
+        else:
+            p["abstract_source"] = "unavailable"
+            any_fallback = True
+        studied_loc = truncate_sentence(str(rec.get("studied_loc", "") or "").strip(), 300)
+        method_loc = truncate_sentence(str(rec.get("method_loc", "") or "").strip(), 300)
+        found_loc = truncate_sentence(str(rec.get("found_loc", "") or "").strip(), 300)
+        if accept_loc(studied_loc) and accept_loc(method_loc) and accept_loc(found_loc):
+            p["studied_loc"] = studied_loc
+            p["method_loc"] = method_loc
+            p["found_loc"] = found_loc
+            p["summary_source"] = "codex"
+        else:
+            p["summary_source"] = "fallback_en"
+            any_fallback = True
+        title_loc = truncate_sentence(str(rec.get("title_loc", "") or "").strip(), 140)
+        if accept_loc(title_loc):
+            p["title_loc"] = title_loc
+        why_loc = truncate_sentence(str(rec.get("why_loc", "") or "").strip(), 180)
+        if accept_loc(why_loc):
+            p["why_loc"] = why_loc
+    if whole_call_failed:
+        status = "degraded"
+    elif any_fallback:
+        status = "partial"
+    else:
+        status = "ok"
+    return status, rc, stderr_tail, msg
+
+
 def social_check(date_iso: str, papers: list) -> tuple:
-    """Mutates papers in place with per-paper social dicts. Returns
-    (social_check_status, grok_rc, stderr_tail, raw_stdout)."""
+    """X/Reddit social signal via Grok ONLY (translation moved to Codex).
+    Mutates papers in place with per-paper p['social']. Returns
+    (social_check_status, grok_rc, stderr_tail, raw_stdout). INDEPENDENT of
+    translation: a Grok failure degrades only the social lines."""
     if not papers:
         return "ok", None, "", ""
     stdout, rc, stderr_tail = run_grok(date_iso, papers)
-    by_id = parse_grok(stdout) if rc == 0 and stdout.strip() else {}
+    by_id = parse_papers_json(stdout) if rc == 0 and stdout.strip() else {}
     whole_call_failed = rc != 0 or not stdout.strip() or not by_id
     any_degraded = False
     all_parsed = True
@@ -747,34 +965,6 @@ def social_check(date_iso: str, papers: list) -> tuple:
         social["evidence"] = str(rec.get("evidence", "") or "")[:500]
         social["prior_context"] = truncate_sentence(str(rec.get("prior_context", "") or ""), 200)
         p["social"] = social
-
-        def _accept(text: str) -> bool:
-            # For ru the Cyrillic check reliably catches an English slip;
-            # for all other targets we accept non-empty (documented degraded
-            # validation — spec: user-language-setting-2026-06-12).
-            if not text:
-                return False
-            if UI_LANG == "ru":
-                return bool(CYRILLIC_RE.search(text))
-            return True
-
-        # Localized summary is Grok's bounded translation of title+abstract.
-        # Missing/rejected → deterministic English-extract fallback,
-        # explicitly marked, so the digest is honest about its source.
-        studied_loc = truncate_sentence(str(rec.get("studied_loc", "") or "").strip(), 300)
-        found_loc = truncate_sentence(str(rec.get("found_loc", "") or "").strip(), 300)
-        if _accept(studied_loc) and _accept(found_loc):
-            p["studied_loc"] = studied_loc
-            p["found_loc"] = found_loc
-            p["summary_source"] = "grok"
-        else:
-            p["summary_source"] = "fallback_en"
-        title_loc = truncate_sentence(str(rec.get("title_loc", "") or "").strip(), 140)
-        if _accept(title_loc):
-            p["title_loc"] = title_loc
-        why_loc = truncate_sentence(str(rec.get("why_loc", "") or "").strip(), 180)
-        if _accept(why_loc):
-            p["why_loc"] = why_loc
     if whole_call_failed:
         status = "degraded"
     elif any_degraded or not all_parsed:
@@ -887,6 +1077,35 @@ def render_social_source(date_iso: str, papers: list, status: str, rc, stderr_ta
     return "\n".join(lines) + "\n"
 
 
+def render_translation_source(date_iso: str, papers: list, status: str, rc, stderr_tail: str, raw: str) -> str:
+    lines = [
+        "---",
+        "type: source",
+        "kind: arxiv-learning-translation-codex",
+        f"date: {date_iso}",
+        f"translate_check: {status}",
+        f"codex_rc: {rc if rc is not None else 'null'}",
+        "generator: kb-learning-arxiv v1",
+        "---",
+        "",
+        f"# Codex translation/analysis — {date_iso}",
+        "",
+    ]
+    for p in papers:
+        lines.append(
+            f"## {p['id']} {p['title']}\n"
+            f"- abstract_source: {p.get('abstract_source', 'unavailable')}\n"
+            f"- summary_source: {p.get('summary_source', 'fallback_en')}\n"
+            f"- title_loc: {p.get('title_loc', '') or '—'}\n"
+            f"- abstract_loc: {p.get('abstract_loc', '') or '—'}\n"
+            f"- method_loc: {p.get('method_loc', '') or '—'}\n"
+        )
+    if stderr_tail:
+        lines.append(f"## Codex stderr tail\n\n```\n{stderr_tail}\n```\n")
+    lines.append("## Raw message\n\n```\n" + (raw or "")[:4000] + "\n```")
+    return "\n".join(lines) + "\n"
+
+
 def render_report(date_iso: str, papers: list, runner_ups: list, social_status: str,
                   relevant: int, fetched: int = 0) -> str:
     lines = [
@@ -911,6 +1130,8 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
             "",
             f"**{L('studied')}:** {studied_display(p, 500)}",
             "",
+            f"**{L('method')}:** {method_display(p, 500)}",
+            "",
             f"**{L('found')}:** {found_display(p, 500)}",
             "",
             f"**X:** {render_status(s.get('x_status', 'degraded'))} · "
@@ -920,7 +1141,7 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
             "",
             f"**{L('why')}:** {why_text(p)}",
             "",
-            f"**{L('report_abstract')}:** {p['abstract']}",
+            f"**{L('report_abstract')}:** {abstract_display(p, 800)}",
             "",
         ])
     if runner_ups:
@@ -929,7 +1150,7 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
         for r in runner_ups:
             lines.append(f"- `{r['id']}` {r['title']} — {r['reason_rejected']} (final={r['scores']['final']})")
         lines.append("")
-    lines.append(f"{L('report_sources')}: [[arxiv-learning-snapshot-{date_iso}]], [[arxiv-learning-social-grok-{date_iso}]]")
+    lines.append(f"{L('report_sources')}: [[arxiv-learning-snapshot-{date_iso}]], [[arxiv-learning-translation-codex-{date_iso}]], [[arxiv-learning-social-grok-{date_iso}]]")
     return "\n".join(lines) + "\n"
 
 
@@ -955,6 +1176,7 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
 
     def paper_block(p: dict, idx: int, text_limit: int) -> str:
         s = p.get("social", {})
+        line_limit = max(70, min(220, text_limit))
         social_line = (
             f"X: {render_status(s.get('x_status', 'degraded'))} / "
             f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
@@ -966,8 +1188,10 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
             f"{idx}. {title_display(p)} — {render_authors(p['authors'])}\n"
             f"   arXiv: {p['link']}\n"
             f"   {L('reason')}: {reason_text(p)}\n"
-            f"   {L('studied')}: {studied_display(p, text_limit)}\n"
-            f"   {L('found')}: {found_display(p, text_limit)}\n"
+            f"   {L('abstract')}: {abstract_display(p, text_limit)}\n"
+            f"   {L('studied')}: {studied_display(p, line_limit)}\n"
+            f"   {L('method')}: {method_display(p, line_limit)}\n"
+            f"   {L('found')}: {found_display(p, line_limit)}\n"
             f"   {social_line}\n"
             f"   {L('why')}: {why_text(p)}"
         )
@@ -1096,6 +1320,11 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         manifest = {"attempts": int(manifest.get("attempts") or 0)}
 
     cached_language = manifest.get("language") or "ru"  # pre-profile manifests were Russian
+    # Capture cache-eligibility from the PRE-update manifest: the manifest.update
+    # below stamps manifest_version=MANIFEST_VERSION, so reading it after would
+    # always look current and defeat the migration gate (spec blocker fix).
+    cached_version = int(manifest.get("manifest_version") or 1)
+    cached_has_translate = bool(manifest.get("translate_check"))
     if cached_language != UI_LANG and manifest.get("selected_papers") is not None:
         # Language switched: the cached localized state belongs to the old
         # target. Drop it NOW, before the manifest is stamped with the new
@@ -1105,7 +1334,8 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         # blocker 2026-06-12).
         log(f"{date_iso}: language switch {cached_language} -> {UI_LANG}; dropping cached selection")
         for stale_key in ("selected_papers", "runner_ups", "social_check",
-                          "grok_rc", "grok_stderr_tail", "digest"):
+                          "grok_rc", "grok_stderr_tail", "translate_check",
+                          "codex_rc", "codex_stderr_tail", "digest"):
             manifest.pop(stale_key, None)
     manifest.update({
         "date": date_iso,
@@ -1114,6 +1344,7 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         "last_attempt_at": now_iso(),
         "language": UI_LANG,
         "learning_topic": cfg.get("learning_topic", "ai_agents"),
+        "manifest_version": MANIFEST_VERSION,
     })
     manifest.setdefault("incident_suggested", False)
     manifest.setdefault("arxiv_fetched", 0)
@@ -1122,22 +1353,29 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
 
     max_papers = int(cfg.get("max_papers") or MAX_PAPERS_DEFAULT)
 
-    # Stage cache (spec): selection+social already done, only delivery failed
-    # → re-render and re-deliver from the manifest; never re-fetch arXiv or
-    # re-invoke Grok.
+    # Stage cache (spec): selection+translation+social already done, only
+    # delivery failed → re-render and re-deliver from the manifest; never
+    # re-fetch arXiv or re-invoke Codex/Grok.
     # `selected_papers is not None` (not truthiness): a completed zero-paper
     # day must also recover from the cache instead of re-fetching arXiv.
     # Language-gated: cached fields were produced for the cached language;
     # after a profile switch the cache is bypassed so no stale-language
     # content leaks (spec: user-language-setting-2026-06-12).
+    # Version-gated: a v1 manifest written by the old combined-Grok runner has
+    # no Codex translation; a v2 manifest has Codex translation but no
+    # method_loc. Neither may satisfy the stage cache for the current output
+    # contract. Require translate_check present AND
+    # manifest_version >= MANIFEST_VERSION (both read from the PRE-update snapshot).
     cached = (
         not force
         and manifest.get("selected_papers") is not None
         and manifest.get("social_check")
+        and cached_has_translate
+        and cached_version >= MANIFEST_VERSION
         and cached_language == UI_LANG
     )
     if cached:
-        log(f"{date_iso}: reusing cached selection+social from manifest (stage cache)")
+        log(f"{date_iso}: reusing cached selection+translation+social from manifest (stage cache)")
         papers = manifest["selected_papers"]
         digest = render_digest(
             date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)),
@@ -1178,19 +1416,34 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     atomic_write(snapshot_path(date_iso),
                  render_snapshot(date_iso, selected, runner_ups, len(candidates), relevant))
 
+    # Codex translation/analysis (offline) — independent of the Grok social
+    # call below; a Codex failure degrades only translation (fallback_en /
+    # unavailable), never the social signal.
+    t_status, codex_rc, codex_stderr, codex_raw = translate_check(date_iso, selected)
+    manifest["translate_check"] = t_status
+    manifest["codex_rc"] = codex_rc
+    manifest["codex_stderr_tail"] = codex_stderr
+
+    # Grok X/Reddit social — independent of the translation above; a Grok
+    # failure degrades only the social lines (this is the 2026-06-17 fix).
     status, grok_rc, stderr_tail, raw = social_check(date_iso, selected)
     manifest["social_check"] = status
     manifest["grok_rc"] = grok_rc
     manifest["grok_stderr_tail"] = stderr_tail
+
     for m_p, p in zip(manifest["selected_papers"], selected):
         m_p["social"] = p.get("social", {})
-        for k in ("title_loc", "studied_loc", "found_loc", "why_loc", "summary_source"):
+        for k in ("title_loc", "abstract_loc", "abstract_source",
+                  "studied_loc", "method_loc", "found_loc", "why_loc",
+                  "summary_source"):
             if k in p:
                 m_p[k] = p[k]
         # Rebuild now that the localized translation (or its absence) is known.
         p["summary_loc"] = build_summary(p)
         m_p["summary_loc"] = p["summary_loc"]
     save_manifest(date_iso, manifest)
+    atomic_write(translation_path(date_iso),
+                 render_translation_source(date_iso, selected, t_status, codex_rc, codex_stderr, codex_raw))
     atomic_write(social_path(date_iso),
                  render_social_source(date_iso, selected, status, grok_rc, stderr_tail, raw))
 

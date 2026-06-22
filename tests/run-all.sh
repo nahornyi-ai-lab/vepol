@@ -21,6 +21,12 @@ trap cleanup EXIT
 pass() { printf '\033[1;32m●\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m●\033[0m %s\n' "$*" >&2; }
 
+echo "=== Startup context hotfix bundle ==="
+KB_SESSION_START="$REPO_ROOT/bin/kb-session-start" \
+KB_STARTUP_TEST_HUB="$REPO_ROOT" \
+python3 startup-context/hotfix.py > /dev/null && pass "startup-context/hotfix.py" || { fail "startup-context"; exit 1; }
+
+echo
 echo "=== kb-backlog smoke ==="
 bash kb-backlog/smoke.sh > /dev/null && pass "smoke.sh (7 ops)" || { fail "smoke.sh"; exit 1; }
 

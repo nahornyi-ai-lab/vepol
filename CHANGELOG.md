@@ -16,6 +16,40 @@ upgrading.
 
 No unreleased changes yet.
 
+## [0.3.1] — 2026-06-22
+
+### Added
+- **Prompt-first agent self-install** — `install.sh` can now guide Codex,
+  Claude Code, and other agents through probe, dry-run, verify, apply,
+  uninstall, and upgrade flows without asking them to guess install state.
+- **Money Radar (`kb-money-radar`)** — an opt-in scheduled opportunity radar
+  is shipped disabled by default in `processes.yaml`, with safety guards,
+  source/link filtering, idempotency, and a dedicated acceptance suite.
+- **Startup Context Manifest** — `kb-session-start` now injects the agent card,
+  project state, recent log, active work, open escalations, and compact
+  incident prevention rules without loading full indexes by default. It also
+  supports `--print --cwd` for hook-less agents.
+
+### Changed
+- **Learning digest LLM split** — `kb-learning-arxiv` now uses Codex for
+  offline translation/method summaries and Grok only for X/Twitter + Reddit
+  social context. The manifest contract moves to v3 and stale v2 caches no
+  longer satisfy delivery.
+- **Evening retro board source** — `kb-retro` now reads canonical markdown
+  `kb-board` files instead of the old Plane board snapshot path.
+- **Owner-approved spec gate docs** — the public methodology now documents the
+  owner approval queue/hash gate and the post-approval build-plan step.
+- **Agent card/state templates** — generated project templates are more
+  explicit about startup-loaded cards, boundaries, state hygiene, and durable
+  KB write-back.
+
+### Fixed
+- Installer verification now catches missing or replaced `orchestrator-seed`
+  pointers and `install.sh --apply` self-heals a non-symlink seed pointer
+  instead of leaving verify/apply behavior inconsistent.
+- Startup context injection no longer starves critical sections when `index.md`,
+  incident history, backlog bodies, or card/state files are large.
+
 ## [0.3.0] — 2026-06-20
 
 ### Added
@@ -280,10 +314,12 @@ non-competing forks. Restricted for competing products or services
 made available to others (hosted SaaS substituting for Vepol, branded
 resale). Each release auto-converts to MIT on its second anniversary:
 v0.1.0 converts on **2028-05-02**, v0.2.x converts on **2028-05-29**,
-and v0.3.0 converts on **2028-06-20**. See `LICENSE` and
+v0.3.0 converts on **2028-06-20**, and v0.3.1 converts on
+**2028-06-22**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.1.0...v0.2.0

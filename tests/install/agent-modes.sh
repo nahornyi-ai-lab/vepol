@@ -10,6 +10,29 @@ INSTALL="$REPO/install.sh"
 PASS=0; FAIL=0
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 export HOME="$WORK/home"; mkdir -p "$HOME"
+PREREQ="$WORK/prereq-bin"; mkdir -p "$PREREQ"
+cat > "$PREREQ/node" <<'EOF'
+#!/usr/bin/env bash
+echo "v20.0.0"
+EOF
+cat > "$PREREQ/bun" <<'EOF'
+#!/usr/bin/env bash
+echo "1.1.0"
+EOF
+chmod +x "$PREREQ/node" "$PREREQ/bun"
+for t in git claude rg; do
+  src="$(command -v "$t" 2>/dev/null || true)"
+  if [[ -n "$src" ]]; then
+    ln -sf "$src" "$PREREQ/$t"
+  else
+    cat > "$PREREQ/$t" <<EOF
+#!/usr/bin/env bash
+echo "$t test shim"
+EOF
+    chmod +x "$PREREQ/$t"
+  fi
+done
+export PATH="$PREREQ:$PATH"
 
 p() { printf '  ✓ %s\n' "$1"; PASS=$((PASS+1)); }
 f() { printf '  ✘ %s\n' "$1"; FAIL=$((FAIL+1)); }

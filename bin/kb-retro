@@ -20,25 +20,27 @@ INBOX="$HUB/personal/daily-inbox/$TODAY.md"
 ADDRESS="${USER_NAME:+ $USER_NAME}"
 LOCATION="${USER_CITY:+, $USER_CITY}"
 
-# Snapshot open backlog from Plane (canonical with 2026-05-12, see kb-board.md).
-# Plane is the source of truth; .md files are stale snapshots until Phase 6 cleanup.
-BACKLOG_SNAPSHOT=$("$HUB/bin/kb-backlog-board" list --all --open 2>/dev/null || echo "(kb-backlog-board failed)")
+# Snapshot open backlog from canonical markdown kb-board files.
+BACKLOG_SNAPSHOT=$(
+  {
+    for link in "$HUB/projects"/*; do
+      [ -L "$link" ] || continue
+      slug="${link##*/}"
+      board="$link/backlog.md"
+      [ -f "$board" ] || continue
+      rows=$("$HUB/bin/kb-board" list "$board" --all 2>/dev/null | grep -E '^(Backlog|Ready|In Progress|Blocked|Review):' || true)
+      [ -n "$rows" ] || continue
+      count=$(print -- "$rows" | wc -l | tr -d ' ')
+      print -- "## $slug — $count open/non-terminal"
+      print -- "$rows" | head -5
+    done
+  } 2>/dev/null || true
+)
 
-# Today's closed items via Plane + session events from hub/project log.md.
-# Plane has completed_at timestamp; we filter via Python helper.
+# Today's closed items via session events from hub/project log.md.
 DONE_TODAY=$(
   {
-    python3 -c "
-import sys, json, datetime as dt
-sys.path.insert(0, '$HUB/bin')
-from _kb_board import integration
-today = '$TODAY'
-rows = integration.read_closed_on_date(today)
-for r in rows:
-    print(f\"[{r['slug']}] {r['name']} — closed {r['completed_at'][:10]} — plan_item_id: {r['plan_item_id']}\")
-" 2>/dev/null || true
-    echo "---"
-    # log.md events are still grep-based — log.md remains active (different concern from backlog.md)
+    # log.md events remain the durable cross-agent activity trail.
     grep -H "^## \[$TODAY" "$HUB/log.md" 2>/dev/null || true
     for link in "$HUB/projects"/*; do
       [ -L "$link" ] || continue

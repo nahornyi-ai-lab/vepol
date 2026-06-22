@@ -101,6 +101,16 @@ DEFAULT_PROCESSES_YAML = """\
   when: on-demand
   run: kb-evolution check-policy
   outputs: [file]
+
+# Daily money-opportunity radar. Runs the OS-safe agent core (Codex --sandbox
+# read-only + Claude plan/allowlist) to surface monetizable demand gaps, validated
+# + ranked + verify-first. Opt-in: personalize personal/money-radar.yaml first.
+# The Grok/Antigravity social lane is deferred (needs OS-sandbox hardening).
+- id: money-radar
+  enabled: false
+  when: after:learning
+  run: kb-money-radar --text-only
+  outputs: [telegram, file]
 """
 
 

@@ -113,10 +113,10 @@ second owner approval. If planning changes scope, acceptance, risk, public
 behavior, security/privacy, data migration, or the E2E path, stop and return to
 spec review and owner approval.
 
-**5. Tests -> implementation.** RED tests including E2E, or a documented process
-smoke for methodology/docs work, come first. Implement to green, then revisions.
-Small verifiable steps; empty/failed output is a real failure, not "no result."
-See [spec-driven-workflow.md](spec-driven-workflow.md).
+**5. Tests -> implementation.** RED tests including E2E coverage, or a
+documented process smoke for methodology/docs work, come first. Implement to
+green, then revisions. Small verifiable steps; empty/failed output is a real
+failure, not "no result." See [spec-driven-workflow.md](spec-driven-workflow.md).
 
 **5.5. Implementation review.** Specs don't ship — diffs do. For non-trivial
 work whose Phase 5 produced code/tests/configs: after green and before
