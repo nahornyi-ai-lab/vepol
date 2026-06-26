@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Morning briefing v2 — spec: ~/knowledge/concepts/morning-briefing-design.md (Cross-review 2026-04-22, approved).
+# Morning briefing v2 control surface — spec:
+# __HOME__/example-project/knowledge/decisions/daily-brief-v2-control-surface-2026-06-25.md
 #
 # V1 implementation: single oracle call with mandatory internal two-pass.
 # Agent outputs Pass 1 table + delimiter `---BRIEF---` + Pass 2 text.
@@ -28,6 +29,10 @@ NOW=$(date +%H:%M)
 LOG="$HUB/logs/brief.log"
 INBOX="$HUB/personal/daily-inbox/$TODAY.md"
 IDEA_DIGEST=$("$HUB/bin/kb-idea" brief --limit 3 2>/dev/null || true)
+# Calendar agenda (approved follow-up reminders + minimized meetings). Reader
+# fails closed to an unavailable envelope so a calendar problem never breaks the
+# brief (spec: Daily Brief Integration).
+AGENDA_JSON=$("$HUB/bin/kb-agenda" --from "$TODAY" --days 8 --json 2>/dev/null || print -- '{"available":false,"overdue":[],"today":[],"upcoming":[],"errors":["agenda_reader_failed"]}')
 
 ADDRESS="${USER_NAME:+ $USER_NAME}"
 LOCATION="${USER_CITY:+, $USER_CITY}"
@@ -50,6 +55,14 @@ case "$UI_LANG" in
     L_ERR_RC75="⚠️ Оба оркестратора не ответили (rc=75, exhausted). Проверь"
     L_ERR_OTHER="⚠️ Оркестратор упал"
     L_ERR_CHECK="Проверь"
+    S_TODAY="☀️ Сегодня"
+    S_CHANGED="🆕 Изменилось со вчера"
+    S_ACTIONS="🔥 3 действия"
+    S_DECISIONS="❓ Решения от тебя"
+    S_FRESHNESS="⚠️ Проверить свежесть"
+    S_DEADLINES="📅 Жёсткие дедлайны недели"
+    S_DAY="🧘 Условие дня"
+    COMPLETION_LABEL="Готово:"
     ;;
   *)
     L_HEADER="☀️ Briefing"
@@ -57,6 +70,14 @@ case "$UI_LANG" in
     L_ERR_RC75="⚠️ Both orchestrators failed to answer (rc=75, exhausted). Check"
     L_ERR_OTHER="⚠️ Orchestrator failed"
     L_ERR_CHECK="Check"
+    S_TODAY="☀️ Today"
+    S_CHANGED="🆕 Changed since yesterday"
+    S_ACTIONS="🔥 3 actions"
+    S_DECISIONS="❓ Decisions from you"
+    S_FRESHNESS="⚠️ Check freshness"
+    S_DEADLINES="📅 Hard deadlines this week"
+    S_DAY="🧘 Day condition"
+    COMPLETION_LABEL="Done:"
     ;;
 esac
 
@@ -71,103 +92,98 @@ send_tg() {
   fi
 }
 
-PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодня $TODAY, сейчас $NOW${LOCATION}.
+PREFLIGHT_JSON=$("$HUB/bin/kb-brief-preflight" 2>/dev/null || print -- '{"generated_at":null,"projects":[],"warnings":[],"changed_since_yesterday":[],"do_not_surface":[]}')
 
-Твоя задача — утренний брифинг по спеке \`$HUB/concepts/morning-briefing-design.md\` (approved Codex 2026-04-22). Ниже — исполняемое resume этой спеки.
+PROMPT=$(cat <<EOF
+Ты — личный AI-оркестратор${ADDRESS}. Сегодня $TODAY, сейчас $NOW${LOCATION}.
 
-# Обязательный вход (прочитай ВСЁ перед Pass 1)
-1. \`$HUB/registry.md\` — фильтр по status ∈ {live, seeded}, это active-проекты (должно быть ~14).
-2. Для каждого active-проекта: \`<project_path>/knowledge/state.md\` — первые ~30 строк (одной строкой + ключевые метрики).
-3. Для каждого active-проекта: \`<project_path>/knowledge/backlog.md\` — canonical markdown task board (\`kb-board\`, single source since 2026-05-29). Читай открытые/non-terminal блоки статусов \`Backlog\`, \`Ready\`, \`In Progress\`, \`Blocked\`, \`Review\`; \`Done\`/\`Cancelled\` не используй для планирования. Извлеки дедлайны: явные \`due: YYYY-MM-DD\` + текстовые (\`до DD.MM\`, \`через N дней\`, weekdays).
-4. \`$HUB/personal/goals.md\`, \`$HUB/personal/roadmap.md\`, \`$HUB/personal/context.md\`.
-5. Для каждого active-проекта: секция \`## Open\` в \`<project_path>/knowledge/escalations.md\` (если файл есть).
-6. Последние 3 \`$HUB/daily/*.md\` (если не пустой) + последние 80 строк \`$HUB/log.md\`.
-7. \`$INBOX\` — если файл существует.
-8. \`$HUB/personal/habits.md\` — только если не пустой (0-скип, иначе включить).
-9. \`$HUB/.orchestrator/arxiv-brief-$TODAY.md\` — если файл существует и его mtime ≤6h, прочитай его содержимое (готовый блок 🧪 arXiv от kb-arxiv-pull). Если файл отсутствует / старше 6h / пуст — секцию 🧪 arXiv в Pass 2 НЕ выпускай.
-10. Vepol Idea Intake digest ниже — если непустой, используй как источник 1–3 idea-derived proposals. Это уже отфильтрованные \`ready/promoted\` карточки из \`personal/ideas/\`; не выдумывай дополнительные идеи:
-\`\`\`text
+Твоя задача — утренний Telegram-брифинг v2 control surface по approved spec daily-brief-v2-control-surface-2026-06-25.
+Язык пользователя: ${UI_LANG_NAME}. Весь user-facing текст пиши на этом языке.
+
+# Mandatory deterministic preflight JSON
+This block is higher priority than raw backlog text. Treat warnings and do_not_surface as guardrails.
+
+$PREFLIGHT_JSON
+
+# Source precedence
+When facts disagree, use this order:
+1. Fresh owner/agent log entries from the last 48 hours.
+2. Project state.md as the current truth dashboard.
+3. personal/daily-inbox/$TODAY.md and fresh handoff/status entries.
+4. backlog.md as a queue, not factual truth.
+5. Older daily, reports, previous briefs, and old source pages only as context with freshness caveats.
+
+Rules from preflight:
+- Treat preflight warnings as higher priority than raw backlog text.
+- Never brief a do_not_surface item as a current action.
+- If backlog says an action is open but fresh log/state/preflight says it is completed or superseded, do not present the stale action as current.
+- If freshness warnings are present, include a short actionable ${S_FRESHNESS} section.
+
+# Inputs to read before Pass 1
+1. $HUB/registry.md — active projects have status live or seeded.
+2. For each active project: project knowledge/state.md, knowledge/log.md, knowledge/backlog.md, and knowledge/escalations.md if present.
+3. $HUB/log.md, latest $HUB/daily/*.md, $INBOX if present.
+4. $HUB/personal/goals.md, roadmap.md, context.md, habits.md if present.
+5. $HUB/.orchestrator/arxiv-brief-$TODAY.md only if fresh and non-empty.
+6. Personal Idea OS digest below. Use only these ready/promoted idea proposals; do not invent more ideas:
+
 $IDEA_DIGEST
-\`\`\`
 
-# Pass 1 — internal scan (ОБЯЗАТЕЛЬНО, идёт первым в твоём ответе)
+7. Calendar agenda (deterministic, already minimized to date/time/title/source/status — no attendee emails, links, or full descriptions). overdue/today follow-up reminders are owner-approved commitments; surface due-today or overdue ones in ${S_ACTIONS} and genuine hard calendar deadlines within 7 days in ${S_DEADLINES}. If "available" is false, do not invent a calendar; add a short ${S_FRESHNESS} note that the calendar could not be read.
 
-Построй markdown-таблицу:
-\`\`\`
-| project | status | one-line state | earliest_deadline | open_blockers | leverage_to_goals | escalation_asks |
-\`\`\`
+$AGENDA_JSON
 
-**Нормализация дедлайнов** — все к \`YYYY-MM-DD[THH:MM]\` в Europe/Madrid:
-- ISO \`due: YYYY-MM-DD[THH:MM]\` — как есть.
-- \`до DD.MM\` / \`до DD.MM.YYYY\` — год текущий; если дата < сегодня, +1 год.
-- \`через N дней\` / \`через N–M дней\` — от \`opened YYYY-MM-DD\` строки; для диапазона брать **раннюю** границу.
-- \`завтра\` / \`сегодня\` / weekday (\`понедельник\`…) — от сегодня; если день прошёл, следующий такой.
-- Время не указано → подразумевать \`09:00 Europe/Madrid\`.
+# Pass 1 — internal scan, must appear before delimiter
+Build a compact markdown table:
+| project | fresh_changes | stale_or_conflict_warnings | hard_deadlines | candidate_action | owner_decision_needed |
 
-**Бакетизация по hard deadline:**
-- TODAY — дедлайн ≤24ч от сейчас.
-- THIS_WEEK — дедлайн ≤7 дней, не TODAY.
-- LATER — всё остальное.
+The scan must explicitly account for preflight.changed_since_yesterday, preflight.warnings, and preflight.do_not_surface.
 
-**Внутри бакета — аддитивный score:** \`score = 3·urgency + 2·leverage − 1·blocker_cost\`, все ∈ [0,1].
-
-**Правила surface:**
-- TODAY — весь бакет целиком, даже при низком leverage.
-- THIS_WEEK — все с hard-deadline обязательно.
-- LATER — только top-3 по score → идут в 🎯 Strategic focus.
-
-**Idle-список:** active-проекты вне TODAY/THIS_WEEK, у которых нет записи в \`log.md\` за последние 7 дней — в 🟡 Idle.
-
-После таблицы — строка-разделитель:
-\`\`\`
+After the table, output this delimiter exactly on its own line:
 ---BRIEF---
-\`\`\`
 
-# Pass 2 — user-facing brief (после разделителя, ≤${BRIEF_CHAR_LIMIT} символов Unicode)
+# Pass 2 — user-facing brief after delimiter
+Output must be <= ${BRIEF_CHAR_LIMIT} Unicode chars when possible and must use exactly this section order:
 
-Пиши строго на основе Pass 1, без повторного обращения к файлам.
+${S_TODAY} $TODAY $NOW
 
-**Главное правило: это сообщение читает живой человек утром в Telegram. Язык пользователя — ${UI_LANG_NAME}: весь брифинг (заголовки секций, формулировки, названия проектов) пиши на этом языке. Должен быть связный, читаемый текст. Никаких слагов проектов в сыром виде, никаких CLI-имён, никаких сырых формулировок задач из backlog'а на других языках — переводи и перефразируй на ${UI_LANG_NAME}. Названия проектов — человеческие (из \`registry.md\` поле описания, не slug). Если в задаче есть терминология (Bizum, ITV, DGT, Renfe и т.п. — оставляй, это реалии), но обрамляй её контекстом на языке пользователя, не вываливай списком через \`;\`. Шаблон секций ниже показан по-русски как образец СТРУКТУРЫ — названия секций переводи на ${UI_LANG_NAME} (для русского используй их как есть). Строка-разделитель \`---BRIEF---\` — технический токен: копируй байт-в-байт, никогда не переводи (never translate it).**
+${S_CHANGED}
+- 1-4 bullets from fresh log/state/preflight. If nothing material changed, omit this whole section.
 
-Структура в этом порядке. Пустые секции ВЫПУСКАЙ ЦЕЛИКОМ (без «—»/«нет»). Каждая секция — это связный абзац или 1–3 человеческих буллета, не свалка.
+${S_ACTIONS}
+1. One concrete primary action.
+   ${COMPLETION_LABEL} Observable done condition.
+2. Optional second action.
+   ${COMPLETION_LABEL} Observable done condition.
+3. Optional third action.
+   ${COMPLETION_LABEL} Observable done condition.
 
-\`\`\`
-☀️ Брифинг $TODAY $NOW
+${S_DECISIONS}
+- Only real owner decisions. Omit the whole section if no decision is needed.
 
-🔥 Сегодня
-  Один абзац или 2–4 буллета. Каждый буллет — одна осмысленная задача с дедлайном сегодня, на ${UI_LANG_NAME}, с человеческим названием проекта в скобках. Если у одного проекта несколько задач — сгруппируй в ОДИН буллет с осмысленной формулировкой (например: «Авто (покупка машины): сегодня закрыть страховку, перевод денег и Bizum-готовность, договор купли-продажи»), не перечисляй через \`;\`.
+${S_FRESHNESS}
+- Only grounded source freshness/conflict warnings. Omit the whole section if there are no warnings.
 
-📅 На этой неделе
-  1–4 буллета, формат «<дата>: <задача> (<проект>)». Только задачи с жёстким дедлайном до 7 дней.
+${S_DEADLINES}
+- Hard external deadlines in the next 7 days only. Omit ordinary tasks.
 
-🎯 Стратегический фокус
-  2–3 пункта из LATER (top по score) и Vepol Idea Intake digest, если он сильнее по leverage. Формат: «<проект/идея>: <следующий шаг одной фразой>. Зачем: <привязка к цели>.» Названия проектов — человеческие.
+${S_DAY}
+One short condition for keeping the day sane and executable.
 
-🧱 Висящие эскалации
-  1–3 буллета. Формат: «<проект>: <чего ждём, одной фразой> — открыто <дата>». Если 4+ — упомяни числом и оставь топ-3.
+# Hard Pass 2 rules
+- ${S_ACTIONS} has 1-3 numbered actions, never more.
+- Every primary action must include a localized completion line: ${COMPLETION_LABEL}
+- Prefer fresh log/state/preflight over stale backlog. backlog is a queue, not factual truth.
+- The stale Family rental task must not appear if preflight do_not_surface includes it.
+- No raw slugs, plan_item_id, claim_id, internal markers, or implementation-only CLI command names in the user-facing brief.
+- Project names must be human-readable on ${UI_LANG_NAME}; translate or paraphrase slugs.
+- Do not write more optimistically than state.md/log.md supports.
+- Keep ${S_FRESHNESS} short and actionable when it appears.
+- The delimiter ---BRIEF--- is technical: never translate it.
 
-🧪 arXiv за сутки — ТОЛЬКО если на входе #9 был свежий непустой arxiv-brief файл; иначе секцию ЦЕЛИКОМ выпускай
-  Скопируй строки из файла 1:1, не перефразируй URL'ы.
-
-🟡 На паузе
-  Одна строка с человеческими названиями проектов через запятую (не slug'и). Без описаний.
-
-🔁 Напоминание про жизнь
-  1–2 предложения из habits/goals — про здоровье, сон, фокус-блок.
-
-❓ Вопрос — ТОЛЬКО если есть реальная развилка, требующая решения пользователя. Иначе НЕ писать.
-\`\`\`
-
-# Жёсткие правила Pass 2
-- **Язык пользователя: ${UI_LANG_NAME}. Читаемый.** Заголовки секций, формулировки задач, названия проектов — на ${UI_LANG_NAME}. Технические реалии (Bizum, ITV, DGT, Renfe, Las Naves, OBD2, MCP, и т.п.) оставляй как есть, но в обрамлении на языке пользователя. Никогда не оставляй задачу выглядеть как «Seguro pre-quote; transferencia readiness; Bizum readiness» — это сырьё, а не брифинг.
-- **Названия проектов — человеческие.** Slug \`grants\` → «Гранты», \`auto\` → «Автомобиль» (или «Покупка машины»), \`family\` → «Семья / жильё», \`vepol-dev\` → «Vepol», \`gestoria\` → «Бухгалтерия (gestoría)», \`leadgen\` / \`leadgen-leads\` → «Лидогенерация», \`nahornyi-ailab-landing\` → «Сайт Nahornyi AI Lab», \`mafia-hub\` → «Mafia Hub», \`talkbot\` → «TalkBot», \`n8n\` → «n8n / автоматизации», \`health-agent\` → «Здоровье», \`garmin\` → «Garmin», \`winox\` → «Winox» (этот список — русские примеры; для другого языка пользователя переведи такие имена на ${UI_LANG_NAME}). Если проекта в этом списке нет — придумай разумное имя на ${UI_LANG_NAME} из его описания в registry.md.
-- **Группировка по проекту.** Если у одного проекта 3+ задач в TODAY — пиши ОДНУ строку «Проект X: <обобщающая фраза, что нужно закрыть>», а не дамп списка через \`;\`.
-- **Никаких внутренних меток.** Не пиши «— hub», «(by self)», \`plan_item_id\`, \`claim_id\`, названия CLI-команд и подобное. Это внутренняя кухня — пользователь её не видит.
-- **Не врать оптимистичнее state.md.** Запрещённые слова без прямого подтверждения в state.md проекта: \`live\`, \`готов\`, \`ready\`, \`submitted\`, \`закрыто\`, \`пайплайн\`, \`работает\`. Если state говорит «не верифицировано» — пиши «не верифицировано».
-- **Идле обязательна**, если есть active-проекты вне TODAY/THIS_WEEK.
-- **Эскалации обязательны**, если Pass 1 нашёл открытые asks.
-
-Начни ответ сразу с markdown-таблицы Pass 1. Никакой преамбулы."
+Start with the Pass 1 table. No preamble.
+EOF
+)
 
 cd "$HUB"
 set +e
