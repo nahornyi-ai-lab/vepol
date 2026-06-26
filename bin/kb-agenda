@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""kb-agenda — compact, minimized calendar agenda for the daily brief.
+
+Reads approved follow-up reminders from the local ledger and real meetings from
+the Google Calendar connector, MINIMIZES every item to date/time/title/source/
+status at this boundary (so attendee emails, meeting links, and full
+descriptions never reach a durable brief artifact), and prints a bounded JSON
+envelope. Degrades cleanly to an "unavailable" envelope when the connector is
+disabled or unreachable — the brief still sends.
+
+Spec: knowledge/decisions/calendar-backed-followups-v1-2026-06-25.md
+(spec-contract:sha256:16543b12f3249e6f338657aa6f361d4071311fb831466f2bd228b41d8174d700)
+
+Usage:
+  kb-agenda --from today --days 8 --json [--now ISO] [--tz TZ]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_calendar import CalendarDisabled, CalendarUnavailable  # noqa: E402
+from _kb_calendar import adapter as cal_adapter  # noqa: E402
+from _kb_calendar import dateparse, ledger  # noqa: E402
+from _kb_calendar.minimize import minimize_event  # noqa: E402
+
+# follow-up statuses that represent an active, owner-approved reminder
+ACTIVE = "approved"
+
+
+def _now(explicit: str | None, zone: ZoneInfo) -> datetime:
+    if explicit:
+        dt = datetime.fromisoformat(explicit)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=zone)
+        return dt.astimezone(zone)
+    return datetime.now(zone)
+
+
+def _date_of(iso: str) -> str:
+    return (iso or "")[:10]
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Minimized calendar agenda for the brief.")
+    p.add_argument("--from", dest="frm", default="today")
+    p.add_argument("--days", type=int, default=8)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--now")
+    p.add_argument("--tz", default=dateparse.DEFAULT_TZ)
+    args = p.parse_args()
+
+    try:
+        zone = ZoneInfo(args.tz)
+        now = _now(args.now, zone)
+        if args.frm in ("today", ""):
+            from_date = now.date()
+        else:
+            from_date = datetime.fromisoformat(args.frm).date()
+    except (ValueError, KeyError) as e:
+        # bad --from/--now/--tz must still yield a valid envelope, never a crash
+        print(json.dumps({
+            "generated_at": None, "from": args.frm, "days": args.days,
+            "timezone": args.tz, "available": False,
+            "overdue": [], "today": [], "upcoming": [],
+            "errors": [f"bad_input: {e}"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    today_str = now.date().isoformat()
+    from_str = from_date.isoformat()
+    end_str = (from_date + timedelta(days=args.days)).isoformat()
+
+    overdue: list[dict] = []
+    today: list[dict] = []
+    upcoming: list[dict] = []
+    errors: list[str] = []
+
+    # 1) local ledger follow-ups (no connector needed)
+    for rec in ledger.replay().values():
+        if rec.get("status") != ACTIVE:
+            continue
+        d = _date_of(rec.get("start", ""))
+        if not d:
+            continue
+        item = minimize_event(rec, source="followup", status="approved")
+        if d < today_str:
+            overdue.append(item)
+        elif d == today_str:
+            today.append(item)
+        elif from_str <= d < end_str:
+            upcoming.append(item)
+
+    # 2) calendar meetings via the shared adapter (minimized at this boundary)
+    available = True
+    adapter = cal_adapter.get_adapter()
+    start_iso = datetime.combine(from_date, datetime.min.time(), zone).isoformat()
+    end_iso = datetime.combine(from_date + timedelta(days=args.days),
+                               datetime.min.time(), zone).isoformat()
+    try:
+        for raw in adapter.list_events(start_iso, end_iso):
+            d = _date_of(raw.get("start", ""))
+            item = minimize_event(raw, source="calendar", status="confirmed")
+            if d == today_str:
+                today.append(item)
+            elif from_str <= d < end_str:
+                upcoming.append(item)
+    except CalendarDisabled as e:
+        available = False
+        errors.append(f"calendar_disabled: {e}")
+    except CalendarUnavailable as e:
+        available = False
+        errors.append(f"calendar_unavailable: {e}")
+    except Exception as e:  # any connector problem must not break the brief
+        available = False
+        errors.append(f"calendar_error: {e}")
+
+    envelope = {
+        "generated_at": now.isoformat(timespec="seconds"),
+        "from": from_str,
+        "days": args.days,
+        "timezone": args.tz,
+        "available": available,
+        "overdue": sorted(overdue, key=lambda x: (x["date"], x["time"])),
+        "today": sorted(today, key=lambda x: (x["date"], x["time"])),
+        "upcoming": sorted(upcoming, key=lambda x: (x["date"], x["time"])),
+        "errors": errors,
+    }
+    print(json.dumps(envelope, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

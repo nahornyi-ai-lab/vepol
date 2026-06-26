@@ -1,4 +1,4 @@
-"""Locking primitives for Vepol Idea Intake card writes."""
+"""Locking primitives for Personal Idea OS card writes."""
 from __future__ import annotations
 
 import contextlib
@@ -15,7 +15,7 @@ def _lock_path(hub: Path) -> Path:
 
 @contextlib.contextmanager
 def ideas_lock(hub: Path, timeout_s: float = 30.0) -> Iterator[None]:
-    """Acquire the per-hub Vepol Idea Intake writer lock."""
+    """Acquire the per-hub Personal Idea OS writer lock."""
     lock_path = _lock_path(hub)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
@@ -40,3 +40,4 @@ def ideas_lock(hub: Path, timeout_s: float = 30.0) -> Iterator[None]:
                 pass
     finally:
         os.close(fd)
+

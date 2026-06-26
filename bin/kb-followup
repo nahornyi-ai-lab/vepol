@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""kb-followup — approval-gated calendar follow-up reminders.
+
+Agents and processes PROPOSE follow-up reminders; nothing is written to Google
+Calendar until the owner explicitly APPROVES. `approve` is the only command
+that may create a calendar event, and it is idempotent.
+
+Spec: knowledge/decisions/calendar-backed-followups-v1-2026-06-25.md
+(spec-contract:sha256:16543b12f3249e6f338657aa6f361d4071311fb831466f2bd228b41d8174d700)
+
+Commands:
+  kb-followup propose --summary S --when W [--project P] [--kind K]
+                      [--source SRC] [--reason R] [--now ISO] [--tz TZ]
+                      [--duration MIN] [--json]
+  kb-followup list [--status STATUS] [--json]
+  kb-followup approve <id> [--approval-source SRC] [--now ISO]
+  kb-followup cancel <id> [--reason R]
+  kb-followup done <id> [--reason R]
+
+Environment:
+  KB_HUB                 hub root (default ~/knowledge); ledger lives under it
+  KB_CALENDAR_DISABLE=1  fail closed: approve refuses, makes no connector call
+  KB_CALENDAR_FAKE_DIR   tests: route writes through the fake backend
+  KB_ACTOR               who is acting (default: agent)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_calendar import (  # noqa: E402
+    CalendarDisabled,
+    CalendarUncertain,
+    CalendarUnavailable,
+    CalendarWriteError,
+    DateParseError,
+)
+from _kb_calendar import adapter as cal_adapter  # noqa: E402
+from _kb_calendar import dateparse, ledger  # noqa: E402
+
+TERMINAL = {"cancelled", "done"}
+
+
+def _now_iso(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _actor() -> str:
+    return os.environ.get("KB_ACTOR", "agent")
+
+
+def cmd_propose(args) -> int:
+    now = args.now or _now_iso(None)
+    try:
+        parsed = dateparse.parse_when(
+            args.when,
+            now=now,
+            tz=args.tz,
+            duration_minutes=args.duration,
+        )
+    except DateParseError as e:
+        # fail closed: no ledger record on ambiguous dates
+        print(f"⚠ ambiguous date: {e}", file=sys.stderr)
+        return 2
+
+    created_at = now
+    date_str = parsed["start"][:10].replace("-", "")
+    fid = ledger.next_id(date_str)
+    record = {
+        "id": fid,
+        "status": "proposed",
+        "summary": args.summary,
+        "start": parsed["start"],
+        "end": parsed["end"],
+        "timezone": parsed["timezone"],
+        "project_slug": args.project,
+        "kind": args.kind,
+        "source": args.source,
+        "reason": args.reason,
+        "created_by": _actor(),
+        "created_at": created_at,
+        "approval": None,
+        "calendar": None,
+    }
+    ledger.append(record)
+
+    approve_cmd = f"kb-followup approve {fid} --approval-source \"chat:<your ok>\""
+    if args.json:
+        print(json.dumps({**record, "approve_command": approve_cmd},
+                         ensure_ascii=False, indent=2))
+    else:
+        dur = args.duration
+        print(f"📌 Follow-up proposed (NOT yet on the calendar):")
+        print(f"   id:       {fid}")
+        print(f"   summary:  {args.summary}")
+        print(f"   when:     {parsed['start']}  (+{dur} min)")
+        print(f"   project:  {args.project or '-'}")
+        print(f"   why:      {args.reason or '-'}")
+        print(f"   approve:  {approve_cmd}")
+    return 0
+
+
+def _iter_filtered(status: str | None):
+    state = ledger.replay()
+    for fid, rec in sorted(state.items()):
+        if status and rec.get("status") != status:
+            continue
+        yield rec
+
+
+def cmd_list(args) -> int:
+    rows = list(_iter_filtered(args.status))
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("(no follow-ups)")
+        return 0
+    for rec in rows:
+        print(f"{rec['id']}  [{rec.get('status')}]  {rec.get('start','?')}  "
+              f"{rec.get('summary','')}")
+    return 0
+
+
+def cmd_approve(args) -> int:
+    fid = args.id
+    state = ledger.get(fid)
+    if state is None:
+        print(f"⚠ unknown follow-up: {fid}", file=sys.stderr)
+        return 2
+    status = state.get("status")
+    if status in TERMINAL:
+        print(f"⚠ follow-up {fid} is {status}; cannot approve", file=sys.stderr)
+        return 2
+
+    # AC3: already approved with a calendar pointer → return it, zero writes
+    if status == "approved" and state.get("calendar_event_id"):
+        print(f"✓ already approved: {fid} → {state.get('calendar_event_url') or state.get('calendar_event_id')}")
+        return 0
+
+    adapter = cal_adapter.get_adapter()
+    proposal = {
+        "id": fid,
+        "summary": state.get("summary"),
+        "start": state.get("start"),
+        "end": state.get("end"),
+        "timezone": state.get("timezone", dateparse.DEFAULT_TZ),
+        "source": state.get("source"),
+    }
+    now = _now_iso(args.now)
+    try:
+        pointer = adapter.create_event(proposal)
+    except CalendarDisabled as e:
+        # fail closed, leave the proposal cleanly retryable (no ledger write)
+        print(f"⚠ calendar disabled: {e}. Proposal {fid} stays unapproved.",
+              file=sys.stderr)
+        return 3
+    except CalendarUnavailable as e:
+        print(f"⚠ calendar unavailable: {e}. Proposal {fid} stays unapproved.",
+              file=sys.stderr)
+        return 3
+    except CalendarWriteError as e:
+        ledger.append({
+            "id": fid, "status": "write_failed",
+            "approved_by": "owner", "approval_source": args.approval_source,
+            "attempted_at": now, "error": str(e),
+        })
+        print(f"⚠ calendar write failed: {e}. Proposal {fid} marked retryable, "
+              "no event created.", file=sys.stderr)
+        return 3
+    except CalendarUncertain as e:
+        ledger.append({
+            "id": fid, "status": "uncertain",
+            "approved_by": "owner", "approval_source": args.approval_source,
+            "attempted_at": now, "idempotency_key": e.idempotency_key,
+            "error": str(e),
+        })
+        print(f"⚠ calendar write uncertain: {e}. Proposal {fid} marked uncertain; "
+              "retry is safe (idempotent), but do NOT assume a reminder exists.",
+              file=sys.stderr)
+        return 3
+
+    ledger.append({
+        "id": fid,
+        "status": "approved",
+        "approved_by": "owner",
+        "approved_at": now,
+        "approval_source": args.approval_source,
+        "calendar_event_id": pointer["event_id"],
+        "calendar_event_url": pointer.get("event_url", ""),
+        "idempotency_key": pointer.get("idempotency_key"),
+        "calendar": pointer.get("calendar", "primary"),
+    })
+    print(f"✅ approved {fid} → {pointer.get('event_url') or pointer['event_id']}")
+    return 0
+
+
+def cmd_cancel(args) -> int:
+    return _terminal(args.id, "cancelled", args.reason)
+
+
+def cmd_done(args) -> int:
+    return _terminal(args.id, "done", args.reason)
+
+
+def _terminal(fid: str, status: str, reason: str | None) -> int:
+    state = ledger.get(fid)
+    if state is None:
+        print(f"⚠ unknown follow-up: {fid}", file=sys.stderr)
+        return 2
+    ledger.append({
+        "id": fid, "status": status, "reason": reason,
+        "closed_by": _actor(),
+        "closed_at": _now_iso(None),
+    })
+    print(f"✓ {fid} → {status}")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Approval-gated calendar follow-up reminders.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pp = sub.add_parser("propose", help="Propose a follow-up (no calendar write)")
+    pp.add_argument("--summary", required=True)
+    pp.add_argument("--when", required=True)
+    pp.add_argument("--project")
+    pp.add_argument("--kind", default="check")
+    pp.add_argument("--source")
+    pp.add_argument("--reason")
+    pp.add_argument("--now", help="explicit ISO now (for reproducible parsing)")
+    pp.add_argument("--tz", default=dateparse.DEFAULT_TZ)
+    pp.add_argument("--duration", type=int, default=dateparse.DEFAULT_DURATION_MIN)
+    pp.add_argument("--json", action="store_true")
+    pp.set_defaults(func=cmd_propose)
+
+    pl = sub.add_parser("list", help="List follow-ups")
+    pl.add_argument("--status")
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_list)
+
+    pa = sub.add_parser("approve", help="Approve a follow-up (creates ONE event)")
+    pa.add_argument("id")
+    pa.add_argument("--approval-source")
+    pa.add_argument("--now")
+    pa.set_defaults(func=cmd_approve)
+
+    pc = sub.add_parser("cancel", help="Cancel a follow-up")
+    pc.add_argument("id")
+    pc.add_argument("--reason")
+    pc.set_defaults(func=cmd_cancel)
+
+    pd = sub.add_parser("done", help="Mark a follow-up done")
+    pd.add_argument("id")
+    pd.add_argument("--reason")
+    pd.set_defaults(func=cmd_done)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

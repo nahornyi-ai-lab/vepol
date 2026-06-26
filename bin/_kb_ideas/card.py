@@ -1,13 +1,11 @@
-"""Vepol Idea Intake card model and lifecycle operations."""
+"""Personal Idea OS card model and lifecycle operations."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
 import tempfile
 import unicodedata
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -134,27 +132,14 @@ def promote(
     *,
     project_slug: str,
     plan_item_id: str | None = None,
-    create_task: bool = False,
-    priority: str | None = None,
-    context: str = "",
     hub: str | Path | None = None,
 ) -> dict[str, str]:
     """Promote a ready idea by storing a markdown kb-board task pointer."""
     root = hub_path(hub)
     with ideas_lock(root):
         path, post = _load_required_unlocked(root, idea_id)
-        if create_task:
-            created = _create_board_task(
-                root,
-                project_slug=project_slug,
-                title=str(post.get("title") or idea_id),
-                idea_id=idea_id,
-                priority=priority or str(post.get("priority") or "P2"),
-                context=context,
-            )
-            plan_item_id = created["plan_item_id"]
         if not plan_item_id:
-            raise ValueError("promote requires --plan-item-id or --create-task")
+            raise ValueError("promote requires --plan-item-id")
         post["status"] = "promoted"
         post["promoted_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         post["project_slug"] = project_slug
@@ -239,7 +224,7 @@ def approve_calendar(
         if proposal is None:
             raise ValueError(f"unknown calendar proposal: {proposal_id}")
         if event_id is None and apply:
-            event_id = _create_google_calendar_event(proposal)
+            event_id = _create_google_calendar_event(proposal, idea_id)
         if event_id is None:
             raise ValueError("calendar approve requires event_id or apply=True")
         proposal["status"] = "approved"
@@ -498,7 +483,7 @@ def _render_dashboard_unlocked(root: Path) -> None:
             "",
             "# Ideas",
             "",
-            "> Personal idea dashboard. The canonical source for each idea is its card in `personal/ideas/`. This file is rendered from cards; edit status in the card.",
+            "> Dashboard личных идей. Канон каждой идеи — карточка в `personal/ideas/`. Этот файл рендерится из карточек; статус редактируется в карточке.",
             "",
             "## Protocol",
             "",
@@ -635,98 +620,50 @@ def _next_calendar_proposal_id(start: str, proposals: list[dict[str, Any]]) -> s
         i += 1
 
 
-def _create_google_calendar_event(proposal: dict[str, Any]) -> str:
-    prompt = (
-        "Create a Google Calendar event on the primary calendar from this approved Vepol Idea Intake proposal:\n"
-        f"- title: {proposal['title']!r}\n"
-        f"- start: {proposal['start']}\n"
-        f"- end: {proposal['end']}\n"
-        f"- timezone: {proposal.get('timezone', 'Europe/Madrid')}\n\n"
-        "Use the Google Calendar MCP create_event tool. Reply with just the event id or URL."
-    )
-    result = subprocess.run(
-        ["claude", "-p", prompt],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "calendar create_event failed")
-    event_id = result.stdout.strip()
-    if not event_id:
-        raise RuntimeError("calendar create_event returned empty stdout")
-    return event_id[:500]
+def _create_google_calendar_event(proposal: dict[str, Any], idea_id: str) -> str:
+    """Route through the shared calendar adapter — the single live calendar
+    writer in the system. Idempotency, fail-closed behavior, and tests are
+    consistent with kb-followup. (Spec: Existing Writer Hardening — two live
+    calendar writers are not allowed.)
 
+    The adapter derives its deterministic idempotency key from the event `id`,
+    so that id MUST be globally unique. A calendar `proposal_id` (e.g.
+    `cal-20260626-01`) is only unique WITHIN one idea card — two different ideas
+    can each mint the same `cal-<date>-01`. We therefore namespace it with the
+    idea id; otherwise distinct reminders would collapse into one event."""
+    import os
+    import sys
 
-def _create_board_task(
-    root: Path,
-    *,
-    project_slug: str,
-    title: str,
-    idea_id: str,
-    priority: str,
-    context: str,
-) -> dict[str, str]:
-    board = _board_path(root, project_slug)
-    _ensure_board(board)
-    plan_item_id = str(uuid.uuid4())
-    kb_board = root / "bin" / "kb-board"
-    if not kb_board.exists():
-        kb_board = Path(__file__).resolve().parent.parent / "kb-board"
-    cmd = [
-        str(kb_board),
-        "append",
-        str(board),
-        title,
-        "--plan-item-id",
-        plan_item_id,
-        "--priority",
-        priority,
-        "--owner",
-        project_slug or "hub",
-        "--status",
-        "Ready",
-        "--actor",
-        "kb-idea",
-        "--body",
-        context or f"Promoted from Vepol Idea Intake card {idea_id}.",
-        "--field",
-        f"idea_id={idea_id}",
-        "--json",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "kb-board append failed")
+    bin_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    from _kb_calendar import adapter as cal_adapter
+    from _kb_calendar.errors import CalendarError
+
+    pid = proposal.get("proposal_id") or proposal.get("id")
+    if not pid:
+        # never fall back to a constant — that would collapse every id-less
+        # proposal onto a single event. Fail closed instead.
+        raise RuntimeError(
+            "calendar proposal has no stable id; refusing to create an event "
+            "(would risk collapsing distinct reminders)"
+        )
+    payload = {
+        "id": f"idea:{idea_id}:{pid}",
+        "summary": proposal["title"],
+        "start": proposal["start"],
+        "end": proposal["end"],
+        "timezone": proposal.get("timezone", "Europe/Madrid"),
+        "source": "kb-idea",
+    }
     try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"kb-board append returned non-JSON: {result.stdout}") from exc
-    if not payload.get("ok") or not payload.get("plan_item_id"):
-        raise RuntimeError(f"kb-board append failed: {payload}")
-    return {"plan_item_id": str(payload["plan_item_id"])}
-
-
-def _board_path(root: Path, project_slug: str) -> Path:
-    if project_slug in {"", "hub", "personal"}:
-        return root / "backlog.md"
-    return root / "projects" / project_slug / "backlog.md"
-
-
-def _ensure_board(path: Path) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "# Backlog\n\n"
-        "## Backlog\n\n"
-        "## Ready\n\n"
-        "## In Progress\n\n"
-        "## Blocked\n\n"
-        "## Review\n\n"
-        "## Done\n\n"
-        "## Cancelled\n",
-        encoding="utf-8",
-    )
+        pointer = cal_adapter.get_adapter().create_event(payload)
+    except CalendarError as e:
+        raise RuntimeError(f"calendar create_event failed: {e}")
+    event_id = pointer.get("event_id") or ""
+    if not event_id:
+        raise RuntimeError("calendar create_event returned no event id")
+    return event_id[:500]
 
 
 def _priority_rank(priority: str) -> int:

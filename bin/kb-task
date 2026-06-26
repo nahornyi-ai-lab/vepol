@@ -11,11 +11,12 @@ Usage:
   kb-task "task text" --due "2026-04-20T14:00"                  # also stamps due:<when> in line
   kb-task "task text" --by hub|user|self                        # who set the task (default: self)
   kb-task "task text" --context "<1-line context>"              # optional context suffix
-  kb-task "task text" --due "..." --calendar                    # also creates Google Calendar event
+  kb-task "task text" --due "..." --calendar                    # proposes a follow-up reminder (owner approves)
 
-Calendar creation uses `claude -p` with the Google Calendar MCP. Requires:
-  - claude CLI available
-  - Google Calendar MCP authenticated
+`--calendar` does NOT write Google Calendar directly. It records a pending
+follow-up proposal (via the shared calendar approval gate) and prints the
+`kb-followup approve` command; nothing reaches the calendar until the owner
+explicitly approves. (Spec: calendar-backed-followups-v1-2026-06-25.)
 
 Task block format is rendered by `kb-board append` under the `## Backlog`
 section unless callers promote it to `Ready`.
@@ -27,34 +28,53 @@ import subprocess
 import sys
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 KB_BOARD = HUB / "bin" / "kb-board"
 
 
-def create_calendar_event(task: str, when: str) -> None:
-    """Invoke `claude -p` with the Google Calendar MCP. Non-blocking for user context."""
-    prompt = (
-        f"Create a Google Calendar event on the primary calendar:\n"
-        f"- title: {task!r}\n"
-        f"- start: {when}\n"
-        f"- duration: 30 minutes\n"
-        f"- reminder: popup 30 minutes before\n\n"
-        f"Use mcp__claude_ai_Google_Calendar__create_event. "
-        f"On success, reply with just the event URL. On failure, print the error."
-    )
+def propose_calendar_followup(task: str, when: str, context: str | None) -> None:
+    """Create a pending follow-up proposal instead of writing the calendar.
+
+    `--calendar` no longer creates a Google Calendar event directly. All
+    calendar writes go through the shared approval gate: this records a pending
+    proposal and prints the approval command. Nothing reaches the calendar
+    until the owner runs `kb-followup approve`.
+    (Spec: Existing Writer Hardening, AC7.)
+    """
+    from datetime import datetime as _dt
+
+    from _kb_calendar import DateParseError, dateparse, ledger
+
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            print(f"📅 Calendar: {result.stdout.strip()[:200]}")
-        else:
-            print(f"⚠ Calendar call failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        print("⚠ Calendar call timed out after 60s — event may or may not have been created.", file=sys.stderr)
-    except FileNotFoundError:
-        print("⚠ `claude` CLI not found in PATH — skipped Calendar event.", file=sys.stderr)
+        parsed = dateparse.parse_when(when, now=None)
+    except DateParseError as e:
+        print(f"⚠ --calendar: could not parse --due {when!r} ({e}); "
+              "no follow-up proposed. Re-run with an ISO date/time.",
+              file=sys.stderr)
+        return
+
+    date_str = parsed["start"][:10].replace("-", "")
+    fid = ledger.next_id(date_str)
+    ledger.append({
+        "id": fid,
+        "status": "proposed",
+        "summary": task,
+        "start": parsed["start"],
+        "end": parsed["end"],
+        "timezone": parsed["timezone"],
+        "project_slug": None,
+        "kind": "task",
+        "source": "kb-task",
+        "reason": context or "task follow-up",
+        "created_by": os.environ.get("KB_ACTOR", "agent"),
+        "created_at": _dt.now().astimezone().isoformat(timespec="seconds"),
+        "approval": None,
+        "calendar": None,
+    })
+    print(f"📌 Follow-up proposed (no calendar write yet): {fid} @ {parsed['start']}")
+    print(f"   approve: kb-followup approve {fid} --approval-source \"chat:<your ok>\"")
 
 
 def main() -> None:
@@ -66,7 +86,7 @@ def main() -> None:
                    help="Who set the task (default: self)")
     p.add_argument("--context", help="Optional one-line context")
     p.add_argument("--calendar", action="store_true",
-                   help="Also create a Google Calendar event (requires --due)")
+                   help="Propose an owner-approval-gated follow-up reminder (requires --due)")
     args = p.parse_args()
 
     slug = args.project if args.project else "hub"
@@ -104,7 +124,7 @@ def main() -> None:
         if not args.due:
             print("⚠ --calendar requires --due; skipped.", file=sys.stderr)
         else:
-            create_calendar_event(args.text, args.due)
+            propose_calendar_followup(args.text, args.due, args.context)
 
 
 if __name__ == "__main__":

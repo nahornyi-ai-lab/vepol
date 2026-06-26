@@ -1,1 +1,2 @@
-"""Vepol Idea Intake helpers."""
+"""Personal Idea OS helpers."""
+
