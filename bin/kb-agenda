@@ -82,9 +82,15 @@ def main() -> int:
     errors: list[str] = []
 
     # 1) local ledger follow-ups (no connector needed)
+    followup_event_ids: set[str] = set()
     for rec in ledger.replay().values():
         if rec.get("status") != ACTIVE:
             continue
+        # remember the calendar event we wrote for this follow-up so the
+        # connector pass below does not surface the same reminder twice
+        ev = rec.get("calendar_event_id")
+        if ev:
+            followup_event_ids.add(ev)
         d = _date_of(rec.get("start", ""))
         if not d:
             continue
@@ -104,6 +110,14 @@ def main() -> int:
                                datetime.min.time(), zone).isoformat()
     try:
         for raw in adapter.list_events(start_iso, end_iso):
+            # de-duplicate: an approved follow-up is already surfaced from the
+            # ledger above; do not list its calendar event a second time. Match
+            # by event id when the connector returns one, and fall back to the
+            # "[Vepol] " title prefix (every Vepol follow-up carries it) for
+            # connectors whose list_events omits ids.
+            title = raw.get("title") or raw.get("summary") or ""
+            if raw.get("id") in followup_event_ids or title.startswith("[Vepol] "):
+                continue
             d = _date_of(raw.get("start", ""))
             item = minimize_event(raw, source="calendar", status="confirmed")
             if d == today_str:

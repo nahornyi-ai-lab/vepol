@@ -255,6 +255,34 @@ else
 fi
 
 # =============================================================================
+echo "== AC8b: kb-agenda does not surface an approved follow-up twice =="
+# -----------------------------------------------------------------------------
+# A real smoke (2026-06-29) showed an approved follow-up appearing twice: once
+# from the ledger (source=followup) and once as its own [Vepol] calendar event
+# (source=calendar). The reader must de-dupe by event id, with a [Vepol] title
+# fallback for connectors whose list_events omits ids.
+HUB=$(make_hub ac8b); FAKE=$(make_fake ac8b ok)
+cat > "$HUB/personal/calendar-followups.jsonl" <<'EOF'
+{"id":"fup-x","status":"approved","summary":"check brief","start":"2026-06-30T09:00:00+02:00","end":"2026-06-30T09:15:00+02:00","timezone":"Europe/Madrid","calendar_event_id":"evt-xyz"}
+EOF
+cat > "$FAKE/list-events.json" <<'EOF'
+[
+ {"id":"evt-xyz","title":"[Vepol] check brief","start":"2026-06-30T09:00:00+02:00","end":"2026-06-30T09:15:00+02:00"},
+ {"id":"evt-other","title":"[Vepol] another reminder","start":"2026-06-30T10:00:00+02:00","end":"2026-06-30T10:15:00+02:00"},
+ {"id":"evt-meet","title":"Real meeting","start":"2026-06-30T11:00:00+02:00","end":"2026-06-30T11:30:00+02:00"}
+]
+EOF
+AG=$(KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$AGENDA" --from 2026-06-30 --days 8 --json --now "2026-06-30T07:00:00+02:00" 2>/dev/null)
+RES=$(echo "$AG" | "$PY" -c '
+import sys,json
+d=json.load(sys.stdin); items=d["overdue"]+d["today"]+d["upcoming"]
+fu=[i for i in items if i["source"]=="followup"]
+vc=[i for i in items if i["source"]=="calendar" and i["title"].startswith("[Vepol] ")]
+mt=[i for i in items if i["source"]=="calendar" and not i["title"].startswith("[Vepol] ")]
+print("ok" if (len(fu)==1 and len(vc)==0 and len(mt)==1) else f"bad fu={len(fu)} vc={len(vc)} mt={len(mt)}")')
+[[ "$RES" == "ok" ]] && ok "AC8b: approved follow-up shown once; its [Vepol] calendar dup removed; real meeting kept" || fail "AC8b: dedup wrong ($RES)"
+
+# =============================================================================
 echo "== AC7: kb-task --calendar no longer writes directly =="
 # -----------------------------------------------------------------------------
 HUB=$(make_hub ac7); FAKE=$(make_fake ac7 ok)
