@@ -25,7 +25,10 @@ No unreleased changes yet.
   privacy-safe summary (no raw bodies, addresses, or recipients ever persisted;
   private `personal/mail/` storage), and `kb-brief` / `kb-retro` / the
   orchestrator cycle surface what needs attention. Email content is treated as
-  untrusted end to end; a hostile email cannot steer the brief. Enabled by
+  untrusted input: minimized, strictly validated, and fenced before it reaches
+  the brief, so email text gets no instruction authority; the reading step
+  itself is read-only with no action tools (see the release notes for the
+  exact boundary). Enabled by
   default but reads nothing until Gmail is connected; real reads require the
   Codex CLI with Gmail access, otherwise mail quietly reports unavailable and
   never blocks the brief. This release ships no draft/send/label/delete path.
