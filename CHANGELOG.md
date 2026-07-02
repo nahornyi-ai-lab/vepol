@@ -31,7 +31,9 @@ No unreleased changes yet.
   exact boundary). Enabled by
   default but reads nothing until Gmail is connected; real reads require the
   Codex CLI with Gmail access, otherwise mail quietly reports unavailable and
-  never blocks the brief. This release ships no draft/send/label/delete path.
+  never blocks the brief. Vepol ships no draft/send/label/delete code path and
+  never requests a write; reader isolation is instruction- and policy-level in
+  this release (see the release notes for the exact boundary).
 - **Schedule migration (`kb-mail-migrate`)** — idempotent, reversible
   `processes.yaml` migration that schedules the mail reader one tick before
   your existing brief/retro times, preserving every other process and chain.
