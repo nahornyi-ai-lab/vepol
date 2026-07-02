@@ -16,6 +16,39 @@ upgrading.
 
 No unreleased changes yet.
 
+## [0.5.0] — 2026-07-02
+
+### Added
+- **Daily audio digests (`kb-morning-digest`)** — the digest engine ships
+  publicly. Every morning it gathers the freshest output of your scheduled
+  processes into one digest file; a new `--period evening` mode produces a
+  short (~1–2 minute) recap right after the evening retro (what got done, what
+  is hanging, what mail still waits). If the `notebooklm` CLI is connected,
+  each digest also becomes an audio overview in a monthly NotebookLM notebook;
+  without it (or on quota/rate-limit/auth failure) every run keeps the file,
+  skips the audio, and exits cleanly. Morning and evening keep separate files,
+  manifests, and locks and share only the monthly notebook. The evening recap
+  is built from the composed day file only — raw mail bodies, addresses, and
+  envelopes are never read by the evening path, and untrusted-data fencing is
+  stripped before text reaches NotebookLM.
+- **Schedule migration (`kb-digest-migrate`)** — idempotent, reversible
+  `processes.yaml` migration: inserts the evening digest after your retro,
+  anchors the morning digest behind your last enabled morning process,
+  re-anchors only its own managed block when a better anchor appears, and
+  leaves customized blocks untouched. Fresh installs get both digests
+  automatically.
+
+### Changed
+- **`kb-retro` persists the retro.** The retro text is appended to
+  `briefs/<today>.md` as a `## Retro (HH:MM)` section, so the day file carries
+  the whole day (brief + retro + reflection) and feeds the evening recap.
+- **Scheduler audio policy: narrow allowlist replaces the blanket ban.**
+  Scheduled `notebooklm_audio` is now allowed ONLY for the two digest
+  processes, each bound to its exact run command; anything else still fails
+  closed. The digest binary additionally enforces a background runtime guard
+  (allowlisted process id + matching command + declared audio output, else
+  file-only with zero NotebookLM calls).
+
 ## [0.4.0] — 2026-07-02
 
 ### Added
@@ -348,7 +381,8 @@ v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
 **2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...v0.3.0

@@ -17,8 +17,12 @@ Every background process is declared with exactly five fields:
 
 `outputs` semantics: telegram/people/calendar are user-facing channels;
 `file` is internal agent memory and never counts as user delivery;
-`notebooklm_audio` is allowed only for on-demand (manual) processes —
-background NotebookLM is banned in this release.
+`notebooklm_audio` is on-demand only by default — background NotebookLM is
+banned — EXCEPT the explicit, quota-graceful digest processes in
+SCHEDULED_NOTEBOOKLM_ALLOWED, each bound to its EXACT run command (spec:
+daily-audio-digests 2026-07-02, D4). Any other scheduled process declaring
+`notebooklm_audio` — including an allowlisted id with a different run
+command — still fails closed.
 
 The file is a strict, hand-parseable YAML subset: blank lines, full-line
 `#` comments, blocks starting with `- id: <id>`, fields indented exactly
@@ -38,11 +42,40 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
 import tempfile
 
 REQUIRED_FIELDS = ("id", "enabled", "when", "run", "outputs")
 ALLOWED_OUTPUTS = ("telegram", "people", "calendar", "file", "notebooklm_audio")
+
+# Scheduled (non on-demand) processes allowed to emit `notebooklm_audio`,
+# bound to their EXACT run command — id-only matching would let a process
+# merely NAMED like a digest schedule audio for an arbitrary command. Each
+# entry must soft-fail on NotebookLM rate-limit/quota (no hang, no per-tick
+# hammering); kb-morning-digest is the reference quota-graceful impl and
+# additionally enforces its own background runtime guard. This validator
+# governs DECLARED scheduled audio only — it cannot constrain arbitrary local
+# scripts calling the notebooklm CLI directly (spec: daily-audio-digests
+# 2026-07-02, D4).
+SCHEDULED_NOTEBOOKLM_ALLOWED = {
+    "morning-digest": "kb-morning-digest",
+    "evening-digest": "kb-morning-digest --period evening",
+}
+
+
+def normalized_run_argv(run: str) -> list[str]:
+    """shlex-split a `run` command; argv[0] compares by basename so a bare
+    command and an absolute path to the same binary are one command (kb-tick
+    resolves through PATH/hub bin). Binding behavior to the REAL binary is the
+    digest's runtime guard's job, not this normalization's."""
+    try:
+        argv = shlex.split(run)
+    except ValueError:
+        return []
+    if argv:
+        argv[0] = os.path.basename(argv[0])
+    return argv
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _HHMM_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -90,6 +123,22 @@ DEFAULT_PROCESSES_YAML = """\
   when: after:daily
   run: kb-learning-arxiv --text-only
   outputs: [telegram, file]
+
+# Daily audio digests (morning recap + short evening retro recap). The
+# NotebookLM audio activates only when the notebooklm CLI is connected;
+# without it both runs are file-only and exit 0. If you later enable
+# money-radar, re-run kb-digest-migrate to re-anchor morning-digest behind it.
+- id: morning-digest
+  enabled: true
+  when: after:learning
+  run: kb-morning-digest
+  outputs: [file, notebooklm_audio]
+
+- id: evening-digest
+  enabled: true
+  when: after:retro
+  run: kb-morning-digest --period evening
+  outputs: [file, notebooklm_audio]
 
 # Enable only after watermark bootstrap: kb-extract-people --init-watermarks
 - id: people-extract
@@ -261,10 +310,16 @@ def parse_processes_text(text: str) -> list[dict]:
                 f"after:<process_id>, or on-demand — got {when!r}"
             )
         if "notebooklm_audio" in p["outputs"] and when != "on-demand":
-            raise ProcessConfigError(
-                f"process {p['id']!r}: background notebooklm_audio is not "
-                f"allowed in this release (on-demand only)"
-            )
+            allowed_run = SCHEDULED_NOTEBOOKLM_ALLOWED.get(p["id"])
+            if allowed_run is None or (
+                normalized_run_argv(p["run"]) != normalized_run_argv(allowed_run)
+            ):
+                raise ProcessConfigError(
+                    f"process {p['id']!r}: scheduled notebooklm_audio is only "
+                    f"allowed for the quota-graceful digest processes "
+                    f"{sorted(SCHEDULED_NOTEBOOKLM_ALLOWED)} with their exact "
+                    f"run commands; others must be on-demand"
+                )
 
     # after:* chains must be acyclic, else dependents would deadlock silently.
     parent_of = {

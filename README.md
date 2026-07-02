@@ -116,9 +116,11 @@ unit tests. The list grows release by release; see
   `processes.yaml` and gated through `kb-tick`. Five fields per
   process — `id`, `enabled`, `when`, `run`, `outputs` — and one file
   to read to see which routines run on your machine. Background runs
-  are text-first by default; NotebookLM audio is an explicit on-demand
-  step, never a silent background cost. A missing config self-heals
-  with safe defaults.
+  are text-first by default; scheduled NotebookLM audio is allowed only
+  for the two daily digest processes (each bound to its exact command,
+  file-only until you connect the NotebookLM CLI) — everything else
+  stays on-demand, never a silent background cost. A missing config
+  self-heals with safe defaults.
 
 - **Idea Intake** — an event-driven process for ideas you write or dictate:
   `kb-idea capture` creates canonical markdown cards under `personal/ideas/`,
@@ -286,9 +288,9 @@ kb-demo brief          # see what a synthesized brief looks like
 ```
 
 That's the value loop. Methodology comes after, when you want it.
-Daily research delivers a text digest out of the box; if you want the
-on-demand NotebookLM audio mode, authenticate once with
-`notebooklm login && notebooklm status`. The default topic is automatic; use
+Daily research delivers a text digest out of the box; if you want audio —
+the daily morning/evening digests and the on-demand research mode —
+authenticate once with `notebooklm login && notebooklm status`. The default topic is automatic; use
 `kb-daily-research --set-topic "..."` only when you want to steer it.
 
 ## Status

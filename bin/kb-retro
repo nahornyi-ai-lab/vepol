@@ -156,8 +156,30 @@ else
   echo "[$(date -Iseconds)] retro sent ($(echo -n "$RETRO" | wc -c) chars)" >> "$LOG"
 fi
 
-# Append Reflection-section to today's brief and flip frontmatter reflection: pending → done.
 BRIEF_FILE="$HUB/briefs/$TODAY.md"
+
+# Persist the RETRO block into the day file as `## Retro (HH:MM)` so the day
+# file (brief + retro + reflection) is the durable source for the evening audio
+# digest (spec: daily-audio-digests D1/AC1). Best-effort like Reflection: a
+# missing day file or a failed compose only warns. One persisted retro per day —
+# a re-run never appends a duplicate section.
+if [ "${RC:-1}" -eq 0 ] && [ -n "${RETRO:-}" ]; then
+  if [ ! -f "$BRIEF_FILE" ]; then
+    echo "[$(date -Iseconds)] WARN: day file $BRIEF_FILE missing, retro not persisted" >> "$LOG"
+  elif grep -q '^## Retro (' "$BRIEF_FILE"; then
+    echo "[$(date -Iseconds)] retro already persisted in $BRIEF_FILE, skipping" >> "$LOG"
+  else
+    {
+      print -- ""
+      print -- "## Retro ($NOW)"
+      print -- ""
+      print -- "$RETRO"
+    } >> "$BRIEF_FILE"
+    echo "[$(date -Iseconds)] retro appended to $BRIEF_FILE ($(echo -n "$RETRO" | wc -c) chars)" >> "$LOG"
+  fi
+fi
+
+# Append Reflection-section to today's brief and flip frontmatter reflection: pending → done.
 if [ -n "${REFLECTION:-}" ] && [ -f "$BRIEF_FILE" ]; then
   {
     print -- ""

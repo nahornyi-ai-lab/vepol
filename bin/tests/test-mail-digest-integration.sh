@@ -17,12 +17,12 @@ SRC_BIN="${KB_MAIL_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
-# kb-morning-digest is a hub-only surface (not distributed to the public seed).
-# When testing a distribution that lacks it, skip cleanly instead of failing.
+# kb-morning-digest ships in every distribution since v0.5.0 (daily audio
+# digests); a missing binary is a FAIL, not a skip.
 if ! [[ -x "$SRC_BIN/kb-morning-digest" ]]; then
-  echo "SKIP: kb-morning-digest not present in $SRC_BIN (hub-only surface)"
-  echo "PASS=0 FAIL=0"
-  exit 0
+  echo "  ✗ kb-morning-digest missing from $SRC_BIN (public surface after v0.5.0)"
+  echo "PASS=0 FAIL=1"
+  exit 1
 fi
 
 HUB="$TMP/hub"; mkdir -p "$HUB/personal"
