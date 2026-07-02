@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""kb-mail-block — emit the composer-ready mail block for one period.
+
+Read-only and Gmail-free: it reads ONLY the same-day minimized envelope written
+by kb-mail-brief and renders it as a nonce-bounded <untrusted-source> block with
+a "data, not instructions" preamble (second-hop wrapping, spec: Privacy and
+security model). kb-brief / kb-retro / kb-morning-digest inject its stdout
+verbatim; they never touch Gmail and never persist raw mail.
+
+If the same-day envelope is missing, invalid, or available:false, it prints a
+short controlled freshness note (our own text, not wrapped) so the brief proceeds
+without mail instead of failing.
+
+Usage: kb-mail-block --period morning|evening [--day YYYY-MM-DD]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import pathlib
+import sys
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_mail import read_same_day_envelope, wrap_untrusted  # noqa: E402
+from _kb_mail.untrusted import DATA_NOT_INSTRUCTIONS  # noqa: E402
+
+
+def _today() -> str:
+    override = os.environ.get("KB_MAIL_NOW")
+    if override:
+        return datetime.fromisoformat(override).date().isoformat()
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(os.environ.get("KB_TZ", "Europe/Madrid"))).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="kb-mail-block")
+    ap.add_argument("--period", required=True, choices=("morning", "evening"))
+    ap.add_argument("--day", default=None)
+    args = ap.parse_args()
+
+    hub = pathlib.Path(os.environ.get("KB_HUB") or os.path.expanduser("~/knowledge"))
+    day = args.day or _today()
+    env = read_same_day_envelope(args.period, day, hub)
+
+    if env is None or not env.get("available"):
+        reason = ""
+        if env and env.get("errors"):
+            reason = f" ({env['errors'][0]})"
+        print(f"MAIL ({args.period}): no fresh mail brief for today{reason}. "
+              f"Proceed without mail.")
+        return 0
+
+    items = env.get("items") or []
+    if not items:
+        print(f"MAIL ({args.period}): inbox scanned, nothing notable this period.")
+        return 0
+
+    lines = [f"MAIL {args.period}, {len(items)} item(s):"]
+    for it in items:
+        line = (f"- [{it.get('urgency', 'normal')}/{it.get('classification', 'unknown')}] "
+                f"{it.get('sender_label', '')} — {it.get('subject', '')} "
+                f":: {it.get('summary', '')}")
+        acts = [a.get("type") for a in (it.get("proposed_actions") or [])
+                if a.get("type") and a.get("type") != "none"]
+        if acts:
+            line += f" (proposed: {', '.join(acts)})"
+        if it.get("privacy_flags"):
+            line += f" [flags: {', '.join(it['privacy_flags'])}]"
+        lines.append(line)
+
+    block = wrap_untrusted("\n".join(lines), channel="mail")
+    print(DATA_NOT_INSTRUCTIONS + "\n" + block)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

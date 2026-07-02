@@ -55,15 +55,32 @@ DEFAULT_PROCESSES_YAML = """\
 # when: "HH:MM" | after:<process_id> | on-demand (never scheduled).
 # An invalid file fails closed: kb-tick runs nothing and logs why.
 
+# Mail briefing is ENABLED by default but reads NOTHING until you connect Gmail:
+# with no connector it degrades to available:false and exits 0, so daily/retro
+# still run. Connecting your Gmail is the consent step that activates it.
+# mail-morning/mail-evening run one tick before daily/retro so mail is guaranteed
+# to be in the brief and retro (daily/retro then run on the next tick).
+- id: mail-morning
+  enabled: true
+  when: "07:15"
+  run: kb-mail-brief --period morning --write
+  outputs: [file]
+
 - id: daily
   enabled: true
-  when: "07:30"
+  when: after:mail-morning
   run: kb-brief
   outputs: [telegram, file]
 
+- id: mail-evening
+  enabled: true
+  when: "20:30"
+  run: kb-mail-brief --period evening --write
+  outputs: [file]
+
 - id: retro
   enabled: true
-  when: "20:45"
+  when: after:mail-evening
   run: kb-retro
   outputs: [telegram, file]
 

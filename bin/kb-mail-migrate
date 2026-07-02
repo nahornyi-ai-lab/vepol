@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""kb-mail-migrate — idempotent processes.yaml migration for the mail feature.
+
+Rewires an existing install so `daily`/`retro` run behind `mail-morning` /
+`mail-evening` (mail guaranteed in the morning brief and evening retro), or
+`--revert`s it back to fixed times with the mail processes removed. The transform
+is pure text->text in `_kb_mail.migrate`; this CLI owns only the atomic 0600
+rewrite.
+
+Fail-closed: on a malformed source (ProcessConfigError) or an unmigratable file
+(MailMigrationError) it exits non-zero, prints a clear error, and leaves the file
+UNCHANGED — no rewrite, no partial file. The rewrite mirrors the
+_kb_mail/envelope.py::write_envelope pattern: mkstemp in the same dir -> fchmod
+0600 -> write -> fsync -> os.replace.
+
+Spec:  knowledge/decisions/mail-briefing-integration-2026-06-29.md
+       (spec-contract:sha256:799cd78067cf4961ca95f1a63339d3070efae1afd342c572f374dd46fc32ce26)
+Plan:  knowledge/decisions/mail-briefing-integration-build-plan-2026-07-01.md
+
+Usage:
+  kb-mail-migrate --file <path> [--revert]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_processes import ProcessConfigError  # noqa: E402
+from _kb_mail.migrate import (  # noqa: E402
+    migrate_processes,
+    revert_processes,
+    MailMigrationError,
+)
+
+
+def _atomic_write_0600(path: str, text: str) -> None:
+    """Atomically replace `path` with `text`, mode 0600. Temp file in the same
+    directory -> fchmod 0600 -> write -> flush/fsync -> os.replace, so a partial
+    write never becomes the live file."""
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    data = text.encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".processes.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="kb-mail-migrate",
+        description="Idempotent processes.yaml migration for the mail feature.",
+    )
+    ap.add_argument("--file", required=True, help="path to processes.yaml")
+    ap.add_argument("--revert", action="store_true",
+                    help="undo the migration (restore fixed times, drop mail-*)")
+    args = ap.parse_args(argv)
+
+    try:
+        with open(args.file, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as exc:
+        print(f"kb-mail-migrate: cannot read {args.file}: {exc}", file=sys.stderr)
+        return 1
+
+    # Fail closed BEFORE any write: if the transform raises, the file is untouched.
+    try:
+        result = revert_processes(text) if args.revert else migrate_processes(text)
+    except (ProcessConfigError, MailMigrationError) as exc:
+        verb = "revert" if args.revert else "migrate"
+        print(
+            f"kb-mail-migrate: refusing to {verb} {args.file}; source invalid or "
+            f"unmigratable, leaving it unchanged: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        _atomic_write_0600(args.file, result)
+    except OSError as exc:
+        print(f"kb-mail-migrate: write failed for {args.file}: {exc}", file=sys.stderr)
+        return 1
+
+    action = "reverted" if args.revert else "migrated"
+    unchanged = " (no-op)" if result == text else ""
+    print(f"kb-mail-migrate: {action} {args.file}{unchanged}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

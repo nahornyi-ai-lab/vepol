@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""kb-mail-brief — the only background Gmail reader.
+
+Reads Gmail for one period (morning|evening), minimizes it into a single
+privacy-bounded envelope, and writes it under $HUB/personal/mail/briefs/.
+Gmail auth/network/tool failure degrades to a valid available:false envelope and
+exits 0 so mail never blocks the daily brief. Only local caller/arg/schema/write
+bugs exit non-zero.
+
+Spec:  knowledge/decisions/mail-briefing-integration-2026-06-29.md
+       (spec-contract:sha256:799cd78067cf4961ca95f1a63339d3070efae1afd342c572f374dd46fc32ce26)
+Plan:  knowledge/decisions/mail-briefing-integration-build-plan-2026-07-01.md
+
+Usage:
+  kb-mail-brief --period morning|evening [--write] [--json]
+
+Test knobs:
+  KB_MAIL_DISABLE=1        -> DisabledBackend (available:false)
+  KB_MAIL_FAKE_DIR=<dir>   -> FakeBackend fixture (no network)
+  KB_MAIL_NOW=<iso8601>    -> pin "now" for deterministic windows/timestamps
+  KB_HUB=<dir>             -> hub root (default ~/knowledge)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_mail import (  # noqa: E402
+    MailDisabled, MailUnavailable, MailWriteError,
+    minimize_thread, build_envelope, write_envelope, brief_path,
+    validate_envelope,
+)
+from _kb_mail.adapter import get_adapter  # noqa: E402
+from _kb_mail.envelope import mail_dir  # noqa: E402
+
+MAX_LOOKBACK_DAYS = 3
+
+
+def _tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(os.environ.get("KB_TZ", "Europe/Madrid"))
+    except Exception:
+        return None
+
+
+def _now() -> datetime:
+    override = os.environ.get("KB_MAIL_NOW")
+    if override:
+        dt = datetime.fromisoformat(override)
+    else:
+        dt = datetime.now(_tz())
+    if dt.tzinfo is None:
+        tz = _tz()
+        dt = dt.replace(tzinfo=tz) if tz else dt.astimezone()
+    return dt
+
+
+def _period_start(period: str, now: datetime) -> datetime:
+    """Fixed lower bound for the period window before watermark catch-up."""
+    if period == "morning":
+        # since last evening
+        base = (now - timedelta(days=1)).replace(hour=20, minute=30, second=0, microsecond=0)
+    else:
+        # since this morning
+        base = now.replace(hour=7, minute=0, second=0, microsecond=0)
+    if base > now:
+        base = base - timedelta(days=1)
+    return base
+
+
+def _watermark_path(hub):
+    return mail_dir(hub) / "watermarks.json"
+
+
+def _read_watermarks(hub) -> dict:
+    p = _watermark_path(hub)
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        return {}
+
+
+def _write_watermark(hub, period: str, iso: str) -> None:
+    p = _watermark_path(hub)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data = _read_watermarks(hub)
+    data[period] = iso
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".tmp-", suffix=".json")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _window(period: str, now: datetime, hub) -> dict:
+    """Incremental window: read strictly from the last point ANY period already
+    covered (the global high-water mark) up to now. This means each run sees only
+    NEW mail — morning and evening tile the day with no overlap and no gap — and a
+    missed run naturally catches up, capped at MAX_LOOKBACK_DAYS so a long outage
+    never becomes an unbounded mailbox audit. The very first run (no watermark)
+    falls back to the fixed period window.
+
+    Using the GLOBAL max across periods (not the same-period watermark) is what
+    fixes the stale re-read: the same-period mark is always ~24h old, so it would
+    drag every normal run back a full day over mail the other period already read.
+    """
+    floor = now - timedelta(days=MAX_LOOKBACK_DAYS)
+    marks = []
+    for value in _read_watermarks(hub).values():
+        try:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None and now.tzinfo is not None:
+                continue  # ignore a malformed naive mark rather than crash
+            marks.append(dt)
+        except Exception:
+            continue
+    if marks:
+        lower = max(marks)
+        if lower < floor:
+            lower = floor
+        if lower > now:
+            lower = now
+    else:
+        lower = _period_start(period, now)  # first ever run
+    return {"from": lower.isoformat(), "to": now.isoformat()}
+
+
+_KNOWN_REASONS = ("timeout", "auth", "network", "disconnect",
+                  "unavailable", "host", "rate")
+
+
+def _reason_code(exc) -> str:
+    """Map a failure to a value from a FIXED vocabulary — never echo the
+    connector's free text. Gmail error messages can carry addresses, names, or
+    markup; echoing even a sanitized fragment would leak PII and could make the
+    strict envelope validation reject the available:false envelope, turning a
+    Gmail outage into a blocking schema failure. A fixed vocabulary guarantees
+    the unavailable envelope always validates and always exits 0."""
+    if isinstance(exc, MailDisabled):
+        return "disabled"
+    m = str(exc).lower()
+    if "not ok" in m or "notok" in m:
+        return "not-ok"
+    for r in _KNOWN_REASONS:
+        if r in m:
+            return r
+    return "error"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="kb-mail-brief")
+    ap.add_argument("--period", required=True, choices=("morning", "evening"))
+    ap.add_argument("--write", action="store_true", help="write the envelope file")
+    ap.add_argument("--json", action="store_true", help="print the envelope JSON")
+    args = ap.parse_args()
+
+    hub = pathlib.Path(os.environ.get("KB_HUB") or os.path.expanduser("~/knowledge"))
+    now = _now()
+    day = now.date().isoformat()
+    generated_at = now.isoformat()
+    window = _window(args.period, now, hub)
+
+    adapter = get_adapter()
+    advanced_watermark = None
+    reason = None
+    items = []
+    n_raw = 0
+    try:
+        raw = [t for t in adapter.fetch(args.period, window) if isinstance(t, dict)]
+        items = [minimize_thread(t) for t in raw]
+        n_raw = len(raw)
+    except MailDisabled as e:
+        reason = _reason_code(e)
+    except Exception as e:  # noqa: BLE001
+        # ANY failure reading / classifying / minimizing mail — Gmail down, a
+        # malformed or unexpected host response, a bad item shape — degrades to a
+        # valid available:false envelope. A mail problem must NEVER block the
+        # morning brief or evening retro. (Our own build/validate/write bugs are
+        # still surfaced below.)
+        reason = _reason_code(e)
+
+    if reason is None:
+        env = build_envelope(
+            period=args.period, day=day, generated_at=generated_at,
+            window=window, items=items, available=True, watermark=window["to"],
+            stats={"messages_seen": n_raw, "threads_seen": n_raw,
+                   "threads_included": len(items), "threads_deferred": 0},
+        )
+        advanced_watermark = window["to"]
+    else:
+        env = build_envelope(
+            period=args.period, day=day, generated_at=generated_at,
+            window=window, items=[], available=False, watermark=None,
+            errors=[f"gmail_unavailable:{reason}"],
+            stats={"messages_seen": 0, "threads_seen": 0,
+                   "threads_included": 0, "threads_deferred": 0},
+        )
+
+    if args.write:
+        if not validate_envelope(env):
+            # Our own build produced an envelope that fails the trust boundary —
+            # a schema regression. Fail closed before touching disk.
+            print("kb-mail-brief: internal schema error, refusing to write",
+                  file=sys.stderr)
+            return 1
+        try:
+            write_envelope(env, brief_path(args.period, day, hub))
+            if advanced_watermark:
+                _write_watermark(hub, args.period, advanced_watermark)
+        except MailWriteError as e:
+            print(f"kb-mail-brief: {e}", file=sys.stderr)
+            return 1
+
+    if args.json or not args.write:
+        print(json.dumps(env, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

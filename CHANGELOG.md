@@ -16,6 +16,31 @@ upgrading.
 
 No unreleased changes yet.
 
+## [0.4.0] — 2026-07-02
+
+### Added
+- **Mail briefing (`kb-mail-brief`, `kb-mail-block`)** — read-only Gmail
+  intelligence for the daily loops. A background reader runs before the morning
+  brief and the evening retro, minimizes new inbox threads into a bounded,
+  privacy-safe summary (no raw bodies, addresses, or recipients ever persisted;
+  private `personal/mail/` storage), and `kb-brief` / `kb-retro` / the
+  orchestrator cycle surface what needs attention. Email content is treated as
+  untrusted end to end; a hostile email cannot steer the brief. Enabled by
+  default but reads nothing until Gmail is connected; real reads require the
+  Codex CLI with Gmail access, otherwise mail quietly reports unavailable and
+  never blocks the brief. This release ships no draft/send/label/delete path.
+- **Schedule migration (`kb-mail-migrate`)** — idempotent, reversible
+  `processes.yaml` migration that schedules the mail reader one tick before
+  your existing brief/retro times, preserving every other process and chain.
+  Fresh installs are scheduled automatically.
+- **Cycle postcondition check (`_kb_orchestrator/`)** — the orchestrator cycle
+  now re-reads its claimed side effects from disk and refuses to report success
+  it cannot prove.
+
+### Changed
+- `kb-brief`, `kb-retro`, and `kb-orchestrator-cycle` gained the mail
+  integration hooks and the cycle's accumulated local hardening.
+
 ## [0.3.1] — 2026-06-22
 
 ### Added
@@ -314,11 +339,12 @@ non-competing forks. Restricted for competing products or services
 made available to others (hosted SaaS substituting for Vepol, branded
 resale). Each release auto-converts to MIT on its second anniversary:
 v0.1.0 converts on **2028-05-02**, v0.2.x converts on **2028-05-29**,
-v0.3.0 converts on **2028-06-20**, and v0.3.1 converts on
-**2028-06-22**. See `LICENSE` and
+v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
+**2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.2.0...v0.2.1

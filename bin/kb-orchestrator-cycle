@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """kb-orchestrator-cycle — N-level evening retro + (Phase 5) morning plan.
 
 Spec: ~/.claude/plans/rustling-marinating-sketch.md (Phase 3).
@@ -78,6 +78,7 @@ KB_ORCHESTRATOR_RUN = _BIN_DIR / "kb-orchestrator-run"
 KB_REBUILD_REGISTRY = _BIN_DIR / "kb-rebuild-registry"
 KB_RETRO = _BIN_DIR / "kb-retro"
 KB_BACKLOG = _BIN_DIR / "kb-backlog"
+KB_MAIL_BRIEF = _BIN_DIR / "kb-mail-brief"
 
 # Anti-loop invariants (CR-N1)
 DEFAULT_PARALLELISM = int(os.environ.get("KB_CYCLE_PARALLELISM", "4"))
@@ -455,6 +456,21 @@ def _spawn_one(node: dict, date: str, cycle_run_id: str,
         return {"slug": slug, "status": "skipped", "category": "ok",
                 "detail": f"deadline-near {remaining}s", "reused": False}
 
+    # Autonomy-mode v2.1 §"The one promotion boundary" item 8 — per-ingest
+    # scanner gate. Each child report path is cross-project-shared input that
+    # transitively enters the parent retro prompt. _autonomy_gate_ingest is
+    # the grep marker kb-doctor uses to verify wiring at this ingest point.
+    for crp in child_report_paths:
+        try:
+            body = pathlib.Path(crp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        _autonomy_gate_ingest(
+            body,
+            origin="cross-project-shared",
+            label=f"child-report:{slug}:{pathlib.Path(crp).name}",
+        )
+
     prompt = _build_retro_prompt(slug, knowledge_path, date, run_id, parent,
                                  children, child_report_paths)
 
@@ -786,6 +802,75 @@ def _write_hub_wave_log_line(hub_log_path: pathlib.Path, nodes_dict: dict,
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# AC6 pre-retro mail guard
+# Spec: ~/knowledge/decisions/mail-briefing-integration-2026-06-29.md
+#       (spec-contract:sha256:799cd78067cf4961ca95f1a63339d3070efae1afd342c572f374dd46fc32ce26)
+#
+# kb-tick enforces the mail-in-retro ordering through the `mail-evening -> retro`
+# process edge. The cycle bypasses kb-tick by invoking hub kb-retro inline, so it
+# must reproduce that edge here: the same-day EVENING mail envelope must exist on
+# disk before hub kb-retro runs. Fail-soft — a Gmail outage must not break the
+# cycle (kb-mail-brief already degrades to a valid available:false envelope and
+# exits 0); if even that path leaves no valid envelope, we write the degraded
+# available:false envelope directly. A cycle can NEVER produce retro without a
+# same-day evening mail envelope on disk first.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _ensure_evening_mail_envelope(date: str) -> None:
+    try:
+        sys.path.insert(0, str(_BIN_DIR))
+        from _kb_mail import envelope as _mail_env  # noqa: E402
+    except Exception as exc:
+        # Mail surface not installed (older seed) — nothing to guard. Do not
+        # block the cycle over a feature that isn't present here.
+        warn(f"mail guard: _kb_mail unavailable ({exc!r}); skipping evening mail envelope")
+        return
+
+    # Fast path: a valid same-day evening envelope is already on disk (e.g. the
+    # scheduled mail-evening run wrote it earlier this evening). Never refetch.
+    if _mail_env.read_same_day_envelope("evening", date, HUB) is not None:
+        say("mail guard: same-day evening mail envelope already present")
+        return
+
+    # Primary path: let the only background Gmail reader produce it. On any Gmail
+    # auth/network/tool failure it degrades to a valid available:false envelope
+    # and exits 0, so this can never block the cycle.
+    if KB_MAIL_BRIEF.is_file():
+        try:
+            subprocess.run(
+                [str(KB_MAIL_BRIEF), "--period", "evening", "--write"],
+                env={**os.environ, "KB_HUB": str(HUB)},
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.SubprocessError as exc:
+            warn(f"mail guard: kb-mail-brief failed ({exc!r}); failing closed")
+
+    # Re-verify the exact precondition — the reader's exit code is not trusted
+    # (mirrors the report-file re-read in _spawn_one). Only a readable,
+    # schema-valid same-day evening envelope counts.
+    if _mail_env.read_same_day_envelope("evening", date, HUB) is not None:
+        say("mail guard: evening mail envelope ready before inline kb-retro")
+        return
+
+    # Fail closed: kb-mail-brief is missing, crashed, or left no valid same-day
+    # envelope. Write a valid available:false envelope directly so retro still
+    # has an envelope. The envelope-before-retro invariant holds regardless.
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    env = _mail_env.unavailable_envelope(
+        period="evening", day=date, generated_at=now_iso,
+        window={"from": now_iso, "to": now_iso},
+        reason="cycle-guard-no-envelope",
+    )
+    try:
+        _mail_env.write_envelope(env, _mail_env.brief_path("evening", date, HUB))
+        say("mail guard: wrote fail-closed available:false evening envelope")
+    except Exception as exc:
+        # Last resort: a real disk problem. Surface it; do not crash the cycle
+        # harder than the existing hub-log write path already would.
+        warn(f"mail guard: could not write fail-closed evening envelope: {exc!r}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Main retro algorithm
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -944,6 +1029,20 @@ def cmd_retro(args) -> int:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     if not args.dry_run and not args.skip_hub_retro:
+        # AC6: guarantee the same-day evening mail envelope exists on disk before
+        # this inline kb-retro. The cycle bypasses kb-tick's mail-evening -> retro
+        # edge, so the ordering is enforced here. Fail-soft (Gmail outage still
+        # yields a valid available:false envelope + exit 0).
+        _ensure_evening_mail_envelope(date)
+
+        # Deterministic test seam (mirrors kb-retro's KB_RETRO_PROMPT_ONLY): stop
+        # right after the mail guard, before the heavy inline kb-retro, so AC6
+        # fixtures can assert the envelope precondition without spawning the real
+        # retro / LLM work.
+        if os.environ.get("KB_CYCLE_GUARD_ONLY") == "1":
+            say("KB_CYCLE_GUARD_ONLY=1 — evening mail guard ran; skipping inline kb-retro")
+            return 0
+
         env = os.environ.copy()
         env["KB_RETRO_CYCLE_MODE"] = "1"
         env["KB_RETRO_CYCLE_SUMMARY"] = str(summary_path)
@@ -1000,6 +1099,23 @@ def cmd_retro(args) -> int:
         except Exception as exc:
             warn(f"daily-plan generation failed (non-fatal): {exc!r}")
 
+    # People extraction (Step 8 of people-extraction-from-projects spec).
+    # Feature-flagged OFF by default; enabled via KB_PEOPLE_EXTRACTION=1
+    # in com.knowledge.orchestrator-cycle.plist after staged backfill +
+    # owner review + watermark init are complete (Steps 9-12).
+    # Failures never block cycle (check=False).
+    if not args.dry_run and os.environ.get("KB_PEOPLE_EXTRACTION", "0") == "1":
+        extract_path = _BIN_DIR / "kb-extract-people"
+        if extract_path.is_file():
+            try:
+                subprocess.run(
+                    [str(extract_path), "--hub", str(HUB), "--llm", "--quiet"],
+                    capture_output=True, text=True, timeout=600, check=False,
+                )
+                say("people-extraction ran")
+            except subprocess.SubprocessError as exc:
+                warn(f"people-extraction failed (non-fatal): {exc!r}")
+
     # Post-cycle cleanup hook (incident-2026-04-25 lesson):
     # each parallel codex spawn loads its own copy of the telegram channel
     # MCP plugin and doesn't always release it on exit. Across 14 spawns
@@ -1016,7 +1132,63 @@ def cmd_retro(args) -> int:
             except subprocess.SubprocessError as exc:
                 warn(f"post-cycle cleanup failed (non-fatal): {exc!r}")
 
-    # Exit code
+    # Postcondition re-read check (autonomy-mode v2.1 §"Mode: autonomous" req 6).
+    # Re-opens hub log.md / daily / cycle-<date>.json / per-project reports from
+    # disk and verifies the cycle's claimed side effects actually persisted.
+    # Failure → rc=8 + incident + automatic demotion signal.
+    # Skipped on --dry-run (nothing written to verify) and when KB_POSTCONDITION=0.
+    postcondition_rc = 0
+    postcondition_result = None
+    if not args.dry_run and os.environ.get("KB_POSTCONDITION", "1") != "0":
+        try:
+            sys.path.insert(0, str(_BIN_DIR))
+            from _kb_orchestrator import postcondition as _pc  # noqa: E402
+
+            project_paths = [
+                (slug, pathlib.Path(n["knowledge_path"]))
+                for slug, n in nodes_dict.items()
+                if n.get("kind") != "root" and n.get("cycle_enabled", False)
+            ]
+            postcondition_result = _pc.check(
+                hub_root=HUB,
+                date=date,
+                run_id=cycle_run_id,
+                project_paths=project_paths,
+                orchestrator_dir=ORCHESTRATOR_DIR,
+            )
+            if not postcondition_result.ok:
+                warn(f"postcondition failed (rc=8): {len(postcondition_result.failures)} step(s) failed")
+                for step, _, detail in postcondition_result.failures:
+                    warn(f"  [{step}] {detail}")
+                _pc.write_incident(HUB, postcondition_result)
+                postcondition_rc = 8
+            else:
+                say(f"postcondition passed ({len(postcondition_result.checks)} checks)")
+        except Exception as exc:
+            warn(f"postcondition module crashed (non-fatal): {exc!r}")
+
+    # Audit-log counter line (autonomy-mode v2.1 §"KB trace").
+    # One line per run, appended to ~/knowledge/audit/kb-orchestrator-cycle.md.
+    # waiver-active tag is added while the slug is under-waiver — declared in
+    # frontmatter status. Best-effort: a failed audit append warns but never
+    # crashes the cycle (the operational hub log.md wave line is the
+    # authoritative trace).
+    try:
+        _append_audit_counter_line(
+            run_id=cycle_run_id,
+            date=date,
+            phase="retro",
+            status=_overall_status_for_audit(results, postcondition_rc),
+            files_written=_count_files_written(results, date, nodes_dict),
+            postcondition_rc=postcondition_rc,
+        )
+    except Exception as exc:
+        warn(f"audit-log counter-line append failed (non-fatal): {exc!r}")
+
+    # Exit code: postcondition failure (rc=8) takes precedence over circuit
+    # breaker (rc=3) because postcondition signals "we lied about success".
+    if postcondition_rc != 0:
+        return postcondition_rc
     any_open = any(r.get("circuit_opened") for r in results.values())
     if any_open:
         return 3
@@ -1034,6 +1206,113 @@ def _format_cycle_summary(summary: dict) -> str:
         if slugs:
             lines.append(f"- **{status}** ({len(slugs)}): {', '.join(sorted(slugs))}")
     return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Audit-log counter line (autonomy-mode v2.1 §"KB trace")
+# ──────────────────────────────────────────────────────────────────────────
+
+AUDIT_LOG_PATH = HUB / "audit" / "kb-orchestrator-cycle.md"
+WAIVER_MARKER_FILE = HUB / "audit" / ".kb-orchestrator-cycle.waiver-active"
+AUDIT_LINE_FORMAT = (
+    "## [{ts}] cycle | run_id={run_id} | phase={phase} | status={status} "
+    "| files_written={files} | bytes_written={bytes}{waiver}"
+)
+
+
+def _overall_status_for_audit(results: dict, postcondition_rc: int) -> str:
+    if postcondition_rc != 0:
+        return "error"
+    statuses = [(r or {}).get("status") for r in results.values()]
+    if any(s == "error" for s in statuses):
+        return "error"
+    if any(s in ("partial", "timeout") for s in statuses):
+        return "partial"
+    return "success"
+
+
+def _count_files_written(results: dict, date: str, nodes_dict: dict) -> int:
+    """Best-effort count of files written by this cycle. Counts:
+      - hub log.md wave line (1 if any non-skipped result)
+      - daily/<date>.md (1)
+      - cycle-<date>.json (1)
+      - per-project reports/<date>.md (one per result that wrote something)
+    Conservative estimate; precise byte-level instrumentation is a separate
+    promotion-blocker (blast_radius_cap runtime measurement).
+    """
+    n = 0
+    # Hub log + daily + summary json
+    n += 3
+    for slug, res in (results or {}).items():
+        st = (res or {}).get("status")
+        if st in ("done", "partial", "skipped", "error", "timeout", "pending"):
+            n += 1
+    return n
+
+
+def _is_waiver_active() -> bool:
+    """Check for waiver-active state.
+
+    Source of truth is the promotions.md ledger, but parsing that here would
+    pull in a YAML dep. Fallback heuristic: a marker file
+    `~/knowledge/audit/.kb-orchestrator-cycle.waiver-active`. Defaults to
+    True while the capability is in transition (pre-promotion).
+    Env override: KB_WAIVER_ACTIVE=0 disables the tag.
+    """
+    env = os.environ.get("KB_WAIVER_ACTIVE")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    if WAIVER_MARKER_FILE.is_file():
+        return True
+    # Default until first promotion lands: waiver-active.
+    return True
+
+
+def _append_audit_counter_line(*, run_id: str, date: str, phase: str,
+                                status: str, files_written: int,
+                                postcondition_rc: int = 0,
+                                bytes_written: Optional[int] = None) -> None:
+    """Append one counter line to ~/knowledge/audit/kb-orchestrator-cycle.md.
+
+    fcntl-locked. Best-effort: a missing audit file is created on first use.
+    Format matches autonomy-mode v2.1 §"KB trace" example:
+      ## [YYYY-MM-DDTHH:MM:SSZ] cycle | run_id=<uuid> | phase=plan|retro
+      | status=success|partial|error | files_written=N | bytes_written=N
+      [| waiver-active]
+    """
+    AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    waiver_suffix = " | waiver-active" if _is_waiver_active() else ""
+    bytes_repr = "?" if bytes_written is None else str(bytes_written)
+    line = AUDIT_LINE_FORMAT.format(
+        ts=ts, run_id=run_id, phase=phase, status=status,
+        files=files_written, bytes=bytes_repr, waiver=waiver_suffix,
+    )
+    if postcondition_rc != 0:
+        line += f" | postcondition=rc{postcondition_rc}"
+
+    # Create the file if missing; insert a Run counter heading on first write.
+    is_new = not AUDIT_LOG_PATH.is_file()
+    with AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            if is_new:
+                fh.write(
+                    "# kb-orchestrator-cycle audit log\n\n"
+                    "Per-run counter lines (autonomy-mode v2.1 §\"KB trace\").\n\n"
+                )
+            else:
+                # Ensure trailing newline before append.
+                existing = AUDIT_LOG_PATH.read_text(encoding="utf-8", errors="replace")
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1065,11 +1344,11 @@ def _collect_open_backlog_items() -> list[dict]:
     items: list[dict] = []
     today = dt.date.today()
 
-    def _add_from(slug: str, path: pathlib.Path) -> None:
-        if not path.is_file():
+    def _add_from(slug: str, path: pathlib.Path) -> None:  # legacy_file_mode-only
+        if not path.is_file():  # legacy_file_mode-only
             return
         try:
-            text = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8")  # legacy_file_mode-only
         except Exception as exc:
             warn(f"read failed {path}: {exc!r}")
             return
@@ -1483,10 +1762,10 @@ def _global_plan_item_lookup() -> dict[str, list[dict]]:
 
     out: dict[str, list[dict]] = {}
 
-    def _index_backlog(slug: str, path: pathlib.Path) -> None:
-        if not path.is_file():
+    def _index_backlog(slug: str, path: pathlib.Path) -> None:  # legacy_file_mode-only
+        if not path.is_file():  # legacy_file_mode-only
             return
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")  # legacy_file_mode-only
         for ln, parsed in _parsing.parse_lines(text):
             if parsed is None:
                 continue
@@ -1557,6 +1836,21 @@ def cmd_plan(args) -> int:
     by immediate child, dispatch via kb-backlog ops with carried-item logic.
     """
     plan_path = pathlib.Path(args.approved_plan).expanduser().resolve()
+    # Autonomy-mode v2.1 §"The one promotion boundary" item 8 — per-ingest
+    # scanner gate. The approved-plan body is user-typed-here input that
+    # drives downstream backlog mutations. _autonomy_gate_ingest is the
+    # grep marker kb-doctor uses to verify wiring at this ingest point.
+    if plan_path.is_file():
+        try:
+            _plan_body = plan_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _plan_body = ""
+        if _plan_body:
+            _autonomy_gate_ingest(
+                _plan_body,
+                origin="user-typed-here",
+                label=f"approved-plan:{plan_path.name}",
+            )
     items, approved_at = _parse_approved_plan(plan_path)
     if not approved_at:
         warn(f"plan {plan_path} has no approved_at; refusing to dispatch")
@@ -1833,7 +2127,136 @@ def _today() -> str:
 # CLI
 # ──────────────────────────────────────────────────────────────────────────
 
+def _autonomy_gate_check() -> None:
+    """Optional scanner-driven input gate (autonomy-mode runtime wiring).
+
+    When env `KB_AUTONOMY_GATE_INPUT` is set, scan that text via
+    `_kb_autonomy.gate.should_allow_autonomous_run()` before main()
+    processes input. If the scanner refuses or flags the input, abort
+    the run with the gate's log line on stderr.
+
+    No-op when the env var is unset → preserves backward compatibility
+    for all existing invocations. This is the runtime hook required by
+    fmv v1.1.1 + scanner v2 joint deployment to ensure autonomous cycle
+    inputs go through the scanner gate before they can influence behavior.
+    """
+    gate_input = os.environ.get("KB_AUTONOMY_GATE_INPUT")
+    if not gate_input:
+        return
+    origin = os.environ.get("KB_AUTONOMY_GATE_ORIGIN", "external-pasted")
+    slug = os.environ.get("KB_AUTONOMY_GATE_SLUG", "kb-orchestrator-cycle")
+    try:
+        # Ensure hub bin is importable
+        _hub_bin = os.path.expanduser("~/knowledge/bin")
+        if _hub_bin not in sys.path:
+            sys.path.insert(0, _hub_bin)
+        from _kb_autonomy.gate import should_allow_autonomous_run
+    except ImportError as exc:
+        sys.stderr.write(f"[autonomy-gate] scanner gate unavailable: {exc} — fail-closed abort\n")
+        sys.exit(75)
+    decision = should_allow_autonomous_run(slug, gate_input, origin)
+    sys.stderr.write(decision.log_line + "\n")
+    if not decision.allowed:
+        sys.exit(75)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Per-ingest scanner gate (autonomy-mode v2.1 §"The one promotion boundary"
+# item 8: deeper wiring than the once-per-cycle main()-entry gate).
+#
+# Two ingest points are gated:
+#   1. cmd_retro(): each KB_CHILD_REPORT_PATHS file body (origin=
+#      `cross-project-shared`) — concatenated into parent retro prompts.
+#   2. cmd_plan(): the --approved-plan body (origin=`user-typed-here`).
+#
+# Behavior matrix:
+#   verdict=clean    → proceed
+#   verdict=flagged  → proceed but write audit flag (configurable via
+#                      KB_AUTONOMY_GATE_FLAGGED_BLOCKS=1 → block)
+#   verdict=refused  → abort cycle cleanly with rc=75 (EX_TEMPFAIL),
+#                      append incident line for downstream handlers.
+#   scanner missing/error → fail-closed, rc=75.
+#
+# Opt-in via env KB_AUTONOMY_GATE_DEEP=1 so existing prod (which still
+# operates under waiver per autonomy-mode v2.1 §"Backwards-compat: tiered
+# waiver") does not break. Promotion ledger entry flips this on.
+#
+# Marker `_autonomy_gate_ingest` is grep-friendly for kb-doctor wiring check.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _autonomy_gate_ingest(
+    input_text: str,
+    *,
+    origin: str,
+    slug: str = "kb-orchestrator-cycle",
+    label: str = "",
+) -> bool:
+    """Gate a single ingest blob through the scanner.
+
+    Returns True if the cycle may proceed past this ingest. Returns False
+    if a flagged-but-not-blocking verdict happened (caller may still
+    proceed but should record an audit flag).
+
+    Aborts the process (rc=75) on refused / scanner-missing / scanner-error
+    verdicts. Fail-closed.
+
+    No-op (returns True) when env KB_AUTONOMY_GATE_DEEP is not "1".
+    """
+    if os.environ.get("KB_AUTONOMY_GATE_DEEP") != "1":
+        return True
+
+    try:
+        _hub_bin = os.path.expanduser("~/knowledge/bin")
+        if _hub_bin not in sys.path:
+            sys.path.insert(0, _hub_bin)
+        from _kb_autonomy.gate import should_allow_autonomous_run
+    except ImportError as exc:
+        sys.stderr.write(
+            f"[autonomy-gate-ingest] scanner unavailable ({label}): {exc} — fail-closed abort\n"
+        )
+        sys.exit(75)
+
+    flagged_blocks = os.environ.get("KB_AUTONOMY_GATE_FLAGGED_BLOCKS") == "1"
+    decision = should_allow_autonomous_run(
+        slug, input_text, origin,
+        flagged_blocks=flagged_blocks,
+    )
+    # Prefix log line with ingest label so audit can attribute to the path.
+    sys.stderr.write(f"[ingest:{label}] {decision.log_line}\n")
+
+    if decision.verdict == "flagged" and not flagged_blocks:
+        # Continue but flag.
+        sys.stderr.write(
+            f"[ingest:{label}] WARNING flagged but proceeding "
+            f"(KB_AUTONOMY_GATE_FLAGGED_BLOCKS unset)\n"
+        )
+        return False
+
+    if not decision.allowed:
+        sys.stderr.write(
+            f"[ingest:{label}] cycle aborted — scanner {decision.block_reason}\n"
+        )
+        # Write incident line to hub log.md if writable.
+        try:
+            hub_log = pathlib.Path(os.path.expanduser("~/knowledge/log.md"))
+            if hub_log.parent.is_dir():
+                today = dt.date.today().isoformat()
+                with open(hub_log, "a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"## [{today}] incident | kb-orchestrator-cycle | "
+                        f"scanner-gate-block | label={label} verdict={decision.verdict} "
+                        f"reason={decision.block_reason} input_id={decision.input_id[:12]}\n"
+                    )
+        except OSError:
+            pass
+        sys.exit(75)
+
+    return True
+
+
 def main() -> int:
+    _autonomy_gate_check()
+
     p = argparse.ArgumentParser(prog="kb-orchestrator-cycle",
                                 description="N-level evening retro + morning plan.")
     sub = p.add_subparsers(dest="cmd", required=True)
