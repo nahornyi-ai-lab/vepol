@@ -16,6 +16,37 @@ upgrading.
 
 No unreleased changes yet.
 
+## [0.6.0] — 2026-07-11
+
+### Added
+- **On-demand local Qwen TTS runtime.** `kb-tts-install` installs the pinned
+  Qwen3-TTS 1.7B VoiceDesign runtime and model; `kb-tts-render` loads it only
+  for a render and exits afterward. No daemon, container, LaunchAgent, model
+  weights, or credentials ship in the repository.
+- **Telegram MP3 transport.** `kb-channel-send-audio` uploads the generated
+  file through Bot API `sendAudio`, with bounded known-rejection versus
+  ambiguous-delivery states and secret-safe structured results.
+- **Selectable digest audio route.** The finished morning/evening text can be
+  sent either to the existing NotebookLM Audio Overview adapter or to local
+  Qwen followed by Telegram. Configure it with
+  `kb-digest-migrate --audio-backend notebooklm|local_qwen` or the matching
+  installer option.
+
+### Changed
+- **Digest text generation is unchanged; delivery is selected afterward.**
+  `[file, notebooklm_audio]` keeps the Audio Overview in NotebookLM without
+  Telegram or download. `[file, telegram_audio]` sends the same finalized text
+  through the existing on-demand Qwen3-TTS 1.7B runtime and Telegram
+  `sendAudio`. There is no automatic fallback between the two adapters.
+
+### Fixed
+- **Same-day manual audio can no longer suppress a fresher scheduled digest.**
+  Morning manifests now carry a versioned semantic snapshot of the complete
+  captured input. An unchanged snapshot remains an external-call no-op; newer
+  learning, Money Radar, brief, mail, idea, project, board, log, or escalation
+  content triggers one serialized rebuild. Malformed snapshots and ambiguous
+  Telegram uploads remain fail-closed.
+
 ## [0.5.0] — 2026-07-02
 
 ### Added

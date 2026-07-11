@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Render Russian speech locally with the pinned Qwen3-TTS snapshot, then exit."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
+MODEL_REVISION = "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"
+PYTHON_VERSION = "3.12.9"
+MLX_AUDIO_VERSION = "0.4.5"
+DEFAULT_INSTRUCT = (
+    "A natural native Russian male narrator with clear diction, calm confident delivery, "
+    "restrained podcast-news style, medium pace, and no theatrical exaggeration."
+)
+
+
+class InterruptedRender(Exception):
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
+def process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def process_identity(pid: int) -> str | None:
+    try:
+        value = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return " ".join(value.split()) if value else None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def alive_observed(observed: dict[int, str]) -> list[int]:
+    return [pid for pid, identity in observed.items() if process_identity(pid) == identity]
+
+
+def terminate_observed(observed: dict[int, str]) -> None:
+    remaining = alive_observed(observed)
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 2.0
+    while alive_observed(observed) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    for pid in alive_observed(observed):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 3.0
+    while alive_observed(observed) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def terminate_group(
+    pgid: int, process: subprocess.Popen[bytes], observed: dict[int, str]
+) -> None:
+    if process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 2.0
+    while process_group_exists(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 3.0
+    while process_group_exists(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+    terminate_observed(observed)
+
+
+def observe_group(pgid: int, observed: dict[int, str], listeners: set[str]) -> None:
+    try:
+        listing = subprocess.check_output(
+            ["ps", "-axo", "pid=,pgid=,lstart="], text=True, stderr=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) >= 7 and int(fields[1]) == pgid:
+            observed.setdefault(int(fields[0]), " ".join(fields[2:7]))
+    for pid in tuple(observed):
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-iUDP"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            listeners.update(line for line in result.stdout.splitlines()[1:] if line.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def load_install(home: Path) -> tuple[dict[str, object], Path, Path]:
+    marker = home / "install.json"
+    if not marker.is_file():
+        raise SystemExit(f"TTS is not installed; run kb-tts-install first ({marker} missing)")
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    required = {
+        "schema": 1,
+        "python_version": PYTHON_VERSION,
+        "mlx_audio_version": MLX_AUDIO_VERSION,
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+    }
+    for key, expected in required.items():
+        if data.get(key) != expected:
+            raise SystemExit(f"installed runtime mismatch for {key}; rerun kb-tts-install")
+    model = Path(str(data.get("model_path", "")))
+    python = Path(os.environ.get("KB_TTS_PYTHON", str(home / "venv/bin/python")))
+    if not model.is_dir() or not python.is_file():
+        raise SystemExit("installed runtime/model is incomplete; rerun kb-tts-install")
+    return data, model, python
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--text")
+    inputs.add_argument("--file", type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--language", default="Russian")
+    parser.add_argument("--voice-instruct", default=DEFAULT_INSTRUCT)
+    args = parser.parse_args()
+
+    extension = args.out.suffix.lower()
+    if extension not in {".wav", ".mp3"}:
+        parser.error("--out must end in .wav or .mp3")
+
+    home = Path(os.environ.get("KB_TTS_HOME", "~/.local/share/vepol-qwen-tts")).expanduser().resolve()
+    _, model, python = load_install(home)
+    worker = Path(os.environ.get("KB_TTS_WORKER", str(Path(__file__).resolve().parent / "_kb_tts/worker.py")))
+    if not worker.is_file():
+        raise SystemExit(f"TTS worker is missing: {worker}")
+    ffmpeg = os.environ.get("KB_TTS_FFMPEG") or shutil.which("ffmpeg")
+    if extension == ".mp3" and (
+        not ffmpeg or not Path(ffmpeg).is_file() or not os.access(ffmpeg, os.X_OK)
+    ):
+        raise SystemExit("ffmpeg is required for MP3 output; install it before rendering")
+
+    offline_env = os.environ.copy()
+    offline_env.update({
+        "HF_HOME": str(home / "huggingface"),
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+    })
+
+    # Resolve and validate the complete local runtime before reading sensitive input.
+    if args.text is not None:
+        text = args.text
+    else:
+        try:
+            text = args.file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"cannot read input file: {exc}") from exc
+    if not text.strip():
+        parser.error("input text is empty")
+
+    args.out = args.out.expanduser().resolve()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    temp_root = home / "tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    observed: dict[int, str] = {}
+    listeners: set[str] = set()
+    started = datetime.now(timezone.utc).isoformat()
+    process: subprocess.Popen[bytes] | None = None
+    pgid: int | None = None
+    exit_code = 1
+
+    with tempfile.TemporaryDirectory(prefix="render.kb-tts-", dir=temp_root) as temp_name:
+        temp_dir = Path(temp_name)
+        input_path = temp_dir / "input.txt"
+        config_path = temp_dir / "config.json"
+        temp_output = temp_dir / f"output{extension}"
+        input_path.write_text(text, encoding="utf-8")
+        config_path.write_text(
+            json.dumps(
+                {
+                    "input_path": str(input_path),
+                    "output_path": str(temp_output),
+                    "model_path": str(model),
+                    "model_id": MODEL_ID,
+                    "model_revision": MODEL_REVISION,
+                    "language": args.language,
+                    "voice_instruct": args.voice_instruct,
+                    "ffmpeg": ffmpeg or "ffmpeg",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        previous_handlers: dict[int, object] = {}
+        signal_seen: list[int] = []
+
+        def interrupted(signum: int, _frame: object) -> None:
+            if signal_seen:
+                return
+            signal_seen.append(signum)
+            raise InterruptedRender(signum)
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, interrupted)
+        try:
+            watched_signals = {signal.SIGINT, signal.SIGTERM}
+            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched_signals)
+            try:
+                delay = float(os.environ.get("KB_TTS_TEST_PRE_POPEN_DELAY", "0"))
+                if delay > 0:
+                    time.sleep(delay)
+                process = subprocess.Popen(
+                    [str(python), str(worker), "--config", str(config_path)],
+                    env=offline_env,
+                    start_new_session=True,
+                )
+                pgid = process.pid
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            while process.poll() is None:
+                observe_group(pgid, observed, listeners)
+                time.sleep(0.1)
+            observe_group(pgid, observed, listeners)
+            exit_code = int(process.returncode or 0)
+            if exit_code != 0:
+                raise SystemExit(f"TTS worker failed with exit {exit_code}")
+            lingering = alive_observed(observed)
+            if process_group_exists(pgid) or lingering:
+                terminate_group(pgid, process, observed)
+                raise SystemExit("TTS worker left a resident process behind")
+            if not temp_output.is_file() or temp_output.stat().st_size == 0:
+                raise SystemExit("TTS worker produced no audio")
+            os.replace(temp_output, args.out)
+        except InterruptedRender as exc:
+            exit_code = 128 + exc.signum
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(signum, signal.SIG_IGN)
+            if process is not None and pgid is not None:
+                terminate_group(pgid, process, observed)
+            raise SystemExit(exit_code)
+        except BaseException:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(signum, signal.SIG_IGN)
+            if process is not None and pgid is not None:
+                terminate_group(pgid, process, observed)
+            raise
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+            evidence = {
+                "started_at": started,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "process_group": pgid,
+                "observed_pids": sorted(observed),
+                "lingering_observed_pids": alive_observed(observed),
+                "network_entries_observed": sorted(listeners),
+                "exit_code": exit_code,
+                "process_group_gone": pgid is None or not process_group_exists(pgid),
+                "offline": True,
+            }
+            evidence_temp = home / "last-render.json.tmp"
+            evidence_temp.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            os.replace(evidence_temp, home / "last-render.json")
+
+    print(args.out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

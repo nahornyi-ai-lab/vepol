@@ -102,4 +102,27 @@ else
     || fail "AC7(unavail): raw content leaked in unavailable path"
 fi
 
+# ── v0.5.1 AC9: previous-day retro cannot masquerade as today's morning brief ─
+HUB_STALE="$TMP/hub-stale"; mkdir -p "$HUB_STALE/personal" "$HUB_STALE/briefs"
+ln -s "$SRC_BIN" "$HUB_STALE/bin"
+: > "$HUB_STALE/personal/.secrets"
+cat > "$HUB_STALE/briefs/2026-06-30.md" <<'EOF'
+## Morning brief
+
+previous-day-morning-plan-marker
+
+## Retro (20:45)
+
+previous-day-retro-marker must not appear in today's morning digest input.
+EOF
+S=$(KB_HUB="$HUB_STALE" KB_VEPOL_DEV="$NOVEPOL" KB_DIGEST_PROMPT_ONLY=1 \
+    "$SRC_BIN/kb-morning-digest" --date "$DAY" 2>/dev/null)
+if [[ -z "$S" ]]; then
+  fail "v0.5.1 AC9: stale-brief fixture produced no output"
+else
+  [[ "$S" != *"previous-day-retro-marker"* ]] \
+    && ok "v0.5.1 AC9: previous-day Retro span is not labeled as today's morning brief" \
+    || fail "v0.5.1 AC9: previous-day Retro span leaked into today's morning brief input"
+fi
+
 echo; echo "PASS=$PASS FAIL=$FAIL"; [[ "$FAIL" == "0" ]]
