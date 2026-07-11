@@ -17,12 +17,10 @@ Every background process is declared with exactly five fields:
 
 `outputs` semantics: telegram/people/calendar are user-facing channels;
 `file` is internal agent memory and never counts as user delivery;
-`notebooklm_audio` is on-demand only by default — background NotebookLM is
-banned — EXCEPT the explicit, quota-graceful digest processes in
-SCHEDULED_NOTEBOOKLM_ALLOWED, each bound to its EXACT run command (spec:
-daily-audio-digests 2026-07-02, D4). Any other scheduled process declaring
-`notebooklm_audio` — including an allowlisted id with a different run
-command — still fails closed.
+`notebooklm_audio` and `telegram_audio` may be scheduled only for the explicit
+digest processes in SCHEDULED_TELEGRAM_AUDIO_ALLOWED, each bound to its EXACT
+run command and exactly one canonical `[file, <audio>]` pair. Any other
+scheduled audio declaration fails closed.
 
 The file is a strict, hand-parseable YAML subset: blank lines, full-line
 `#` comments, blocks starting with `- id: <id>`, fields indented exactly
@@ -47,18 +45,16 @@ import sys
 import tempfile
 
 REQUIRED_FIELDS = ("id", "enabled", "when", "run", "outputs")
-ALLOWED_OUTPUTS = ("telegram", "people", "calendar", "file", "notebooklm_audio")
+ALLOWED_OUTPUTS = (
+    "telegram", "people", "calendar", "file", "notebooklm_audio", "telegram_audio",
+)
 
-# Scheduled (non on-demand) processes allowed to emit `notebooklm_audio`,
+# Scheduled (non on-demand) processes allowed to emit one digest audio route,
 # bound to their EXACT run command — id-only matching would let a process
 # merely NAMED like a digest schedule audio for an arbitrary command. Each
-# entry must soft-fail on NotebookLM rate-limit/quota (no hang, no per-tick
-# hammering); kb-morning-digest is the reference quota-graceful impl and
-# additionally enforces its own background runtime guard. This validator
-# governs DECLARED scheduled audio only — it cannot constrain arbitrary local
-# scripts calling the notebooklm CLI directly (spec: daily-audio-digests
-# 2026-07-02, D4).
-SCHEDULED_NOTEBOOKLM_ALLOWED = {
+# entry must use the reviewed digest dispatcher and fail closed on unexpected
+# callers; kb-morning-digest additionally enforces its own runtime guard.
+SCHEDULED_TELEGRAM_AUDIO_ALLOWED = {
     "morning-digest": "kb-morning-digest",
     "evening-digest": "kb-morning-digest --period evening",
 }
@@ -124,10 +120,11 @@ DEFAULT_PROCESSES_YAML = """\
   run: kb-learning-arxiv --text-only
   outputs: [telegram, file]
 
-# Daily audio digests (morning recap + short evening retro recap). The
-# NotebookLM audio activates only when the notebooklm CLI is connected;
-# without it both runs are file-only and exit 0. If you later enable
-# money-radar, re-run kb-digest-migrate to re-anchor morning-digest behind it.
+# Selectable audio digests (morning recap + short evening retro recap).
+# Backward-compatible fresh-install default is NotebookLM; use
+# kb-digest-migrate --audio-backend local_qwen after kb-tts-install to switch.
+# If you later enable money-radar, re-run kb-digest-migrate to re-anchor the
+# morning digest behind it.
 - id: morning-digest
   enabled: true
   when: after:learning
@@ -309,16 +306,28 @@ def parse_processes_text(text: str) -> list[dict]:
                 f"process {p['id']!r}: when must be \"HH:MM\", "
                 f"after:<process_id>, or on-demand — got {when!r}"
             )
-        if "notebooklm_audio" in p["outputs"] and when != "on-demand":
-            allowed_run = SCHEDULED_NOTEBOOKLM_ALLOWED.get(p["id"])
+        scheduled_audio = [
+            output for output in p["outputs"]
+            if output in ("notebooklm_audio", "telegram_audio")
+        ]
+        if scheduled_audio and when != "on-demand":
+            allowed_run = SCHEDULED_TELEGRAM_AUDIO_ALLOWED.get(p["id"])
             if allowed_run is None or (
                 normalized_run_argv(p["run"]) != normalized_run_argv(allowed_run)
             ):
                 raise ProcessConfigError(
-                    f"process {p['id']!r}: scheduled notebooklm_audio is only "
-                    f"allowed for the quota-graceful digest processes "
-                    f"{sorted(SCHEDULED_NOTEBOOKLM_ALLOWED)} with their exact "
+                    f"process {p['id']!r}: scheduled audio is only "
+                    f"allowed for the managed digest processes "
+                    f"{sorted(SCHEDULED_TELEGRAM_AUDIO_ALLOWED)} with their exact "
                     f"run commands; others must be on-demand"
+                )
+            if p["outputs"] not in (
+                ["file", "notebooklm_audio"], ["file", "telegram_audio"]
+            ):
+                raise ProcessConfigError(
+                    f"process {p['id']!r}: managed scheduled digest outputs must "
+                    "be exactly [file, notebooklm_audio] or "
+                    "[file, telegram_audio]"
                 )
 
     # after:* chains must be acyclic, else dependents would deadlock silently.

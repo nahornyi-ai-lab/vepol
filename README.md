@@ -116,11 +116,12 @@ unit tests. The list grows release by release; see
   `processes.yaml` and gated through `kb-tick`. Five fields per
   process — `id`, `enabled`, `when`, `run`, `outputs` — and one file
   to read to see which routines run on your machine. Background runs
-  are text-first by default; scheduled NotebookLM audio is allowed only
-  for the two daily digest processes (each bound to its exact command,
-  file-only until you connect the NotebookLM CLI) — everything else
-  stays on-demand, never a silent background cost. A missing config
-  self-heals with safe defaults.
+  are text-first by default. The two exact daily digest commands may send the
+  finalized text either to NotebookLM Audio Overview or to the on-demand Qwen
+  runtime followed by Telegram; other scheduled commands remain fail-closed.
+  Fresh installs default to NotebookLM, while local Qwen is an explicit choice
+  that runs `kb-tts-install`; the model exits after each render instead of
+  running as a service. A missing config self-heals with safe defaults.
 
 - **Idea Intake** — an event-driven process for ideas you write or dictate:
   `kb-idea capture` creates canonical markdown cards under `personal/ideas/`,
@@ -288,9 +289,26 @@ kb-demo brief          # see what a synthesized brief looks like
 ```
 
 That's the value loop. Methodology comes after, when you want it.
-Daily research delivers a text digest out of the box; if you want audio —
-the daily morning/evening digests and the on-demand research mode —
-authenticate once with `notebooklm login && notebooklm status`. The default topic is automatic; use
+Daily research delivers text out of the box. Morning/evening digest text is
+generated the same way for both audio routes. Choose where that finished text
+goes:
+
+```bash
+# Audio Overview remains in NotebookLM; nothing is sent to Telegram.
+kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend notebooklm
+
+# Or render locally with Qwen and send the MP3 to Telegram.
+kb-tts-install
+kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend local_qwen
+```
+
+For Qwen, configure `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_TOKEN`) plus
+`TELEGRAM_CHAT_ID` in `~/knowledge/personal/.secrets`. Nothing stays running:
+Qwen loads for one render, sends the MP3, and exits. For NotebookLM,
+authenticate with `notebooklm login && notebooklm status`; the Audio Overview
+stays there and is not downloaded. The installer exposes the same choice via
+`--audio-backend notebooklm|local_qwen`; upgrades without that option preserve
+the existing route. The default research topic is automatic; use
 `kb-daily-research --set-topic "..."` only when you want to steer it.
 
 ## Status

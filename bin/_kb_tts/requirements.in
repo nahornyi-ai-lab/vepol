@@ -1,0 +1,2 @@
+# Root requirement for the isolated Qwen3-TTS runtime.
+mlx-audio==0.4.5

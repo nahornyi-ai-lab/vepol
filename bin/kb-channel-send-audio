@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""kb-channel-send-audio — deliver one MP3 through Telegram Bot API sendAudio.
+
+Usage:
+    kb-channel-send-audio <message_type> <audio.mp3> [caption]
+
+Credentials (per-variable: env wins, $KB_HUB/personal/.secrets fills gaps,
+same compatibility keys as kb-channel-send):
+    TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN as a backwards-compat alias)
+    TELEGRAM_CHAT_ID
+
+Endpoint: KB_TG_API_BASE overrides the API base for tests; production
+default is https://api.telegram.org.
+
+Contract (spec-contract:sha256:4d1e9ea4e8d09c3725739f269407c63200d4d6dd40489f6b35e87533b7467fd4, D3):
+exactly one secret-free JSON object on stdout, no secret on stderr, and the
+bot token lives only inside this process — pure stdlib transport, no child
+process, token never in any argv.
+
+Exit codes:
+    0  — {"outcome":"success","message_id":...,"audio":{...}} — Telegram
+         accepted; audio is normalized to file_id/file_unique_id/duration
+         plus optional file_name/mime_type/file_size/title/performer.
+   20  — {"outcome":"known_rejection","error":...} — definitely unaccepted:
+         local validation, missing credentials/file, failure to reach the
+         server, or a complete Telegram HTTP/JSON rejection (ok:false,
+         including a complete HTTP error body).
+   21  — {"outcome":"ambiguous","error":...} — request transmission may have
+         begun but there is no complete acceptance/rejection response:
+         timeout, disconnect, truncated/malformed success response, or any
+         other transport failure mid-flight.
+"""
+
+import json
+import os
+import re
+import socket
+import sys
+import uuid
+from datetime import datetime
+from http.client import HTTPConnection, HTTPSConnection
+from urllib.parse import urlsplit
+
+EXIT_SUCCESS = 0
+EXIT_KNOWN_REJECTION = 20
+EXIT_AMBIGUOUS = 21
+
+DEFAULT_API_BASE = "https://api.telegram.org"
+NETWORK_TIMEOUT_SECONDS = 120
+ERROR_TEXT_LIMIT = 400
+
+AUDIO_REQUIRED_FIELDS = ("file_id", "file_unique_id", "duration")
+AUDIO_OPTIONAL_FIELDS = ("file_name", "mime_type", "file_size", "title", "performer")
+
+# Filled once credentials are resolved so every emitted string can be scrubbed.
+_SECRET_VALUES = []
+
+
+def _redact(text):
+    text = str(text)
+    for value in _SECRET_VALUES:
+        if value:
+            text = text.replace(value, "[redacted]")
+    return text
+
+
+def _bounded(text):
+    text = _redact(text)
+    if len(text) > ERROR_TEXT_LIMIT:
+        text = text[:ERROR_TEXT_LIMIT] + "…[truncated]"
+    return text
+
+
+def _redact_value(value):
+    """Recursively scrub secrets from every emitted JSON string."""
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
+
+def _emit(outcome, exit_code, **fields):
+    payload = {"outcome": outcome}
+    payload.update(fields)
+    if "error" in payload:
+        payload["error"] = _bounded(payload["error"])
+    print(json.dumps(_redact_value(payload), ensure_ascii=False))
+    sys.exit(exit_code)
+
+
+def _known_rejection(error):
+    _emit("known_rejection", EXIT_KNOWN_REJECTION, error=error)
+
+
+def _ambiguous(error):
+    _emit("ambiguous", EXIT_AMBIGUOUS, error=error)
+
+
+def _read_secret(secrets_path, key):
+    """Last `KEY=value` (optionally `export`-prefixed) line, surrounding
+    quotes stripped — mirrors kb-channel-send's _read_secret."""
+    try:
+        with open(secrets_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return ""
+    pattern = re.compile(r"^(?:export[ \t]+)?" + re.escape(key) + r"=(.*)$")
+    value = ""
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            value = match.group(1)
+    for quote in ('"', "'"):
+        if len(value) >= 2 and value.startswith(quote) and value.endswith(quote):
+            value = value[1:-1]
+            break
+    return value
+
+
+def _resolve_credentials():
+    hub = os.environ.get("KB_HUB") or os.path.join(os.path.expanduser("~"), "knowledge")
+    secrets_path = os.path.join(hub, "personal", ".secrets")
+    token = (
+        os.environ.get("TELEGRAM_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_TOKEN")
+        or _read_secret(secrets_path, "TELEGRAM_BOT_TOKEN")
+        or _read_secret(secrets_path, "TELEGRAM_TOKEN")
+    )
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or _read_secret(secrets_path, "TELEGRAM_CHAT_ID")
+    return token, chat_id, secrets_path
+
+
+def _build_multipart(fields, file_name, file_bytes):
+    text_parts = [(name, value.encode("utf-8")) for name, value in fields]
+    for _ in range(16):
+        boundary = uuid.uuid4().hex + uuid.uuid4().hex
+        marker = ("--" + boundary).encode("ascii")
+        if marker not in file_bytes and all(marker not in value for _, value in text_parts):
+            break
+    else:  # pragma: no cover — 32 random bytes colliding is not a real path
+        raise RuntimeError("could not pick a multipart boundary")
+
+    safe_name = re.sub(r'["\\\r\n]', "_", file_name)
+    chunks = []
+    for name, value in text_parts:
+        chunks.append(b"--" + boundary.encode("ascii") + b"\r\n")
+        chunks.append(
+            ('Content-Disposition: form-data; name="%s"\r\n\r\n' % name).encode("utf-8")
+        )
+        chunks.append(value + b"\r\n")
+    chunks.append(b"--" + boundary.encode("ascii") + b"\r\n")
+    chunks.append(
+        (
+            'Content-Disposition: form-data; name="audio"; filename="%s"\r\n'
+            "Content-Type: audio/mpeg\r\n\r\n" % safe_name
+        ).encode("utf-8")
+    )
+    chunks.append(file_bytes + b"\r\n")
+    chunks.append(b"--" + boundary.encode("ascii") + b"--\r\n")
+    body = b"".join(chunks)
+    content_type = "multipart/form-data; boundary=" + boundary
+    return body, content_type
+
+
+def _open_connection(api_base):
+    try:
+        parts = urlsplit(api_base)
+        port = parts.port
+    except (TypeError, ValueError) as exc:
+        _known_rejection("KB_TG_API_BASE is invalid: %s" % exc)
+    if parts.scheme == "https":
+        conn_cls, default_port = HTTPSConnection, 443
+    elif parts.scheme == "http":
+        conn_cls, default_port = HTTPConnection, 80
+    else:
+        _known_rejection("KB_TG_API_BASE has unsupported scheme %r" % parts.scheme)
+    if not parts.hostname:
+        _known_rejection("KB_TG_API_BASE has no host")
+    conn = conn_cls(
+        parts.hostname,
+        port or default_port,
+        timeout=NETWORK_TIMEOUT_SECONDS,
+    )
+    return conn, parts.path.rstrip("/")
+
+
+def _classify_response(status, raw_body):
+    """Complete response fully read: map it to the D3 outcome."""
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+
+    if status != 200:
+        # A complete HTTP error body is a definite rejection.
+        if isinstance(payload, dict):
+            detail = "http %s: %s" % (status, payload.get("description", "no description"))
+        else:
+            detail = "http %s: %s" % (status, raw_body.decode("utf-8", errors="replace"))
+        _known_rejection("telegram rejected the request (%s)" % detail)
+
+    if not isinstance(payload, dict):
+        _ambiguous("http 200 with malformed/truncated JSON response")
+    ok = payload.get("ok")
+    if ok is False:
+        _known_rejection(
+            "telegram rejected the request (ok:false, error_code=%s: %s)"
+            % (payload.get("error_code"), payload.get("description", "no description"))
+        )
+    if ok is not True:
+        _ambiguous("http 200 without a valid ok field — not a complete acceptance")
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        _ambiguous("ok:true success response has no result object")
+    message_id = result.get("message_id")
+    audio = result.get("audio")
+    if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+        _ambiguous("success response has invalid result.message_id")
+    if not isinstance(audio, dict):
+        _ambiguous("success response is missing result.audio")
+    for field in ("file_id", "file_unique_id"):
+        if not isinstance(audio.get(field), str) or not audio[field].strip():
+            _ambiguous("success response audio has invalid %s" % field)
+    duration = audio.get("duration")
+    if isinstance(duration, bool) or not isinstance(duration, int) or duration < 0:
+        _ambiguous("success response audio has invalid duration")
+
+    normalized = {field: audio[field] for field in AUDIO_REQUIRED_FIELDS}
+    for field in AUDIO_OPTIONAL_FIELDS:
+        if field in audio and audio[field] is not None:
+            normalized[field] = audio[field]
+    _emit("success", EXIT_SUCCESS, message_id=message_id, audio=normalized)
+
+
+def main(argv):
+    if not (3 <= len(argv) <= 4):
+        _known_rejection("usage: kb-channel-send-audio <message_type> <audio.mp3> [caption]")
+    message_type, audio_path = argv[1], argv[2]
+    caption = argv[3] if len(argv) == 4 else ""
+    if not message_type.strip():
+        _known_rejection("message_type must be non-empty")
+
+    if not audio_path.lower().endswith(".mp3"):
+        _known_rejection("audio file must have .mp3 extension")
+    if not os.path.isfile(audio_path):
+        _known_rejection("audio file not found")
+    try:
+        with open(audio_path, "rb") as fh:
+            file_bytes = fh.read()
+    except OSError:
+        _known_rejection("audio file unreadable")
+    if not file_bytes:
+        _known_rejection("audio file is empty")
+
+    token, chat_id, secrets_path = _resolve_credentials()
+    if token:
+        _SECRET_VALUES.append(token)
+    if not token or not chat_id:
+        _known_rejection(
+            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (env or %s)" % secrets_path
+        )
+
+    api_base = os.environ.get("KB_TG_API_BASE") or DEFAULT_API_BASE
+
+    fields = [("chat_id", chat_id)]
+    if caption:
+        fields.append(("caption", caption))
+    try:
+        body, content_type = _build_multipart(fields, os.path.basename(audio_path), file_bytes)
+    except Exception as exc:  # noqa: BLE001 — local/pre-transmission construction
+        _known_rejection("could not construct Telegram multipart request: %s" % exc)
+
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(
+        "[%s] kb-channel-send-audio type=%s file=%s bytes=%d"
+        % (timestamp, _redact(message_type), _redact(os.path.basename(audio_path)), len(file_bytes)),
+        file=sys.stderr,
+    )
+
+    conn, path_prefix = _open_connection(api_base)
+    request_path = "%s/bot%s/sendAudio" % (path_prefix, token)
+
+    # Phase 1: reach the server. Nothing of the request has been sent yet,
+    # so any failure here is a definite non-delivery.
+    try:
+        conn.connect()
+    except (OSError, socket.timeout) as exc:
+        _known_rejection("could not reach telegram endpoint before sending: %s" % exc)
+
+    # Phase 2: transmission may have begun — from here on, any failure
+    # without a complete response is conservatively ambiguous.
+    try:
+        conn.request(
+            "POST",
+            request_path,
+            body=body,
+            headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+        )
+        response = conn.getresponse()
+        status = response.status
+        raw_body = response.read()
+    except Exception as exc:  # noqa: BLE001 — every mid-flight failure maps to ambiguous
+        _ambiguous("transport failure after request may have begun: %s" % exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _classify_response(status, raw_body)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — never crash without the JSON contract
+        _ambiguous("unexpected internal failure: %r" % exc)

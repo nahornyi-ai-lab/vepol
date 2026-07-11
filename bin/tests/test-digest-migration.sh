@@ -2,11 +2,12 @@
 # kb-digest-migrate (AC6, daily-audio-digests): inserts evening-digest
 # (after:retro) and morning-digest anchored to the LAST enabled SCHEDULED
 # morning process (money-radar > learning > daily), re-anchors ONLY its own
-# managed morning-digest block when a better anchor appears, leaves customized
+# managed morning-digest block when a better anchor appears, preserves the
+# selected backend unless `--audio-backend` explicitly changes it, leaves customized
 # blocks byte-identical, preserves every other process/edge, is idempotent,
 # fails closed on malformed input, and --revert round-trips.
 #
-# Spec: knowledge/decisions/daily-audio-digests-2026-07-02.md  (D6)
+# Selector spec: spec-contract:sha256:64c99d1d0e31cc701bcedcbe371b603ef179991db5ab508a17abb31ea8d99062
 
 set -uo pipefail
 PASS=0; FAIL=0
@@ -164,6 +165,9 @@ BEFORE=$(grep -c '^  when:' "$F")
 [[ "$(anchor_of "$F")" == "after:money-radar" ]] \
   && ok "d: managed morning-digest re-anchored to after:money-radar" \
   || fail "d: managed re-anchor did not happen: $(anchor_of "$F")"
+[[ $(grep -c '^  outputs: \[file, notebooklm_audio\]$' "$F") -eq 2 ]] \
+  && ok "d: no-option re-anchor preserves NotebookLM route" \
+  || fail "d: no-option migration changed the selected route"
 AFTER=$(grep -c '^  when:' "$F")
 [[ "$BEFORE" -eq "$AFTER" ]] \
   && ok "d: re-anchor changed no block structure (when: count stable)" \
@@ -171,6 +175,15 @@ AFTER=$(grep -c '^  when:' "$F")
 CP="$TMP/d.before"; cp "$F" "$CP"
 "$MIG" --file "$F" >/dev/null 2>&1
 cmp -s "$F" "$CP" && ok "d: second run after re-anchor is a no-op" || fail "d: re-anchor not idempotent"
+
+"$MIG" --file "$F" --audio-backend local_qwen >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && $(grep -c '^  outputs: \[file, telegram_audio\]$' "$F") -eq 2 ]] \
+  && ok "d: explicit local_qwen selects Telegram audio" \
+  || fail "d: explicit local_qwen did not switch managed outputs"
+"$MIG" --file "$F" --audio-backend notebooklm >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && $(grep -c '^  outputs: \[file, notebooklm_audio\]$' "$F") -eq 2 ]] \
+  && ok "d: explicit notebooklm selects NotebookLM audio" \
+  || fail "d: explicit notebooklm did not restore managed outputs"
 
 # ── (e) customized morning-digest block stays byte-identical ─────────────────
 F="$TMP/e.yaml"
@@ -183,7 +196,7 @@ F="$TMP/e.yaml"
   outputs: [file]
 EOF
 } > "$F"
-"$MIG" --file "$F" >/dev/null 2>&1; RC=$?
+"$MIG" --file "$F" --audio-backend local_qwen >/dev/null 2>&1; RC=$?
 [[ $RC -eq 0 ]] && ok "e: migrate with customized block exits 0" || fail "e: rc=$RC"
 [[ "$(anchor_of "$F")" == '"05:00"' ]] \
   && ok "e: customized morning-digest left untouched (when unchanged)" \
@@ -193,6 +206,30 @@ grep -q '^  run: kb-morning-digest --date 2026-01-01$' "$F" \
 grep -q '^- id: evening-digest$' "$F" \
   && ok "e: evening-digest still inserted alongside custom block" \
   || fail "e: evening-digest missing with custom block"
+
+# ── (f) customized evening block also stays byte-identical ──────────────────
+F="$TMP/f.yaml"
+{ fixture present-enabled enabled; cat <<'EOF'
+
+- id: morning-digest
+  enabled: true
+  when: after:money-radar
+  run: kb-morning-digest
+  outputs: [file, telegram_audio]
+
+- id: evening-digest
+  enabled: true
+  when: "22:00"
+  run: kb-morning-digest --period evening --date 2026-01-01
+  outputs: [file]
+EOF
+} >"$F"
+CP="$TMP/f.before"; cp "$F" "$CP"
+"$MIG" --file "$F" >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 ]] && ok "f: migrate with customized evening exits 0" || fail "f: rc=$RC"
+cmp -s "$F" "$CP" \
+  && ok "f: customized evening block remains byte-identical" \
+  || fail "f: customized evening block was rewritten"
 
 # ── Malformed input fails closed (no rewrite/partial file) ───────────────────
 F="$TMP/bad.yaml"; printf -- "- id: broken\n  garbage without fields\n" > "$F"

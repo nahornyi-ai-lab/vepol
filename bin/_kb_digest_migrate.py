@@ -9,10 +9,11 @@ process or races it as a sibling.
 
 Managed re-anchor (spec D6): when `morning-digest` already exists and its block
 is MANAGED — run equals the allowlisted digest command (basename-normalized),
-outputs are exactly [file, notebooklm_audio], and `when` is one of this
-migration's own anchors — a re-run recomputes the anchor and rewrites ONLY the
-`when:` line. A customized block (any other run/outputs/when) is left
-byte-identical and reported as a notice, never rewritten. This is what makes
+outputs are exactly `[file, telegram_audio]` or `[file, notebooklm_audio]`, and
+`when` is one of this migration's own anchors — a re-run recomputes the anchor
+and changes the route only when explicitly requested. A customized
+block (any other run/outputs/when) is left byte-identical and reported as a
+notice, never rewritten. This is what makes
 "enable money-radar later, re-run kb-digest-migrate" mechanically true.
 
 Same fail-closed discipline as `_kb_mail/migrate.py` (whose text-surgery
@@ -21,8 +22,8 @@ already-migrated file round-trips byte-for-byte, and the RESULT is re-validated
 before returning so a broken/partial config is never emitted. Pure text ->
 text; `kb-digest-migrate` owns the atomic 0600 rewrite.
 
-Spec:  knowledge/decisions/daily-audio-digests-2026-07-02.md
-       (spec-contract:sha256:5dc11f2804eba9be29cc4b2d07f0382027eaa1a79f974c9a490d2e7e1e3df2b5)
+Spec: decisions/local-tts-v0-6-dual-backend-addendum-2026-07-11.md
+      (spec-contract:sha256:64c99d1d0e31cc701bcedcbe371b603ef179991db5ab508a17abb31ea8d99062)
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ if _BIN not in sys.path:
 
 from _kb_processes import (  # noqa: E402
     ProcessConfigError,
-    SCHEDULED_NOTEBOOKLM_ALLOWED,
+    SCHEDULED_TELEGRAM_AUDIO_ALLOWED,
     normalized_run_argv,
     parse_processes_text,
 )
@@ -45,10 +46,14 @@ from _kb_mail.migrate import (  # noqa: E402
     _set_when,
 )
 
-_MORNING_RUN = SCHEDULED_NOTEBOOKLM_ALLOWED["morning-digest"]
-_EVENING_RUN = SCHEDULED_NOTEBOOKLM_ALLOWED["evening-digest"]
+_MORNING_RUN = SCHEDULED_TELEGRAM_AUDIO_ALLOWED["morning-digest"]
+_EVENING_RUN = SCHEDULED_TELEGRAM_AUDIO_ALLOWED["evening-digest"]
 _MANAGED_ANCHORS = ("after:money-radar", "after:learning", "after:daily")
-_MANAGED_OUTPUTS = ["file", "notebooklm_audio"]
+_BACKEND_OUTPUTS = {
+    "notebooklm": ["file", "notebooklm_audio"],
+    "local_qwen": ["file", "telegram_audio"],
+}
+_MANAGED_OUTPUTS = tuple(_BACKEND_OUTPUTS.values())
 
 
 class DigestMigrationError(Exception):
@@ -58,13 +63,13 @@ class DigestMigrationError(Exception):
     rewrite."""
 
 
-def _digest_block(pid: str, when: str, run: str) -> list[str]:
+def _digest_block(pid: str, when: str, run: str, outputs: list[str]) -> list[str]:
     return [
         f"- id: {pid}",
         "  enabled: true",
         f"  when: {when}",
         f"  run: {run}",
-        "  outputs: [file, notebooklm_audio]",
+        f"  outputs: [{', '.join(outputs)}]",
     ]
 
 
@@ -83,15 +88,32 @@ def _morning_anchor(pmap: dict) -> str:
     )
 
 
-def _is_managed(p: dict) -> bool:
+def _is_managed(p: dict, run: str, anchors: tuple[str, ...]) -> bool:
     return (
-        normalized_run_argv(p["run"]) == normalized_run_argv(_MORNING_RUN)
-        and p["outputs"] == _MANAGED_OUTPUTS
-        and p["when"] in _MANAGED_ANCHORS
+        normalized_run_argv(p["run"]) == normalized_run_argv(run)
+        and p["outputs"] in _MANAGED_OUTPUTS
+        and p["when"] in anchors
     )
 
 
-def migrate_processes(text: str) -> tuple[str, list[str]]:
+def _set_outputs(lines: list[str], start: int, outputs: list[str]) -> None:
+    """Set only the outputs line inside one validated managed block."""
+    _start, end, _blank = _block_span(lines, start)
+    for idx in range(start + 1, end):
+        if lines[idx].startswith("  outputs:"):
+            lines[idx] = f"  outputs: [{', '.join(outputs)}]"
+            return
+    raise DigestMigrationError("managed digest block has no outputs field")
+
+
+def _parse_source(text: str) -> list[dict]:
+    """Validate a source containing either canonical managed audio route."""
+    return parse_processes_text(text)
+
+
+def migrate_processes(
+    text: str, audio_backend: str | None = None,
+) -> tuple[str, list[str]]:
     """Return (migrated text, notices).
 
     Fail-closed: invalid input raises ProcessConfigError, an unmigratable-but-
@@ -99,7 +121,12 @@ def migrate_processes(text: str) -> tuple[str, list[str]]:
     returned byte-for-byte unchanged (idempotent, including right after a
     managed re-anchor).
     """
-    procs = parse_processes_text(text)  # validate first; raises on malformed
+    if audio_backend is not None and audio_backend not in _BACKEND_OUTPUTS:
+        raise DigestMigrationError(
+            "audio_backend must be 'notebooklm' or 'local_qwen'"
+        )
+    selected_outputs = _BACKEND_OUTPUTS[audio_backend or "notebooklm"]
+    procs = _parse_source(text)
     pmap = {p["id"]: p for p in procs}
     notices: list[str] = []
 
@@ -116,11 +143,15 @@ def migrate_processes(text: str) -> tuple[str, list[str]]:
 
     morning = pmap.get("morning-digest")
     if morning is None:
-        appends.append(_digest_block("morning-digest", anchor, _MORNING_RUN))
-    elif _is_managed(morning):
+        appends.append(_digest_block(
+            "morning-digest", anchor, _MORNING_RUN, selected_outputs,
+        ))
+    elif _is_managed(morning, _MORNING_RUN, _MANAGED_ANCHORS):
         if morning["when"] != anchor:
             # Managed re-anchor: ONLY the when: line changes (spec D6).
             _set_when(lines, blocks["morning-digest"].when, anchor)
+        if audio_backend is not None and morning["outputs"] != selected_outputs:
+            _set_outputs(lines, blocks["morning-digest"].start, selected_outputs)
     else:
         notices.append(
             "morning-digest exists but is customized (run/outputs/when differ "
@@ -128,8 +159,19 @@ def migrate_processes(text: str) -> tuple[str, list[str]]:
             "you want it behind the newest morning process"
         )
 
-    if "evening-digest" not in pmap:
-        appends.append(_digest_block("evening-digest", "after:retro", _EVENING_RUN))
+    evening = pmap.get("evening-digest")
+    if evening is None:
+        appends.append(_digest_block(
+            "evening-digest", "after:retro", _EVENING_RUN, selected_outputs,
+        ))
+    elif _is_managed(evening, _EVENING_RUN, ("after:retro",)):
+        if audio_backend is not None and evening["outputs"] != selected_outputs:
+            _set_outputs(lines, blocks["evening-digest"].start, selected_outputs)
+    else:
+        notices.append(
+            "evening-digest exists but is customized (run/outputs/when differ "
+            "from the managed block); left untouched"
+        )
 
     result = "\n".join(lines)
     for blk in appends:
@@ -146,7 +188,7 @@ def revert_processes(text: str) -> str:
     """Idempotent inverse: remove the morning-digest/evening-digest blocks,
     preserve everything else, re-validate. A file without them is returned
     unchanged."""
-    parse_processes_text(text)  # validate first; raises on malformed
+    _parse_source(text)  # validate first; raises on malformed
     lines = text.split("\n")
     blocks = _find_blocks(lines)
 
