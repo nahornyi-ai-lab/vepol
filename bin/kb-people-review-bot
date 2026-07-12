@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""kb-people-review-bot — Telegram callback listener for people review.
+
+Consumes inline-button callbacks (approve/merge/reject/defer/enrich) for
+staged people candidates pushed by `kb-contact push`. This process is the
+ONLY legitimate getUpdates consumer for the daily-channel bot token —
+Telegram allows one consumer per token (`claude --channels` runs on a
+different bot). HTTP 409 therefore means a second consumer appeared: we
+sleep and exit non-zero so the LaunchAgent restart is throttled instead
+of fighting for the queue.
+
+Usage:
+  kb-people-review-bot            # daemon loop (LaunchAgent)
+  kb-people-review-bot --once     # single poll round, then exit (tests)
+
+Spec: knowledge/decisions/people-review-telegram-2026-07-05.md
+"""
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from _kb_people import card, index, review_telegram as rt  # noqa: E402
+
+HUB = Path(os.environ.get("KB_HUB", "") or (Path.home() / "knowledge")).expanduser()
+card.PEOPLE_DIR = HUB / "people"
+index.INDEX_PATH = HUB / "people" / "_index.yaml"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="kb-people-review-bot")
+    p.add_argument("--once", action="store_true",
+                   help="process one getUpdates round and exit")
+    args = p.parse_args()
+
+    cr = rt.creds(HUB)
+    if cr is None:
+        print("kb-people-review-bot: no telegram credentials "
+              "(TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)", file=sys.stderr)
+        if not args.once:
+            # Under launchd KeepAlive a token-less install would otherwise
+            # thrash in a 30s restart loop; sleep so the retry is calm and
+            # the daemon picks the token up once the user configures it.
+            time.sleep(300)
+        return 2
+    token, chat_id = cr
+    listener = rt.Listener(HUB, token, chat_id)
+    listener.reconcile()
+
+    if args.once:
+        try:
+            listener.poll_once(long_poll=False)
+        except rt.ApiError as e:
+            print(f"kb-people-review-bot: {e}", file=sys.stderr)
+            return 1
+        finally:
+            listener.join_workers()
+        return 0
+
+    print(f"kb-people-review-bot: started (hub={HUB})", flush=True)
+    while True:
+        try:
+            listener.poll_once(long_poll=True)
+        except rt.ApiError as e:
+            if e.status == 409:
+                print("kb-people-review-bot: 409 conflict — another "
+                      "getUpdates consumer on this token; backing off",
+                      file=sys.stderr)
+                time.sleep(60)
+                return 1
+            print(f"kb-people-review-bot: api error {e}; retrying in 15s",
+                  file=sys.stderr)
+            time.sleep(15)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,11 +2,14 @@
 
 import os
 import re
+import tempfile
 import uuid
 from datetime import date, datetime
 from pathlib import Path
 
 import frontmatter
+
+from .locks import cards_lock
 
 PEOPLE_DIR = Path.home() / "knowledge" / "people"
 COMPANIES_DIR = Path.home() / "knowledge" / "companies"
@@ -17,6 +20,17 @@ SIGHTINGS_BEGIN = "<!-- DERIVED-SIGHTINGS-BEGIN -->"
 SIGHTINGS_END = "<!-- DERIVED-SIGHTINGS-END -->"
 
 SIGHTINGS_HEADER = "| Date | Source | Summary |\n|------|--------|---------|"
+
+def _parse_iso_date(s):
+    """Return a `date` for a strict YYYY-MM-DD calendar date, else None.
+
+    Uses strptime so ISO-*shaped* but invalid values (2026-13-45,
+    9999-99-99) are rejected — a regex shape check is not enough to keep
+    them out of `last_seen`."""
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 def _slugify(name: str) -> str:
@@ -78,7 +92,7 @@ def _build_body(notes: str = "", sightings: list[dict] | None = None) -> str:
     return f"## Notes\n{notes_block}\n\n## Interactions\n{sighting_rows}\n"
 
 
-def create(name: str, **kwargs) -> Path:
+def create(name: str, *, assume_locked: bool = False, **kwargs) -> Path:
     """Create a new people/<slug>.md. Returns path.
 
     Raises ValueError on empty/whitespace name — the slug derived from
@@ -86,10 +100,26 @@ def create(name: str, **kwargs) -> Path:
     hidden file). Callers MUST supply a non-empty name; sources that
     have only an email should derive a local-part fallback before
     calling.
+
+    The lock is non-reentrant: callers that already hold cards_lock
+    (identity re-check + create + register in one critical section)
+    pass ``assume_locked=True``.
     """
     if not (name or "").strip():
         raise ValueError("create() refuses empty name (would produce hidden .md file)")
     PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
+    if assume_locked:
+        return _create_body(name, **kwargs)
+    # Atomic create per Codex Layer-2 point 7: write a temp file in the
+    # same directory + os.replace under .cards.lock. Without lock, two
+    # parallel create() calls could pick the same _unique_slug; with
+    # lock, slug uniqueness is decided under the same critical section
+    # as the file materialisation.
+    with cards_lock():
+        return _create_body(name, **kwargs)
+
+
+def _create_body(name: str, **kwargs) -> Path:
     slug = _unique_slug(name)
     if not slug:
         raise ValueError(
@@ -100,8 +130,24 @@ def create(name: str, **kwargs) -> Path:
     fm = _default_frontmatter(name, slug, **kwargs)
     body = _build_body()
     post = frontmatter.Post(body, **fm)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(frontmatter.dumps(post))
+    # NamedTemporaryFile in same dir guarantees os.replace is rename(2)
+    # not cross-device copy. delete=False so we control teardown.
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{slug}.", suffix=".tmp",
+        dir=str(PEOPLE_DIR),
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(frontmatter.dumps(post))
+        os.replace(tmp_name, path)
+    except Exception:
+        # Crash mid-write: clean up the temp file so PEOPLE_DIR
+        # stays free of debris. Canonical path is untouched.
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
     return path
 
 
@@ -152,13 +198,26 @@ def _escape_markdown_table_cell(text: str) -> str:
     return s.strip()
 
 
-def upsert_sighting(slug: str, event_date: str, source: str, summary: str):
+def upsert_sighting(slug: str, event_date: str, source: str, summary: str,
+                    *, assume_locked: bool = False):
     """Append a sighting row to DERIVED-SIGHTINGS block. Idempotent by date+summary.
 
     All cell content is markdown-escaped before insertion — see
     `_escape_markdown_table_cell` for the full set of transformations.
     Sources should NOT pre-escape; the escape is the canonical authority.
+
+    The read-modify-write runs under cards_lock so concurrent writers
+    (a manual `kb-contact log`, a scheduled extraction, the review bot)
+    cannot drop each other's sightings or regress `last_seen`. Callers
+    already holding the lock pass ``assume_locked=True``.
     """
+    if not assume_locked:
+        with cards_lock():
+            return _upsert_sighting_body(slug, event_date, source, summary)
+    return _upsert_sighting_body(slug, event_date, source, summary)
+
+
+def _upsert_sighting_body(slug: str, event_date: str, source: str, summary: str):
     path = PEOPLE_DIR / f"{slug}.md"
     if not path.exists():
         return
@@ -181,7 +240,18 @@ def upsert_sighting(slug: str, event_date: str, source: str, summary: str):
         )
 
     post.content = body
-    post["last_seen"] = event_date
+    # last_seen is monotonic AND validated: it advances only to a REAL
+    # calendar date (strptime rejects ISO-shaped-but-invalid values such as
+    # 2026-13-45 / 9999-99-99, which a regex shape check would let corrupt
+    # last_seen into an unreachable future) that is strictly newer than the
+    # current one. A missing/garbage current value is repaired to the new
+    # valid date. The cards_lock prevents concurrent loss; this prevents
+    # both logical regression and date corruption.
+    new_d = _parse_iso_date(event_date)
+    if new_d is not None:
+        cur_d = _parse_iso_date(post.get("last_seen"))
+        if cur_d is None or new_d > cur_d:
+            post["last_seen"] = new_d.isoformat()
     save(post, path)
 
 

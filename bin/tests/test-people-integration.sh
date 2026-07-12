@@ -43,7 +43,7 @@ from pathlib import Path
 KB_HUB = Path(os.environ["KB_HUB"])
 os.environ["KB_HUB"] = str(KB_HUB)
 
-# Insert vepol-prep bin to sys.path explicitly
+# Insert the bin dir under test (script-relative, set by the bash wrapper)
 VEPOL_BIN = Path(os.environ["VEPOL_BIN"])
 sys.path.insert(0, str(VEPOL_BIN))
 
@@ -204,14 +204,15 @@ PYEOF
 # T5: bot/system local-part filter (real audit findings 2026-05-02)
 python3 - << 'PYEOF'
 import os, sys
+from pathlib import Path
 sys.path.insert(0, os.environ["VEPOL_BIN"])
 from _kb_people.sources.calendar_source import CalendarSource
 
 # Real bots from yesterday's audit + common patterns
 bot_emails = [
-    "meet1@zezman.com.ua",        # real audit finding
-    "schedule@mint.greenhouse.io", # real audit finding
-    "assistant@zezman.ua",         # real audit finding
+    "meet1@rooms.example.com",     # meeting-room bot (audit-shaped)
+    "schedule@ats.example.io",     # ATS scheduler (audit-shaped)
+    "assistant@corp.example.ua",   # assistant mailbox (audit-shaped)
     "noreply@example.com",
     "no-reply@example.com",
     "notifications@github.com",
@@ -230,7 +231,7 @@ real_emails = [
     "bob.smith@vendor.io",
     "first.last@personal.email",
     "ceo@startup.io",  # not a bot pattern
-    "dana.lee@bigcorp.com",
+    "user@example.com",
 ]
 
 items = [{"name": "X", "email": e, "date": "2026-04-30", "context": "test"} for e in bot_emails + real_emails]

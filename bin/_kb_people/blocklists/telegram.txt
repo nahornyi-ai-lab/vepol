@@ -1,0 +1,88 @@
+# Telegram-handle blocklist for project_source Pass-1.
+#
+# Format: one lowercase handle per line, `#` comments, blank lines OK.
+# Loaded by _kb_people.sources.project_source._load_blocklist on import.
+# Per Codex Layer-2 review point 2 (2026-05-07).
+
+# tooling / agents
+agents
+agent
+claude
+codex
+openai
+anthropic
+gpt
+chatgpt
+copilot
+cursor
+devin
+
+# platforms
+github
+gitlab
+vercel
+supabase
+stripe
+holded
+gmail
+calendar
+telegram
+slack
+discord
+notion
+obsidian
+figma
+vscode
+linear
+
+# automation bots / CI
+dependabot
+renovate
+github-actions
+actions
+bot
+bots
+n8n
+
+# stack-specific orgs
+npm
+nodejs
+nextjs
+react
+firebase
+google
+googlecloud
+aws
+microsoft
+apple
+meta
+
+# observability / vendors
+sentry
+posthog
+resend
+twilio
+
+# slack / discord channel-style names
+general
+random
+announcements
+alerts
+support
+everyone
+here
+channel
+all
+team
+
+# owner self — NOT here. Machine-local exclusions (the owner's own
+# handles etc.) live in <people-dir>/.blocklist-telegram.txt; this
+# packaged file ships publicly and must stay free of personal
+# identifiers.
+
+# placeholders / templates
+user
+username
+handle
+name
+todo

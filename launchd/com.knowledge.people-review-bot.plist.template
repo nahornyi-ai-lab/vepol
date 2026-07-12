@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.knowledge.people-review-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>__HOME__/knowledge/bin/kb-people-review-bot</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive + ThrottleInterval: crash → restart in 30s. On a 409
+         (second getUpdates consumer) the bot itself sleeps 60s before
+         exiting, so restarts never fight for the queue. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>KB_HUB</key>
+        <string>__HOME__/knowledge</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/knowledge/logs/people-review-bot.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/knowledge/logs/people-review-bot.err.log</string>
+</dict>
+</plist>

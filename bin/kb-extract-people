@@ -1,0 +1,1356 @@
+#!/usr/bin/env python3
+"""kb-extract-people — extract people mentions from project knowledge.
+
+See ~/knowledge/concepts/people-extraction-from-projects.md for the
+full design. This CLI lands in stages; Pass 1 (deterministic regex)
+is implemented first per the spec sequencing.
+
+Modes:
+    Default     — incremental cycle scan, applies high-confidence
+                  Pass-1 hits to live cards, low-confidence to draft;
+                  also consumes mail-people/v1 senders envelopes when
+                  present (staged-only for new people; live sighting
+                  for address-matched known people). --no-mail opts out.
+    --backfill  — ignores watermarks, writes EVERY hit to *.staged.md
+                  even high-confidence (Codex Layer-2 sequencing).
+    --init-watermarks — baseline watermarks from current file state.
+    --list-staged     — summary of staged cards awaiting review.
+    --approve <slug>  — promote staged → live for one card.
+    --reject  <slug>  — drop staged + add identity to .rejected.yaml.
+
+Cycle/backfill runs hold the run-level lock
+`<hub>/.orchestrator/locks/people-extraction.lock` for the whole run;
+a concurrent run exits with code 2 (contention) instead of
+double-applying.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+_BIN = Path(__file__).resolve().parent
+sys.path.insert(0, str(_BIN))
+
+import _kb_profile  # noqa: E402
+from _kb_people import card, filters, index as idx_mod  # noqa: E402
+from _kb_people.dedup import find_existing, resolve as dedup_resolve  # noqa: E402
+from _kb_people.locks import cards_lock  # noqa: E402
+from _kb_people.sources import mail_source  # noqa: E402
+from _kb_people.sources.project_source import (  # noqa: E402
+    extract_pass1, extract_pass2, dedup_hits, _make_mcp_runner,
+)
+from _kb_people.watermark import (  # noqa: E402
+    determine_scan_range, read_watermark, write_watermark, safe_mark_write,
+    WATERMARK_FILENAME,
+)
+
+
+IN_SCOPE_FILES = ["log.md", "escalations.md", "backlog.md"]
+IN_SCOPE_GLOBS = ["daily/*.md"]
+ARCHIVED_STATUSES = {"archived"}
+
+# Audit key for the mail connector. Colon keeps it disjoint from
+# registry project slugs (kebab-case, never contain ':').
+MAIL_AUDIT_KEY = "mail:envelopes"
+
+# Documented contention exit code for the run-level lock (spec AC10).
+EXIT_LOCK_CONTENTION = 2
+
+
+# ---------------------------------------------------------------------------
+# Run-level lock (people-notebook spec, Phase 1 / hub concept IP-C).
+# ---------------------------------------------------------------------------
+
+def _run_lock_path(hub: Path) -> Path:
+    return hub / ".orchestrator" / "locks" / "people-extraction.lock"
+
+
+def _acquire_run_lock(hub: Path) -> int | None:
+    """Non-blocking exclusive fcntl lock held for the whole run.
+
+    Returns an open fd (caller closes it at run end — closing releases
+    the flock) or None on contention. Mirrors `_kb_people/locks.py`
+    style, but never blocks: manual and scheduled runs must not queue
+    behind each other, they must fail fast with EXIT_LOCK_CONTENTION.
+    """
+    path = _run_lock_path(hub)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+# ---------------------------------------------------------------------------
+# Registry parsing.
+# ---------------------------------------------------------------------------
+
+def _parse_registry(hub: Path) -> list[tuple[str, Path, str]]:
+    """Parse <hub>/registry.md table; return [(slug, project_path, status), …].
+
+    Header-aware: finds the |-table header row (containing `slug` /
+    `status` / `path` etc.) and uses column names to map fields. This
+    handles both the test fixture order (slug|path|status|...) and the
+    live registry order (slug|status|category|owner|path|description).
+    """
+    p = hub / "registry.md"
+    if not p.is_file():
+        return []
+    rows: list[tuple[str, Path, str]] = []
+    headers: list[str] | None = None
+    col_slug = col_path = col_status = -1
+
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        parts = [c.strip() for c in s.strip("|").split("|")]
+        # Skip separator rows like |---|---|---|
+        if all(set(p) <= set("- :") for p in parts) and parts:
+            continue
+        if headers is None:
+            # First non-separator pipe row is the header. Accept both
+            # English and Russian column names — the live registry uses
+            # `slug | статус | категория | parent | путь | описание`.
+            slug_aliases = {"slug"}
+            path_aliases = {"path", "путь"}
+            status_aliases = {"status", "статус"}
+            lower = [p.lower() for p in parts]
+            slug_col = next((i for i, c in enumerate(lower) if c in slug_aliases), -1)
+            path_col = next((i for i, c in enumerate(lower) if c in path_aliases), -1)
+            if slug_col >= 0 and path_col >= 0:
+                headers = parts
+                col_slug = slug_col
+                col_path = path_col
+                col_status = next(
+                    (i for i, c in enumerate(lower) if c in status_aliases), -1
+                )
+                continue
+            # Pre-header lines (intro paragraphs that happen to contain
+            # `|` in markdown) — skip until a real header arrives.
+            continue
+        # Data row — extract by header position.
+        if len(parts) <= max(col_slug, col_path):
+            continue
+        slug = parts[col_slug]
+        path_str = parts[col_path]
+        status = parts[col_status] if col_status >= 0 and len(parts) > col_status else ""
+        if not slug or not path_str or "---" in slug or slug.lower() == "slug":
+            continue
+        # Strip backticks (live registry quotes paths in `…`).
+        path_str = path_str.strip("` ")
+        # Expand ~ in paths.
+        rows.append((slug, Path(path_str).expanduser(), status))
+    return rows
+
+
+def _file_sha256(path: Path) -> str:
+    """Hash entire file content."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(1 << 16)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
+
+
+def _resolve_in_scope(project_root: Path) -> list[Path]:
+    """Return absolute paths of all in-scope files inside <project>/knowledge/."""
+    knowledge = project_root if project_root.name == "knowledge" else project_root / "knowledge"
+    out: list[Path] = []
+    for fname in IN_SCOPE_FILES:
+        f = knowledge / fname
+        if f.is_file():
+            out.append(f)
+    for glob in IN_SCOPE_GLOBS:
+        for f in sorted(knowledge.glob(glob)):
+            if f.is_file():
+                out.append(f)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# .rejected.yaml support.
+# ---------------------------------------------------------------------------
+
+def _load_rejected(hub: Path) -> list[dict]:
+    import yaml
+    p = hub / "people" / ".rejected.yaml"
+    if not p.exists():
+        return []
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or []
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _is_rejected(hit: dict, rejected: list[dict]) -> bool:
+    """Identity-keyed rejection matching.
+
+    Strong identifiers (email, telegram) match on equality. A bare name
+    matches ONLY when both the rejected entry and the candidate carry no
+    stronger identifier: rejecting one "Alex Smith" (spam@x) must never
+    blacklist a future unrelated Alex Smith (alex@goodco.com). An
+    unmatched strong identifier on either side disables name matching
+    for that pair — the candidate goes to staging and the owner decides.
+    """
+    email = (hit.get("email") or "").lower()
+    tg = (hit.get("telegram") or "").lower()
+    name = (hit.get("name") or "").lower()
+    hit_strong = bool(email or tg)
+    for entry in rejected:
+        if not isinstance(entry, dict):
+            continue
+        e_email = (entry.get("email", "") or "").lower()
+        e_tg = (entry.get("telegram", "") or "").lower()
+        if email and e_email == email:
+            return True
+        if tg and e_tg == tg:
+            return True
+        if (name and not hit_strong and not (e_email or e_tg)
+                and (entry.get("name", "") or "").lower() == name):
+            return True
+    return False
+
+
+def _append_rejected(hub: Path, identity: dict) -> None:
+    """Append one rejection to `.rejected.yaml` atomically.
+
+    Callers hold cards_lock around the read-modify-write so concurrent
+    rejects cannot lose each other's entries; the tempfile+os.replace
+    guarantees a reader never sees a torn file."""
+    import yaml
+    p = hub / "people" / ".rejected.yaml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rejected = _load_rejected(hub)
+    rejected.append(identity)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".rejected.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.dump(rejected, f, allow_unicode=True,
+                      default_flow_style=False, sort_keys=False)
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# ---------------------------------------------------------------------------
+# Apply path: hit → live or staged.
+# ---------------------------------------------------------------------------
+
+def _set_mentioned_in(slug: str, project_slug: str) -> None:
+    """Idempotent set-semantics append to frontmatter `mentioned_in`."""
+    with cards_lock():
+        post = card.load(slug)
+        if post is None:
+            return
+        existing = post.metadata.get("mentioned_in") or []
+        if not isinstance(existing, list):
+            existing = []
+        if project_slug not in existing:
+            existing = sorted(set(existing + [project_slug]))
+            post["mentioned_in"] = existing
+            card.save(post, card.PEOPLE_DIR / f"{slug}.md")
+
+
+def _sighting_row(hit: dict) -> str:
+    """Render one staged-sighting table row. Connector hits may carry
+    an explicit `source_ref` (e.g. `mail:<period>-<date>`); project
+    hits keep the `<slug>/<path>:<line>` composition."""
+    ref = hit.get("source_ref") or (
+        f"{hit.get('project_slug','')}/{hit.get('source_path','')}:"
+        f"{hit.get('line_no','')}"
+    )
+    return f"| {hit.get('date','')} | {ref} | {(hit.get('context','') or '')[:300]} |"
+
+
+def _stage_new_card(base_slug: str, hits: list[dict],
+                    kwargs: dict) -> tuple[Path, bool]:
+    """Create-or-append a new-card staged file for one identity, resolving
+    the slug and doing the existence check + write + sighting appends all
+    under ONE cards_lock. Returns (path, created).
+
+    Holding the lock across resolve→check→write closes the TOCTOU where
+    two stagers (or a stager racing an approve) both see the slug free and
+    clobber each other. The identity resolver keeps a DIFFERENT same-name
+    person from overwriting this card and routes this same identity's
+    reappearance back to its own card instead of a duplicate."""
+    card.PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
+    import frontmatter as fm
+    kw = dict(kwargs)
+    display_name = kw.pop("name", None) or base_slug
+    with cards_lock():
+        slug = _resolve_staged_slug(base_slug, kw.get("email", "") or "",
+                                    kw.get("telegram", "") or "")
+        path = card.PEOPLE_DIR / f"{slug}.staged.md"
+        created = not path.exists()
+        if created:
+            fm_data = card._default_frontmatter(display_name, slug, **kw)
+            fm_data["draft"] = True
+            post = fm.Post(card._build_body(), **fm_data)
+            path.write_text(fm.dumps(post), encoding="utf-8")
+        # Accumulate sightings idempotently whether we just created the
+        # card or it already belonged to this identity.
+        for h in hits:
+            _append_staged_sighting(slug, h, into_staged_card=True,
+                                    assume_locked=True)
+    return path, created
+
+
+def _stage_for_review(slug: str, hits: list[dict],
+                      new_card_kwargs: dict | None = None) -> Path:
+    """Write *.staged.md (new card) and/or *.staged-sightings.md (existing)."""
+    card.PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
+    if new_card_kwargs is not None:
+        path, _created = _stage_new_card(slug, hits, new_card_kwargs)
+        return path
+    # Sightings for existing live card: separate staged-sightings file.
+    sightings_path = card.PEOPLE_DIR / f"{slug}.staged-sightings.md"
+    with cards_lock():
+        existing = sightings_path.read_text(encoding="utf-8") if sightings_path.exists() else ""
+        rows = []
+        for h in hits:
+            row = _sighting_row(h)
+            if row not in existing:
+                rows.append(row)
+        if rows:
+            new = existing + ("\n" if existing and not existing.endswith("\n") else "") \
+                  + "\n".join(rows) + "\n"
+            sightings_path.write_text(new, encoding="utf-8")
+    return sightings_path
+
+
+def _staged_locators(path: Path) -> tuple[str, str]:
+    """(email, telegram) lowercased from a staged card's frontmatter."""
+    email = telegram = ""
+    try:
+        fences = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip() == "---":
+                fences += 1
+                if fences == 2:
+                    break
+                continue
+            if fences == 1 and line.startswith("email:"):
+                email = line.split(":", 1)[1].strip().strip("'\"").lower()
+            elif fences == 1 and line.startswith("telegram:"):
+                telegram = line.split(":", 1)[1].strip().strip("'\"").lower()
+    except OSError:
+        pass
+    return email, telegram
+
+
+def _staged_same_identity(path: Path, email: str, telegram: str) -> bool:
+    """True iff the staged card at ``path`` is the SAME person as the
+    incoming identity, compared on strong locators only.
+
+    Two candidates that share only a display name are NEVER the same
+    identity — the whole point of the anti-conflation guard. A match
+    requires a shared email (preferred) or, absent an email on both
+    sides, a shared telegram handle."""
+    se, st = _staged_locators(path)
+    email, telegram = email.lower(), telegram.lower()
+    if email and se:
+        return se == email
+    if telegram and st:
+        return st == telegram
+    return False
+
+
+def _resolve_staged_slug(base_slug: str, email: str, telegram: str) -> str:
+    """Return the staged slug this identity should own.
+
+    - base slug free → claim it;
+    - base slug already this same identity → reuse it (append sightings);
+    - base slug taken by a DIFFERENT identity → reuse this identity's own
+      suffixed sibling if it already has one, else mint a fresh suffix.
+
+    `find_existing` only sees LIVE cards, so this is the ONLY thing that
+    keeps a same-name-different-address sender from clobbering another
+    pending card (mail path) or re-staging a fresh duplicate every time
+    they reappear (mail + project/backfill paths)."""
+    base_path = card.PEOPLE_DIR / f"{base_slug}.staged.md"
+    if not base_path.exists() or _staged_same_identity(base_path, email, telegram):
+        return base_slug
+    for p in sorted(card.PEOPLE_DIR.glob(f"{base_slug}-*.staged.md")):
+        if _staged_same_identity(p, email, telegram):
+            return p.name[:-len(".staged.md")]
+    return f"{base_slug}-{uuid.uuid4().hex[:8]}"
+
+
+def _append_staged_sighting(slug: str, hit: dict,
+                            into_staged_card: bool = False,
+                            *, assume_locked: bool = False) -> None:
+    """Append a sighting row into a staged card's Interactions table.
+
+    The read + existence check + write all happen INSIDE .cards.lock:
+    an approve racing this append moves the staged file away, and a
+    write after an unlocked read would resurrect the just-promoted
+    staged card (TOCTOU — Codex review blocker #4). Callers already
+    holding the lock pass ``assume_locked=True``."""
+    if assume_locked:
+        _append_staged_sighting_body(slug, hit)
+        return
+    with cards_lock():
+        _append_staged_sighting_body(slug, hit)
+
+
+def _append_staged_sighting_body(slug: str, hit: dict) -> None:
+    path = card.PEOPLE_DIR / f"{slug}.staged.md"
+    row = _sighting_row(hit)
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if row in text:
+        return
+    if "<!-- DERIVED-SIGHTINGS-END -->" in text:
+        new = text.replace(
+            "<!-- DERIVED-SIGHTINGS-END -->",
+            row + "\n<!-- DERIVED-SIGHTINGS-END -->",
+        )
+        path.write_text(new, encoding="utf-8")
+
+
+def _apply_hit_live(hit: dict, audit_proj: dict) -> None:
+    """Apply a single Pass-1 hit through dedup → live card or upsert."""
+    name = hit.get("name") or ""
+    email = hit.get("email") or ""
+    telegram = hit.get("telegram") or ""
+    # Bots are never people (owner directive 2026-07-05): drop before
+    # any live/staged routing, regardless of source.
+    if filters.is_bot_identity(name=name, email=email, telegram=telegram):
+        audit_proj["bots_skipped"] = audit_proj.get("bots_skipped", 0) + 1
+        return
+    project_slug = hit.get("project_slug", "")
+    source_ref = (f"{project_slug}/{hit.get('source_path','')}:"
+                  f"{hit.get('line_no','')}")
+    summary = (hit.get("context") or "")[:300]
+    date_iso = hit.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Telegram-only without email → not strong enough for live.
+    # Stage as draft for review.
+    if not email and telegram:
+        return _apply_hit_staged_new(hit, audit_proj)
+
+    if not email:
+        # Nothing to dedup on → not a Pass-1 high-confidence case.
+        return
+
+    result = dedup_resolve(name=name, email=email, telegram=telegram)
+    action = result["action"]
+
+    if action == "update":
+        with cards_lock():
+            uid = result["uid"]
+            slug = idx_mod.get_slug(uid)
+        if slug:
+            card.upsert_sighting(slug, date_iso, source_ref, summary)
+            _set_mentioned_in(slug, project_slug)
+            audit_proj["live_upserted"] += 1
+        return
+
+    if action == "create":
+        # Derive a usable display name; fall back to email local-part.
+        display = name or (email.split("@", 1)[0].replace(".", " ").replace("_", " "))
+        # dedup_resolve ran UNLOCKED, so a concurrent approve can make this
+        # identity live between resolve and create (B1). Re-check the live
+        # index and create+register inside ONE cards_lock — the same
+        # identity invariant cmd_approve enforces: a live card is written
+        # only when neither email nor telegram is already live.
+        merged_slug = None
+        new_slug = None
+        with cards_lock():
+            existing_uid = idx_mod.lookup_by_email(email)
+            if not existing_uid and telegram:
+                existing_uid = idx_mod.lookup_by_telegram(telegram)
+            existing_slug = (idx_mod.get_slug(existing_uid)
+                             if existing_uid else None)
+            if (existing_slug
+                    and (card.PEOPLE_DIR / f"{existing_slug}.md").exists()):
+                card.upsert_sighting(existing_slug, date_iso, source_ref,
+                                     summary, assume_locked=True)
+                merged_slug = existing_slug
+            else:
+                path = card.create(
+                    display,
+                    email=email,
+                    telegram=telegram,
+                    source="project-source",
+                    first_met=date_iso,
+                    first_met_context=source_ref,
+                    last_seen=date_iso,
+                    assume_locked=True,
+                )
+                post = card.load(path.stem)
+                if post is None:
+                    return
+                uid = post.get("id") or idx_mod.new_uuid()
+                idx_mod.register(uid, post.get("slug"), display,
+                                 {"email": email, "telegram": telegram},
+                                 assume_locked=True)
+                card.upsert_sighting(post.get("slug"), date_iso, source_ref,
+                                     summary, assume_locked=True)
+                new_slug = post.get("slug")
+        # _set_mentioned_in takes cards_lock itself (non-reentrant) — call
+        # it outside the critical section; it is idempotent metadata, not
+        # part of the identity invariant.
+        if merged_slug:
+            _set_mentioned_in(merged_slug, project_slug)
+            audit_proj["live_upserted"] += 1
+        elif new_slug:
+            _set_mentioned_in(new_slug, project_slug)
+            audit_proj["live_created"] += 1
+        return
+
+    if action == "create-draft":
+        return _apply_hit_staged_new(hit, audit_proj,
+                                     possible_dup=result.get("possible_duplicate_of", ""))
+
+
+def _apply_hit_staged_new(hit: dict, audit_proj: dict,
+                          possible_dup: str = "") -> None:
+    """Stage a new draft card for review (used when not strong enough
+    for live OR backfill mode forces it)."""
+    name = hit.get("name") or (hit.get("email") or "").split("@", 1)[0]
+    if not name:
+        return
+    # Slug derivation matches card._slugify; we want a stable staged path.
+    slug = card._slugify(name) or f"unknown-{uuid.uuid4().hex[:8]}"
+    kwargs = {
+        "name": name,
+        "email": hit.get("email", ""),
+        "telegram": hit.get("telegram", ""),
+        "first_met": hit.get("date", ""),
+        "first_met_context": (
+            f"{hit.get('project_slug','')}/{hit.get('source_path','')}:"
+            f"{hit.get('line_no','')}"
+        ),
+        "last_seen": hit.get("date", ""),
+        "source": "project-source",
+    }
+    if possible_dup:
+        kwargs["possible_duplicate_of"] = possible_dup
+    # Count a NEW staged candidate only when one was actually created;
+    # re-staging an already-pending identity appends (no new card) and must
+    # not inflate D1's new-item count (same rule as the mail path).
+    _path, created = _stage_new_card(slug, [hit], kwargs)
+    if created:
+        audit_proj["drafts_created"] += 1
+    else:
+        audit_proj["sightings_appended"] = audit_proj.get("sightings_appended", 0) + 1
+
+
+def _apply_hit_staged_sighting_for_existing(hit: dict, slug: str,
+                                            audit_proj: dict) -> None:
+    """Backfill mode: even a high-confidence email-match for an existing
+    card gets staged, never a live write."""
+    # Staged sightings for an ALREADY-live person are not a new candidate
+    # card, so they count as appended, not as a D1 new item.
+    _stage_for_review(slug, [hit])
+    audit_proj["sightings_appended"] = audit_proj.get("sightings_appended", 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Mail connector (mail-people/v1 envelopes → staged / live sighting).
+# ---------------------------------------------------------------------------
+
+def _process_mail_envelopes(hub: Path, rejected: list[dict],
+                            audit: dict) -> None:
+    """Consume pending senders-identity envelopes (people-notebook D2,
+    build-plan design note).
+
+    Policy per sender:
+      - address matches an existing live card (deterministic identity
+        signal) → live sighting upsert with source ref
+        `mail:<period>-<date>` and count-only summary — never message
+        content (the envelope cannot carry any by schema);
+      - new sender passing filters → staged card via the existing
+        stage_for_review machinery;
+      - name-fuzzy match on a different address (ambiguous) → staged
+        with `possible_duplicate_of`, never auto-merged.
+
+    Each envelope is marked in the processed-watermark after apply, so
+    re-running the same envelope proposes nothing.
+    """
+    src = mail_source.MailSource(hub)
+    pending, warnings = src.pending_envelopes()
+    if warnings:
+        audit.setdefault("warnings", []).extend(warnings)
+    if not pending:
+        return
+    proj = {
+        "files_scanned": [],
+        "envelopes_processed": [],
+        "senders_seen": 0,
+        "live_upserted": 0,
+        "drafts_created": 0,
+        "sightings_appended": 0,
+        "dropped_blocklist": 0,
+        "dropped_rejected_yaml": 0,
+        "errors": [],
+    }
+    audit["projects"][MAIL_AUDIT_KEY] = proj
+
+    for item in pending:
+        env = item["env"]
+        day, period = env["date"], env["period"]
+        source_ref = f"mail:{period}-{day}"
+        kept, dropped = src.filter_senders(env["senders"])
+        proj["senders_seen"] += len(env["senders"])
+        proj["dropped_blocklist"] += dropped
+        for s in kept:
+            if _is_rejected({"email": s["email"], "name": s["name"]}, rejected):
+                proj["dropped_rejected_yaml"] += 1
+                continue
+            summary = f"{s['count']} messages"
+            uid, strategy = find_existing(s["name"], s["email"])
+            if strategy == "email-match":
+                with cards_lock():
+                    slug = idx_mod.get_slug(uid)
+                if slug and (card.PEOPLE_DIR / f"{slug}.md").exists():
+                    card.upsert_sighting(slug, day, source_ref, summary)
+                    proj["live_upserted"] += 1
+                    continue
+                # Index points at a missing card — fall through to staging.
+            possible = ""
+            if strategy == "name-match-high":
+                possible = idx_mod.get_slug(uid) or ""
+            elif strategy.startswith("name-match-ambiguous:"):
+                possible = strategy.split(":", 1)[1]
+            display = s["name"] or s["email"].split("@", 1)[0].replace(
+                ".", " ").replace("_", " ")
+            base_slug = card._slugify(display) or f"unknown-{uuid.uuid4().hex[:8]}"
+            hit = {"date": day, "source_ref": source_ref, "context": summary}
+            kwargs = {
+                "name": display,
+                "email": s["email"],
+                "first_met": day,
+                "first_met_context": source_ref,
+                "last_seen": day,
+                "source": "mail",
+            }
+            if possible:
+                kwargs["possible_duplicate_of"] = possible
+            # Resolve + existence + write happen atomically inside
+            # _stage_new_card (no check→write race). D1 "new items" counts
+            # NEWLY created candidates only; a reappearing pending sender
+            # appends and must not make a pending-only run look new.
+            _path, created = _stage_new_card(base_slug, [hit], kwargs)
+            if created:
+                proj["drafts_created"] += 1
+            else:
+                proj["sightings_appended"] = proj.get("sightings_appended", 0) + 1
+        mail_source.mark_processed(hub, item["key"], item["sha"])
+        proj["envelopes_processed"].append(item["key"])
+
+
+# ---------------------------------------------------------------------------
+# Per-project scan.
+# ---------------------------------------------------------------------------
+
+def _scan_project(
+    project_slug: str,
+    project_root: Path,
+    hub: Path,
+    *,
+    backfill: bool,
+    use_llm: bool,
+    rejected: list[dict],
+    audit: dict,
+    mcp_runner=None,
+    scheduled: bool = False,
+) -> None:
+    """Scan all in-scope files in a single project; apply hits."""
+    audit["projects"][project_slug] = {
+        "files_scanned": [],
+        "files_skipped_no_change": [],
+        "files_fallback_full_rescan": [],
+        "pass1_hits": 0,
+        "pass2_hits": 0,
+        "live_created": 0,
+        "live_upserted": 0,
+        "drafts_created": 0,
+        "sightings_appended": 0,
+        "dropped_blocklist": 0,
+        "dropped_rejected_yaml": 0,
+        "dropped_bad_source_line": 0,
+        "errors": [],
+        "llm_calls": [],
+    }
+    proj_audit = audit["projects"][project_slug]
+
+    knowledge = project_root if project_root.name == "knowledge" else project_root / "knowledge"
+    if not knowledge.is_dir():
+        proj_audit["errors"].append({"kind": "no_knowledge_dir",
+                                     "path": str(knowledge)})
+        return
+
+    # Scheduled (kb-tick background) runs are gated on watermark bootstrap:
+    # without a baseline the first run would scan the project's full history.
+    # Fail closed per processes-release-spec-2026-06-09 — skip the project
+    # until `kb-extract-people --init-watermarks` has been run.
+    if scheduled and not backfill and not (knowledge / WATERMARK_FILENAME).is_file():
+        proj_audit["skipped_watermark_missing"] = True
+        proj_audit["errors"].append({
+            "kind": "watermark_missing_scheduled_skip",
+            "path": str(knowledge),
+            "hint": "run kb-extract-people --init-watermarks before enabling the scheduled process",
+        })
+        return
+
+    files = _resolve_in_scope(project_root)
+    mark = read_watermark(knowledge)
+    new_marks = dict(mark.get("files", {}))
+
+    all_hits: list[dict] = []
+    for f in files:
+        rel = str(f.relative_to(knowledge))
+        existing = mark.get("files", {}).get(rel) if not backfill else None
+        start, end, reason = determine_scan_range(f, existing)
+        if reason == "no-change":
+            proj_audit["files_skipped_no_change"].append(rel)
+            continue
+        proj_audit["files_scanned"].append(rel)
+        if reason in {"shrink-fallback", "prefix-changed-fallback"}:
+            proj_audit["files_fallback_full_rescan"].append(
+                {"path": rel, "reason": reason}
+            )
+        # Read range and run Pass-1.
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(start)
+                slice_bytes = fh.read(end - start) if end > start else b""
+            slice_text = slice_bytes.decode("utf-8", errors="replace")
+        except OSError as e:
+            proj_audit["errors"].append({"kind": "read_failed",
+                                         "path": rel, "detail": str(e)})
+            continue
+        # For incremental scans, line-numbering must be relative to the
+        # whole file, not the slice — re-read full text for line index.
+        full_text = f.read_text(encoding="utf-8", errors="replace")
+        # Run Pass-1 on the slice but with line numbers from full file.
+        # Simplest: run on full text for now (Pass-1 is cheap regex).
+        # Watermark still gates whether we apply at all.
+        scan_text = full_text if reason != "incremental" else full_text
+        hits = extract_pass1(scan_text, project_slug, rel, file_path=f)
+        # If incremental, drop hits whose line offset is below `start`.
+        if reason == "incremental":
+            cutoff_line = full_text[:start].count("\n") + 1
+            hits = [h for h in hits if h.get("line_no", 0) >= cutoff_line]
+        proj_audit["pass1_hits"] += len(hits)
+        all_hits.extend(hits)
+
+        # Pass 2 — LLM via MCP runner. Cycle mode: at most one
+        # LLM call per project, on log.md only (the highest-signal
+        # file); backfill: per-file with repagination on truncation.
+        if use_llm:
+            should_call = backfill or (rel == "log.md" and proj_audit["pass2_hits"] == 0)
+            if should_call:
+                try:
+                    p2_hits, p2_errs = extract_pass2(
+                        full_text, project_slug, rel, file_path=f,
+                        runner=mcp_runner, backfill=backfill,
+                        single_call=not backfill,
+                        audit_calls=proj_audit["llm_calls"],
+                    )
+                    proj_audit["pass2_hits"] += len(p2_hits)
+                    for e in p2_errs:
+                        proj_audit["errors"].append(
+                            {"kind": "pass2_error", "code": e, "path": rel}
+                        )
+                    all_hits.extend(p2_hits)
+                except Exception as e:
+                    proj_audit["errors"].append({
+                        "kind": "pass2_unhandled",
+                        "path": rel,
+                        "detail": str(e),
+                    })
+
+        # Update mark snapshot for safe write later.
+        scanned_size = f.stat().st_size
+        scanned_hash = _file_sha256(f)
+        # Re-stat / re-hash AFTER scan-read to detect mid-run mutation.
+        snap_audit = {"warnings": []}
+        if safe_mark_write(f, scanned_size, scanned_hash, snap_audit):
+            new_marks[rel] = {"size": scanned_size, "sha256": scanned_hash}
+        else:
+            audit.setdefault("warnings", []).extend(snap_audit["warnings"])
+
+    # Dedup composite-key.
+    deduped = dedup_hits(all_hits)
+
+    # Apply each hit.
+    for h in deduped:
+        if _is_rejected(h, rejected):
+            proj_audit["dropped_rejected_yaml"] += 1
+            continue
+        # Bots are never people (owner directive 2026-07-05).
+        if filters.is_bot_identity(name=h.get("name") or "",
+                                   email=h.get("email") or "",
+                                   telegram=h.get("telegram") or ""):
+            proj_audit["bots_skipped"] = proj_audit.get("bots_skipped", 0) + 1
+            continue
+        # Pass-2 hits are ALWAYS forced draft regardless of dedup outcome.
+        if h.get("confidence") == "low":
+            _apply_hit_staged_new(h, proj_audit)
+            continue
+        if backfill:
+            # Backfill mode: every Pass-1 hit also goes to staged.
+            email = h.get("email") or ""
+            telegram = h.get("telegram") or ""
+            if email:
+                result = dedup_resolve(name=h.get("name", ""), email=email,
+                                       telegram=telegram)
+                if result["action"] == "update":
+                    with cards_lock():
+                        uid = result["uid"]
+                        slug = idx_mod.get_slug(uid)
+                    if slug:
+                        _apply_hit_staged_sighting_for_existing(h, slug, proj_audit)
+                else:
+                    _apply_hit_staged_new(h, proj_audit,
+                                          possible_dup=result.get("possible_duplicate_of", ""))
+            else:
+                _apply_hit_staged_new(h, proj_audit)
+        else:
+            _apply_hit_live(h, proj_audit)
+
+    # Watermark write (cycle mode only — backfill does NOT advance marks).
+    if not backfill:
+        write_watermark(knowledge, new_marks)
+
+
+# ---------------------------------------------------------------------------
+# Modes.
+# ---------------------------------------------------------------------------
+
+def _new_audit(mode: str) -> dict:
+    return {
+        "schema_version": 1,
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "run_id": str(uuid.uuid4()),
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mode": mode,
+        "warnings": [],
+        "projects": {},
+        "totals": {},
+    }
+
+
+def _finalize_audit(audit: dict) -> None:
+    audit["ended_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    totals = {
+        "scanned_files": 0,
+        "pass1_hits": 0,
+        "pass2_hits": 0,
+        "live_created": 0,
+        "live_upserted": 0,
+        "drafts_created": 0,
+        "dropped_blocklist": 0,
+        "dropped_rejected_yaml": 0,
+        "errors": 0,
+    }
+    for slug, p in audit["projects"].items():
+        totals["scanned_files"] += len(p.get("files_scanned", []))
+        for k in ("pass1_hits", "pass2_hits", "live_created",
+                 "live_upserted", "drafts_created", "dropped_blocklist",
+                 "dropped_rejected_yaml"):
+            totals[k] += p.get(k, 0)
+        totals["errors"] += len(p.get("errors", []))
+    audit["totals"] = totals
+
+
+def _write_audit(hub: Path, audit: dict) -> Path:
+    od = hub / ".orchestrator"
+    od.mkdir(parents=True, exist_ok=True)
+    if audit["mode"] == "backfill":
+        path = od / f"people-extraction-backfill-{audit['run_id']}.json"
+    else:
+        path = od / f"people-extraction-{audit['date']}.json"
+    path.write_text(json.dumps(audit, indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return path
+
+
+def cmd_run(args) -> int:
+    hub = Path(args.hub).expanduser().resolve()
+    # Point card module + index module at this hub.
+    card.PEOPLE_DIR = hub / "people"
+    idx_mod.INDEX_PATH = hub / "people" / "_index.yaml"
+
+    # Run-level lock: manual and scheduled runs must never overlap.
+    lock_fd = _acquire_run_lock(hub)
+    if lock_fd is None:
+        print("kb-extract-people: another run holds "
+              f"{_run_lock_path(hub)} — exiting (contention)",
+              file=sys.stderr)
+        return EXIT_LOCK_CONTENTION
+    try:
+        return _cmd_run_locked(args, hub)
+    finally:
+        os.close(lock_fd)  # closing the fd releases the flock
+
+
+def _cmd_run_locked(args, hub: Path) -> int:
+    audit = _new_audit("backfill" if args.backfill else "cycle")
+    rejected = _load_rejected(hub)
+    rows = _parse_registry(hub)
+    if not rows:
+        print(f"kb-extract-people: no projects in registry at {hub}/registry.md",
+              file=sys.stderr)
+
+    use_llm = bool(args.llm) and not bool(args.no_llm)
+    mcp_runner = _make_mcp_runner() if use_llm else None
+    # kb-tick sets KB_PROCESS_BACKGROUND=1 for scheduled process runs;
+    # those are watermark-gated (see _scan_project). Manual CLI runs are not.
+    scheduled = os.environ.get("KB_PROCESS_BACKGROUND") == "1"
+
+    for slug, path, status in rows:
+        if status in ARCHIVED_STATUSES:
+            continue
+        try:
+            _scan_project(slug, path, hub,
+                          backfill=args.backfill,
+                          use_llm=use_llm,
+                          rejected=rejected,
+                          audit=audit,
+                          mcp_runner=mcp_runner,
+                          scheduled=scheduled)
+        except Exception as e:
+            audit["projects"].setdefault(slug, {"errors": []})["errors"].append(
+                {"kind": "scan_exception", "detail": str(e)}
+            )
+
+    # Mail connector: default in cycle mode when envelopes exist;
+    # --no-mail opts out. Backfill runs stay project-only. A missing
+    # or broken envelope never fails the run (audit warning only) —
+    # people-extract proceeds without the mail source.
+    if not args.backfill and not args.no_mail:
+        try:
+            _process_mail_envelopes(hub, rejected, audit)
+        except Exception as e:
+            audit.setdefault("warnings", []).append(
+                {"kind": "mail_source_exception", "detail": str(e)}
+            )
+
+    _finalize_audit(audit)
+    audit_path = _write_audit(hub, audit)
+    if not args.quiet:
+        print(f"audit: {audit_path}")
+
+    # Staged-review digest (people-notebook spec D1, deterministic
+    # firing rule):
+    #   - new items this run           → send the digest;
+    #   - zero new but pending > 0     → silent, except a nudge when the
+    #     last digest/nudge is >= 7 days old (untouched pending items);
+    #   - nothing new, nothing pending → send nothing.
+    # Only sent when the caller (kb-tick) declares telegram in
+    # KB_PROCESS_OUTPUTS; manual runs stay stdout-only. Staged cards are
+    # never auto-approved — review goes through
+    # --list-staged/--approve/--reject.
+    outputs = [o.strip() for o in os.environ.get("KB_PROCESS_OUTPUTS", "").split(",") if o.strip()]
+    people_dir = hub / "people"
+    staged = sorted(list(people_dir.glob("*.staged.md")) +
+                    list(people_dir.glob("*.staged-sightings.md"))) if people_dir.is_dir() else []
+    new_items = audit["totals"].get("drafts_created", 0)
+    mail_proj = audit["projects"].get(MAIL_AUDIT_KEY, {})
+    # Telegram review push (people-review-telegram spec 2026-07-05) is the
+    # PRIMARY review surface and is deliberately NOT under the D1 digest
+    # gate: it delivers any staged candidate not already in the outbox,
+    # every run, so a candidate staged during a manual/non-telegram run
+    # still reaches the owner. `push` is idempotent per candidate (its
+    # outbox never re-sends), so an un-gated call on a pending-only run
+    # sends nothing new. The D1 firing rule below governs the text digest
+    # only. Soft-fails — staged files stay the source of truth.
+    if ("telegram" in outputs and staged and not getattr(args, "no_push", False)):
+        try:
+            from _kb_people import review_telegram as _rt
+            _rt.push(hub, quiet=args.quiet)
+        except Exception as e:
+            print(f"kb-extract-people: telegram review push failed: {e}",
+                  file=sys.stderr)
+    if "telegram" in outputs and staged:
+        nudge = False
+        if new_items == 0:
+            if not _nudge_due(hub):
+                return 0
+            nudge = True
+        os.environ.setdefault("KB_HUB", str(hub))
+        from _kb_people.channel import send as channel_send
+        names = [p.name.split(".staged")[0] for p in staged[:10]]
+        msg = staged_digest_message(
+            names, len(staged), hub,
+            new_count=new_items,
+            mail_staged=mail_proj.get("drafts_created", 0),
+            mail_upserts=mail_proj.get("live_upserted", 0),
+            nudge=nudge,
+        )
+        if not channel_send("people-staged", msg):
+            print("kb-extract-people: staged-review digest delivery failed",
+                  file=sys.stderr)
+            return 1
+        _record_digest_sent(hub)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Digest state (D1 weekly-nudge bookkeeping).
+# ---------------------------------------------------------------------------
+
+def _digest_state_path(hub: Path) -> Path:
+    return hub / "people" / ".digest-state.json"
+
+
+def _nudge_due(hub: Path) -> bool:
+    """True when the last sent digest/nudge is unknown or >= 7 days old."""
+    try:
+        state = json.loads(_digest_state_path(hub).read_text(encoding="utf-8"))
+        last = datetime.strptime(state["last_sent"], "%Y-%m-%d").date()
+    except Exception:
+        return True  # never sent (or unreadable state) → nudge is due
+    today = datetime.now(timezone.utc).date()
+    return (today - last).days >= 7
+
+
+def _record_digest_sent(hub: Path) -> None:
+    mail_source._atomic_write_json(_digest_state_path(hub), {
+        "schema_version": 1,
+        "last_sent": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    })
+
+
+def staged_digest_message(names: list, total: int, hub, *,
+                          new_count: int = 0, mail_staged: int = 0,
+                          mail_upserts: int = 0, nudge: bool = False) -> str:
+    """User-facing staged-review digest in the profile language (spec:
+    user-language-setting-2026-06-12). CLI command lines stay literal —
+    they are commands, not prose. `nudge` renders the weekly reminder
+    variant (D1); mail counts add one line when the mail connector
+    contributed this run."""
+    shown = ", ".join(names)
+    more = f" (+{total - len(names)})" if total > len(names) else ""
+    lang = _kb_profile.get_language(hub)
+    if lang == "ru":
+        if nudge:
+            head = (f"👥 Еженедельное напоминание: {total} staged-карточек "
+                    f"всё ещё ждут ревью: {shown}{more}")
+        elif new_count:
+            head = (f"👥 Ревью карточек: +{new_count} новых, всего {total} "
+                    f"staged-карточек ждут ревью: {shown}{more}")
+        else:
+            head = f"👥 Ревью карточек: {total} staged-карточек ждут ревью: {shown}{more}"
+        mail_line = (f"Почта: {mail_staged} новых отправителей в staged, "
+                     f"{mail_upserts} live-обновлений")
+        list_label, decide_label = "Список", "Решение"
+    else:
+        if nudge:
+            head = (f"👥 Weekly reminder: {total} staged cards still "
+                    f"await review: {shown}{more}")
+        elif new_count:
+            head = (f"👥 People review: {new_count} new, {total} staged "
+                    f"cards await review: {shown}{more}")
+        else:
+            head = f"👥 People review: {total} staged cards await review: {shown}{more}"
+        mail_line = (f"Mail: {mail_staged} new senders staged, "
+                     f"{mail_upserts} live sightings applied")
+        list_label, decide_label = "List", "Decide"
+    lines = [head]
+    if mail_staged or mail_upserts:
+        lines.append(mail_line)
+    lines.append(f"{list_label}: kb-extract-people --hub {hub} --list-staged")
+    lines.append(f"{decide_label}: kb-extract-people --hub {hub} "
+                 f"--approve <slug> | --reject <slug>")
+    return "\n".join(lines)
+
+
+def cmd_init_watermarks(args) -> int:
+    hub = Path(args.hub).expanduser().resolve()
+    rows = _parse_registry(hub)
+    for slug, path, status in rows:
+        if status in ARCHIVED_STATUSES:
+            continue
+        knowledge = path if path.name == "knowledge" else path / "knowledge"
+        if not knowledge.is_dir():
+            continue
+        marks: dict[str, dict] = {}
+        for f in _resolve_in_scope(path):
+            rel = str(f.relative_to(knowledge))
+            marks[rel] = {
+                "size": f.stat().st_size,
+                "sha256": _file_sha256(f),
+            }
+        write_watermark(knowledge, marks)
+    return 0
+
+
+def cmd_list_staged(args) -> int:
+    hub = Path(args.hub).expanduser().resolve()
+    people_dir = hub / "people"
+    if not people_dir.is_dir():
+        return 0
+    staged = sorted(list(people_dir.glob("*.staged.md")) +
+                    list(people_dir.glob("*.staged-sightings.md")))
+    if args.json:
+        out = []
+        for p in staged:
+            out.append({"path": str(p), "name": p.stem,
+                        "kind": ("new-card" if ".staged.md" in p.name else "sightings"),
+                        "size": p.stat().st_size})
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
+    print(f"Staged cards in {people_dir}:")
+    for p in staged:
+        print(f"  - {p.name} ({p.stat().st_size}b)")
+    print(f"Total: {len(staged)}")
+    return 0
+
+
+def _merge_staged_body_into(staged_card: Path, target_slug: str) -> None:
+    """Transfer a staged NEW card's sighting rows into an existing live
+    card (caller MUST hold cards_lock), then delete the staged file.
+
+    Used when approve finds the staged identity is ALREADY live under
+    another slug — merging its sightings avoids creating a duplicate live
+    person for the same email."""
+    try:
+        for row in staged_card.read_text(encoding="utf-8").splitlines():
+            row = row.strip()
+            if not row.startswith("|"):
+                continue
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if len(cells) < 3 or "Date" in cells[0] or "---" in cells[0]:
+                continue
+            # Date and source are pipe-free; a summary may itself contain a
+            # `|` (staged rows are written unescaped by _sighting_row), so
+            # rejoin everything past the source rather than truncating at
+            # the first pipe. upsert_sighting escapes it for the live card.
+            date_, source_ = cells[0], cells[1]
+            summary_ = "|".join(cells[2:]).strip()
+            card.upsert_sighting(target_slug, date_, source_, summary_,
+                                 assume_locked=True)
+    except Exception:
+        pass
+    staged_card.unlink()
+
+
+def cmd_approve(args) -> int:
+    """Promote a single staged card → live."""
+    hub = Path(args.hub).expanduser().resolve()
+    card.PEOPLE_DIR = hub / "people"
+    idx_mod.INDEX_PATH = hub / "people" / "_index.yaml"
+    slug = args.slug
+    staged_card = card.PEOPLE_DIR / f"{slug}.staged.md"
+    staged_sightings = card.PEOPLE_DIR / f"{slug}.staged-sightings.md"
+    if not staged_card.exists() and not staged_sightings.exists():
+        print(f"kb-extract-people: nothing staged for slug {slug!r}",
+              file=sys.stderr)
+        return 1
+    # The card write AND the index register both happen inside the SAME
+    # cards_lock: idx_mod.register(assume_locked=True) skips its own lock
+    # so there is no same-process flock deadlock (the reason this used to
+    # register outside the lock) and no non-atomic window where the live
+    # card exists but is absent from _index.yaml (a crash or a concurrent
+    # extractor there would create a duplicate for the same email).
+    live_slug = slug
+    merged_into = None
+    with cards_lock():
+        if staged_card.exists():
+            # Dedup against LIVE cards by email BEFORE creating a new live
+            # card. If this staged identity's email is already live under
+            # another slug — a same-email/different-name staged card, or
+            # extraction staged it while the person went live via another
+            # path (approve does not hold the run lock, so it can race an
+            # extraction) — merge its sightings into the existing card
+            # instead of duplicating the live person.
+            staged_email, staged_tg = _staged_locators(staged_card)
+            existing_uid = (idx_mod.lookup_by_email(staged_email)
+                            if staged_email else None)
+            if not existing_uid and staged_tg:
+                existing_uid = idx_mod.lookup_by_telegram(staged_tg)
+            existing_slug = idx_mod.get_slug(existing_uid) if existing_uid else None
+            if (existing_slug
+                    and (card.PEOPLE_DIR / f"{existing_slug}.md").exists()):
+                # This identity is ALREADY live (under this slug or another).
+                # Merging — never a suffixed promote — is the only outcome
+                # that cannot mint a second live card for one email/telegram.
+                _merge_staged_body_into(staged_card, existing_slug)
+                live_slug = existing_slug
+                merged_into = existing_slug
+            else:
+                target = card.PEOPLE_DIR / f"{slug}.md"
+                if target.exists():
+                    # Never clobber an existing live card: a staged slug can
+                    # collide with a different person (mail sender display
+                    # names are attacker-controlled). Promote under a unique
+                    # suffixed slug instead.
+                    live_slug = card._unique_slug(slug)
+                    target = card.PEOPLE_DIR / f"{live_slug}.md"
+                os.replace(staged_card, target)
+                # Drop draft flag.
+                post = card.load(live_slug)
+                if post is not None:
+                    post["draft"] = False
+                    post["slug"] = live_slug
+                    card.save(post, target)
+                    # Register in _index.yaml so future extraction sees this
+                    # identity via email/name lookup. Without this, every
+                    # subsequent backfill creates a fresh staged for the
+                    # same person.
+                    uid = post.get("id") or idx_mod.new_uuid()
+                    locators = {}
+                    if post.get("email"):
+                        locators["email"] = post.get("email")
+                    if post.get("telegram"):
+                        locators["telegram"] = post.get("telegram")
+                    idx_mod.register(uid, live_slug, post.get("name", live_slug),
+                                     locators, assume_locked=True)
+        # Pending sightings: `<slug>.staged-sightings.md` are sightings
+        # for the pre-existing LIVE `<slug>.md`. On a collision promote
+        # (live_slug != slug) that live card is a DIFFERENT person than
+        # the just-promoted staged candidate, so its sightings must NOT
+        # be merged into the new suffixed card — leave them for a
+        # separate approval against the original slug.
+        if staged_sightings.exists() and live_slug == slug:
+            try:
+                rows = staged_sightings.read_text(encoding="utf-8").splitlines()
+                for row in rows:
+                    row = row.strip()
+                    if not row.startswith("|"):
+                        continue
+                    cells = [c.strip() for c in row.strip("|").split("|")]
+                    if len(cells) < 3 or "Date" in cells[0] or "---" in cells[0]:
+                        continue
+                    # Summary may contain a `|`; rejoin past the source so it
+                    # is not truncated (see _merge_staged_body_into).
+                    date_, source_ = cells[0], cells[1]
+                    summary_ = "|".join(cells[2:]).strip()
+                    card.upsert_sighting(live_slug, date_, source_, summary_,
+                                         assume_locked=True)
+            except Exception:
+                pass
+            staged_sightings.unlink()
+    if merged_into is not None:
+        print(f"kb-extract-people: staged {slug!r} is already live as "
+              f"{merged_into!r} (same email) — merged its sightings, no "
+              f"duplicate created")
+    elif live_slug != slug:
+        print(f"kb-extract-people: live card {slug!r} already existed; "
+              f"promoted staged card as {live_slug!r}")
+    return 0
+
+
+def cmd_reject(args) -> int:
+    hub = Path(args.hub).expanduser().resolve()
+    card.PEOPLE_DIR = hub / "people"
+    slug = args.slug
+    staged_card = card.PEOPLE_DIR / f"{slug}.staged.md"
+    staged_sightings = card.PEOPLE_DIR / f"{slug}.staged-sightings.md"
+    identity: dict = {"reason": args.reason or "manual-reject",
+                      "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
+    # The staged read, the unlink, and the .rejected.yaml append all run
+    # under cards_lock. Without it, a concurrent extraction mid-append to
+    # the same staged card (which holds cards_lock) could write its copy
+    # back after this unlink and resurrect the rejected candidate; two
+    # concurrent rejects could also lose each other's .rejected.yaml
+    # entry (unlocked read-modify-write).
+    with cards_lock():
+        if staged_card.exists():
+            # `card.load(slug)` looks for `<slug>.md`, not `<slug>.staged.md`.
+            # Read the staged file directly so identity (email/telegram/name)
+            # makes it into .rejected.yaml — without it, the rejection
+            # blocklist has no key to match on next extraction.
+            try:
+                import frontmatter as fm
+                with open(staged_card, encoding="utf-8") as fh:
+                    post = fm.load(fh)
+                for k in ("email", "telegram", "name"):
+                    v = post.get(k)
+                    if v:
+                        identity[k] = v
+            except Exception:
+                pass
+            staged_card.unlink()
+        if staged_sightings.exists():
+            staged_sightings.unlink()
+        _append_rejected(hub, identity)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint.
+# ---------------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="kb-extract-people")
+    p.add_argument("--hub", required=True, type=str,
+                   help="hub root (defaults to ~/knowledge in real usage)")
+    p.add_argument("--quiet", action="store_true")
+
+    # Mode flags (mutually exclusive).
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--backfill", action="store_true",
+                      help="ignore watermarks, all output to *.staged.md")
+    mode.add_argument("--init-watermarks", action="store_true",
+                      help="baseline watermarks from current file state")
+    mode.add_argument("--list-staged", action="store_true",
+                      help="print summary of staged cards awaiting review")
+    mode.add_argument("--approve", metavar="SLUG", type=str,
+                      help="promote one staged card → live")
+    mode.add_argument("--reject", metavar="SLUG", type=str,
+                      help="drop staged card + add identity to .rejected.yaml")
+
+    # Pass-2 LLM flags.
+    llm_grp = p.add_mutually_exclusive_group()
+    llm_grp.add_argument("--llm", action="store_true",
+                         help="enable the Pass-2 LLM free-text extraction "
+                              "(all Pass-2 hits are forced draft; off by "
+                              "default and in scheduled runs)")
+    llm_grp.add_argument("--no-llm", action="store_true",
+                         help="explicitly disable Pass-2 LLM (the default)")
+
+    p.add_argument("--no-push", action="store_true",
+                   help="skip the Telegram review push at cycle end")
+    p.add_argument("--no-mail", action="store_true",
+                   help="skip the mail-people/v1 senders envelopes "
+                        "(mail connector is on by default in cycle mode)")
+
+    p.add_argument("--date", type=str, help="override audit date (testing)")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable output (where applicable)")
+    p.add_argument("--reason", type=str, default="",
+                   help="reason text for --reject")
+
+    args = p.parse_args(argv)
+
+    if args.init_watermarks:
+        return cmd_init_watermarks(args)
+    if args.list_staged:
+        return cmd_list_staged(args)
+    if args.approve:
+        args.slug = args.approve
+        return cmd_approve(args)
+    if args.reject:
+        args.slug = args.reject
+        return cmd_reject(args)
+    return cmd_run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
