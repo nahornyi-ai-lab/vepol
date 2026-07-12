@@ -275,6 +275,33 @@ print("T11_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T11: calendar apply staged-only (known → live sighting, new → staged, rejected dropped)" || fail "T11: calendar staged-only policy"
 
+# T12: kb-calendar-sync serializes against a concurrent kb-extract-people run
+# via the shared people-extraction.lock — both mutate people/ and share the
+# identity-dedup invariants, so an overlap would race. Calendar is best-effort:
+# on contention it SKIPS (rc=0), never corrupts.
+python3 - << 'PYEOF'
+import sys, os, tempfile, fcntl
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("kbx", str(Path.home()/"knowledge"/"bin"/"kb-extract-people"))
+kbx = importlib.util.module_from_spec(importlib.util.spec_from_loader("kbx", _l)); _l.exec_module(kbx)
+hub = Path(tempfile.mkdtemp()); (hub / "people").mkdir()
+# Hold the run lock as if kb-extract-people were mid-run.
+fd = kbx._acquire_run_lock(hub)
+assert fd is not None, "first acquire must succeed"
+# A second acquire (what kb-calendar-sync attempts) must fail fast, not block.
+fd2 = kbx._acquire_run_lock(hub)
+assert fd2 is None, "concurrent acquire must return None (contention), not block"
+os.close(fd)
+fd3 = kbx._acquire_run_lock(hub)
+assert fd3 is not None, "after release the lock is free again"
+os.close(fd3)
+print("T12_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T12: calendar/extract share people-extraction.lock (fail-fast on contention, not overlap)" || fail "T12: run-lock serialization"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

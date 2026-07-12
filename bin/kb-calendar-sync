@@ -17,6 +17,7 @@ Exit codes:
   5  MCP envelope schema error (host returned malformed response)
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -178,9 +179,25 @@ def main(days, dry_run, hub):
         click.echo("No attendees found.")
         return
 
-    counts, staged_names = apply_contacts(contacts, hub_path, dry_run=dry_run)
     if dry_run:
+        apply_contacts(contacts, hub_path, dry_run=True)
         return
+
+    # Serialize against a concurrent kb-extract-people run: both mutate
+    # people/ (staged files + _index) and share the same identity-dedup
+    # invariants, so they must not overlap. The lock is the SAME
+    # `people-extraction.lock` the extractor takes; calendar is
+    # best-effort, so on contention we skip this run rather than fail.
+    kbx = _load_extractor()
+    lock_fd = kbx._acquire_run_lock(hub_path)
+    if lock_fd is None:
+        click.echo("people extraction already running — skipping this "
+                   "calendar sync (will run next cycle).", err=True)
+        return
+    try:
+        counts, staged_names = apply_contacts(contacts, hub_path, dry_run=False)
+    finally:
+        os.close(lock_fd)
 
     click.echo(
         f"\nDone: {counts['live_upserted']} live sightings, "

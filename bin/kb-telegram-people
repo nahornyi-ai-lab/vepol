@@ -143,21 +143,30 @@ def watermark_path(hub: Path) -> Path:
 
 
 def read_since(hub: Path, now: datetime) -> datetime:
-    try:
-        data = json.loads(watermark_path(hub).read_text(encoding="utf-8"))
-        last = datetime.strptime(data["last_run_utc"], _TS_FMT).replace(
-            tzinfo=timezone.utc)
-        if last < now:
-            return last
-    except Exception:
-        pass
+    last = _raw_watermark(hub)
+    if last is not None and last < now:
+        return last
     return now - timedelta(hours=FIRST_RUN_LOOKBACK_HOURS)
 
 
-def advance_watermark(hub: Path, now: datetime) -> None:
+def _raw_watermark(hub: Path) -> datetime | None:
+    try:
+        data = json.loads(watermark_path(hub).read_text(encoding="utf-8"))
+        return datetime.strptime(data["last_run_utc"], _TS_FMT).replace(
+            tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def advance_watermark(hub: Path, when: datetime) -> None:
+    """Move the collection cursor forward. Never regress: a truncated
+    run's covered-boundary could be older than an existing watermark
+    after an out-of-order retry, and the cursor must be monotonic."""
+    cur = _raw_watermark(hub)
+    target = when if cur is None else max(cur, when)
     ts._atomic_write_json(watermark_path(hub), {
         "schema_version": 1,
-        "last_run_utc": now.strftime(_TS_FMT),
+        "last_run_utc": target.strftime(_TS_FMT),
     })
 
 
@@ -198,10 +207,11 @@ def _good_envelope_exists(hub: Path, day: str) -> bool:
     return ts.validate_envelope(env) and env.get("available") is True
 
 
-def _merge_senders(old: list, new: list) -> list:
+def _merge_senders(old: list, new: list) -> tuple[list, bool]:
     """Union two sender lists by user_id. Prefer non-empty identity
     fields, keep the max count (windows may overlap — counts are
-    display-only), widen the ts span."""
+    display-only), widen the ts span. Returns (merged, overflowed) where
+    overflowed is True when the union was capped at _MAX_SENDERS."""
     by_id = {s["user_id"]: dict(s) for s in old}
     for s in new:
         cur = by_id.get(s["user_id"])
@@ -215,18 +225,28 @@ def _merge_senders(old: list, new: list) -> list:
         cur["first_ts"] = min(cur.get("first_ts", ""), s.get("first_ts", "")) or s.get("first_ts", "")
         cur["last_ts"] = max(cur.get("last_ts", ""), s.get("last_ts", ""))
     merged = sorted(by_id.values(), key=lambda s: (-s["count"], s["user_id"]))
-    return merged[:500]
+    overflowed = len(merged) > _MAX_SENDERS
+    return merged[:_MAX_SENDERS], overflowed
 
 
-def finalize_run(hub: Path, env: dict, now: datetime) -> Path | None:
+def finalize_run(hub: Path, env: dict, next_watermark: datetime) -> Path | None:
     """Persist a collection result: merge with an existing UNPROCESSED
     same-day envelope (a same-day retry must never overwrite identities
-    the extractor has not consumed yet), write atomically, and advance
-    the watermark ONLY for a complete (non-truncated) window — dialogs
-    or messages beyond the caps would otherwise be lost forever behind
-    a watermark that claims they were covered."""
+    the extractor has not consumed yet), write atomically, and move the
+    watermark forward to `next_watermark` — the collector passes `now`
+    for a complete window and the newest activity it fully covered for a
+    truncated one, so the cursor is always monotonic and a truncated run
+    resumes the remainder instead of losing it or livelocking.
+
+    A truncated result (this run's OR a merged-in prior one's OR a merge
+    overflow past the sender cap) must not let the watermark jump past
+    uncovered work: on truncation the watermark is NOT advanced beyond
+    the prior value here — the collector already computed a safe
+    covered-boundary, and if the merge itself overflows we hold the
+    line entirely."""
     day = env["date"]
     path = ts.envelopes_dir(hub) / f"{day}-daily.json"
+    merge_overflow = False
     try:
         prev = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -237,18 +257,25 @@ def finalize_run(hub: Path, env: dict, now: datetime) -> Path | None:
                     .get(ts.envelope_key(prev)) == ts.file_sha256(path))
         if not consumed:
             env = dict(env)
-            env["senders"] = _merge_senders(prev["senders"], env["senders"])
-            env["truncated"] = bool(env["truncated"] or prev.get("truncated"))
+            env["senders"], merge_overflow = _merge_senders(
+                prev["senders"], env["senders"])
+            env["truncated"] = bool(
+                env["truncated"] or prev.get("truncated") or merge_overflow)
     if not ts.validate_envelope(env):
         _warn("built an envelope that fails its own validator — "
               "refusing to write senders")
         return None
     out = _write_envelope(hub, env)
     if env.get("truncated"):
-        _warn("window truncated — watermark NOT advanced; the next run "
-              "re-covers the remainder")
+        # Never advance past uncovered work. If the merge overflowed the
+        # sender cap we can't trust the collector's boundary, so hold the
+        # watermark entirely; otherwise use the collector's covered floor.
+        if not merge_overflow:
+            advance_watermark(hub, next_watermark)
+        _warn("window truncated — watermark advanced only to covered "
+              "boundary; the next run resumes the remainder")
     else:
-        advance_watermark(hub, now)
+        advance_watermark(hub, next_watermark)
     return out
 
 
@@ -288,47 +315,73 @@ def _sender_row(user, first_ts: str, last_ts: str, count: int,
     }
 
 
-def collect(client, me_id: int, since: datetime, *, include_groups: bool,
-            limit_dialogs: int, limit_msgs: int,
-            quiet: bool) -> tuple[list[dict], bool]:
-    """Walk recent dialogs, aggregate human senders since `since`.
+_MAX_SENDERS = 500
 
-    Returns (senders, truncated). Only identities are read; message
-    objects are consulted for sender/date and discarded.
+
+def collect(client, me_id: int, since: datetime, now: datetime, *,
+            include_groups: bool, scan_dialogs: int, limit_dialogs: int,
+            limit_msgs: int, quiet: bool) -> tuple[list[dict], bool, datetime]:
+    """Walk recent dialogs OLDEST-first, aggregate human senders since
+    `since`. Returns (senders, truncated, next_watermark).
+
+    Coverage is monotonic-forward so a truncated run can never livelock:
+    eligible dialogs (activity after `since`) are sorted oldest-first
+    and covered up to `limit_dialogs`. If more remain, the UNCOVERED
+    ones are strictly NEWER than everything covered, so the watermark
+    advances to the newest activity actually covered and the next run
+    resumes from exactly there — each run strictly advances the cursor
+    and the backlog drains in bounded rounds. A complete run advances
+    to `now`. Only identities are read; message objects are consulted
+    for sender/date and discarded.
     """
     from telethon.errors import FloodWaitError
     from telethon.tl.types import User
 
-    agg: dict[int, dict] = {}
+    # 1) Bounded scan for eligible dialogs. iter_dialogs yields PINNED
+    #    dialogs first, so the stream is not strictly date-sorted — we
+    #    must scan a bounded prefix and filter by activity, never treat
+    #    an old pinned chat as the end of the window.
+    eligible = []  # (activity_dt, entity, chat_type)
     truncated = False
-    dialogs_seen = 0
-    yielded = 0
     try:
-        # NOTE: iter_dialogs yields PINNED dialogs first, so the stream is
-        # not strictly date-sorted — an old pinned chat must be skipped,
-        # never treated as the end of the fresh window (first real smoke
-        # 2026-07-12 returned 0 dialogs because of that). The walk itself
-        # is bounded by limit_dialogs instead.
-        for dialog in client.iter_dialogs(limit=limit_dialogs):
-            yielded += 1
-            if dialog.date and dialog.date.astimezone(timezone.utc) <= since:
-                continue  # no activity inside the window (or old pinned)
-            dialogs_seen += 1
+        for dialog in client.iter_dialogs(limit=scan_dialogs):
+            act = dialog.date.astimezone(timezone.utc) if dialog.date else None
+            if act is None or act <= since:
+                continue
             entity = dialog.entity
             if isinstance(entity, User):
                 if entity.bot or entity.is_self or entity.deleted:
                     continue
                 chat_type = "private"
-            elif include_groups and (dialog.is_group):
+            elif include_groups and dialog.is_group:
                 chat_type = "group"
             else:
                 continue
+            eligible.append((act, entity, chat_type))
+    except FloodWaitError as e:
+        _warn(f"flood-wait ({e.seconds}s) during dialog scan — partial")
+        truncated = True
+
+    # 2) Oldest-first, cover up to limit_dialogs.
+    eligible.sort(key=lambda t: t[0])
+    if len(eligible) > limit_dialogs:
+        truncated = True
+        eligible = eligible[:limit_dialogs]
+
+    agg: dict[int, dict] = {}
+    covered_newest = since
+    try:
+        for act, entity, chat_type in eligible:
             msgs_seen = 0
             for m in client.iter_messages(entity):
-                if m.date and m.date.astimezone(timezone.utc) <= since:
+                mdt = m.date.astimezone(timezone.utc) if m.date else None
+                if mdt is None or mdt <= since:
                     break
                 msgs_seen += 1
                 if msgs_seen > limit_msgs:
+                    # A single dialog with more messages than the cap in
+                    # one window is rare; we keep the newest `limit_msgs`
+                    # (iter_messages is newest-first) and flag truncation.
                     truncated = True
                     break
                 if m.out:
@@ -340,7 +393,7 @@ def collect(client, me_id: int, since: datetime, *, include_groups: bool,
                     continue
                 if int(sender.id) == me_id:
                     continue
-                ts_str = m.date.astimezone(timezone.utc).strftime(_TS_FMT)
+                ts_str = mdt.strftime(_TS_FMT)
                 row = agg.get(sender.id)
                 if row is None:
                     agg[sender.id] = {
@@ -350,13 +403,13 @@ def collect(client, me_id: int, since: datetime, *, include_groups: bool,
                     }
                 else:
                     row["count"] += 1
-                    # iter_messages walks newest→oldest.
-                    row["first_ts"] = ts_str
+                    row["first_ts"] = ts_str  # walking newest→oldest
+            # This dialog is fully covered — advance the coverage cursor.
+            if act > covered_newest:
+                covered_newest = act
     except FloodWaitError as e:
-        _warn(f"flood-wait ({e.seconds}s) — stopping with a partial window")
+        _warn(f"flood-wait ({e.seconds}s) during message walk — partial")
         truncated = True
-    if yielded >= limit_dialogs:
-        truncated = True  # there may be fresh dialogs beyond the cap
 
     senders = [
         _sender_row(r["user"], r["first_ts"], r["last_ts"], r["count"],
@@ -364,12 +417,19 @@ def collect(client, me_id: int, since: datetime, *, include_groups: bool,
         for r in agg.values()
     ]
     senders.sort(key=lambda s: (-s["count"], s["user_id"]))
-    if len(senders) > 500:
-        senders = senders[:500]
+    if len(senders) > _MAX_SENDERS:
+        senders = senders[:_MAX_SENDERS]
         truncated = True
-    _say(f"dialogs={dialogs_seen} senders={len(senders)} truncated={truncated}",
+
+    # A complete run covers the whole window → advance to now. A
+    # truncated run advances only to the newest activity it fully
+    # covered (never past uncovered-but-newer dialogs), guaranteeing
+    # forward progress without skipping the remainder.
+    next_watermark = now if not truncated else covered_newest
+    _say(f"eligible={len(eligible)} senders={len(senders)} "
+         f"truncated={truncated} watermark→{next_watermark.strftime(_TS_FMT)}",
          quiet)
-    return senders, truncated
+    return senders, truncated, next_watermark
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +450,13 @@ def main() -> int:
     ap.add_argument("--login", action="store_true",
                     help="interactive first-time login for the dedicated "
                          "session (asks for a code in the terminal)")
-    ap.add_argument("--limit-dialogs", type=int, default=100)
-    ap.add_argument("--limit-msgs", type=int, default=300)
+    ap.add_argument("--scan-dialogs", type=int, default=400,
+                    help="how many dialogs to scan for activity (pinned "
+                         "dialogs sort first, so scan wider than cover)")
+    ap.add_argument("--limit-dialogs", type=int, default=200,
+                    help="max eligible dialogs covered per run (oldest-first; "
+                         "the rest resume next run)")
+    ap.add_argument("--limit-msgs", type=int, default=1000)
     args = ap.parse_args()
 
     hub = Path(args.hub).expanduser().resolve()
@@ -439,9 +504,10 @@ def main() -> int:
                              "collector session is not authorized; run "
                              "`kb-telegram-people --login` once")
             me = client.get_me()
-            senders, truncated = collect(
-                client, int(me.id), since,
+            senders, truncated, next_watermark = collect(
+                client, int(me.id), since, now,
                 include_groups=args.include_groups,
+                scan_dialogs=args.scan_dialogs,
                 limit_dialogs=args.limit_dialogs,
                 limit_msgs=args.limit_msgs,
                 quiet=args.quiet)
@@ -454,7 +520,7 @@ def main() -> int:
         "available": True, "truncated": bool(truncated),
         "senders": senders,
     }
-    path = finalize_run(hub, env, now)
+    path = finalize_run(hub, env, next_watermark)
     if path is None:
         return _fail(hub, day, now,
                      "envelope failed validation — nothing written")

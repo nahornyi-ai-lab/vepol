@@ -340,9 +340,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T10: a TRUNCATED collection must NOT advance the watermark — dialogs or
-# messages beyond the caps (or cut off by a flood-wait) would otherwise be
-# lost forever behind a watermark that claims they were covered.
+# T10: watermark contract in finalize_run — a COMPLETE run advances to the
+# collector's `now`; a TRUNCATED run advances only to the covered boundary
+# the collector computed (never past uncovered-but-newer work); a merge that
+# overflows the sender cap HOLDS the watermark entirely.
 # ---------------------------------------------------------------------------
 HUB10="$TMPDIR_TEST/hub-t10"; make_hub "$HUB10"
 $PY - "$HUB10" <<'PYEOF'
@@ -356,20 +357,99 @@ ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)
 from datetime import datetime, timezone
 hub = Path(sys.argv[1])
 now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
+boundary = datetime(2026, 7, 12, 18, 0, tzinfo=timezone.utc)  # covered floor < now
 
 def env(truncated, senders=None):
     return {"schema": ktp.ts.SCHEMA, "date": "2026-07-12", "period": "daily",
             "generated_at": "2026-07-12T21:00:00Z", "available": True,
             "truncated": truncated, "senders": senders or []}
 
-ktp.finalize_run(hub, env(True), now)
-assert not ktp.watermark_path(hub).exists(), "truncated run advanced the watermark"
+# Truncated → watermark = the collector's covered boundary, NOT now.
+ktp.finalize_run(hub, env(True), boundary)
+wm = json.loads(ktp.watermark_path(hub).read_text())
+assert wm["last_run_utc"] == "2026-07-12T18:00:00Z", wm
+# Complete → advances to now.
 ktp.finalize_run(hub, env(False), now)
 wm = json.loads(ktp.watermark_path(hub).read_text())
 assert wm["last_run_utc"] == "2026-07-12T21:00:00Z", wm
+# Monotonic: a later truncated run with an older boundary never regresses.
+ktp.finalize_run(hub, env(True), datetime(2026, 7, 12, 5, 0, tzinfo=timezone.utc))
+wm = json.loads(ktp.watermark_path(hub).read_text())
+assert wm["last_run_utc"] == "2026-07-12T21:00:00Z", f"watermark regressed: {wm}"
 print("T10_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T10: truncated collection never advances the watermark; complete one does" || fail "T10: truncated watermark advance"
+[[ $? -eq 0 ]] && ok "T10: watermark advances to now (complete) / covered boundary (truncated), never regresses" || fail "T10: watermark contract"
+
+# ---------------------------------------------------------------------------
+# T10b: the collector itself (via a fake Telethon client) makes MONOTONIC
+# forward progress under a dialog cap — a truncated run advances the cursor
+# to the newest dialog it covered (oldest-first), so re-running drains the
+# backlog instead of livelocking on the same capped prefix.
+# ---------------------------------------------------------------------------
+HUB10B="$TMPDIR_TEST/hub-t10b"; make_hub "$HUB10B"
+$PY - "$HUB10B" <<'PYEOF'
+import sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+from datetime import datetime, timezone
+
+# telethon is imported lazily inside collect(); provide a stub module so the
+# `from telethon...` lines resolve and isinstance(x, User) works.
+import types
+class _User:
+    def __init__(self, uid, first, username="", bot=False):
+        self.id = uid; self.first_name = first; self.last_name = ""
+        self.username = username; self.phone = ""
+        self.bot = bot; self.is_self = False; self.deleted = False
+tl = types.ModuleType("telethon"); errs = types.ModuleType("telethon.errors")
+tltypes = types.ModuleType("telethon.tl.types"); tlmod = types.ModuleType("telethon.tl")
+class _FloodWaitError(Exception):
+    def __init__(self, seconds=0): self.seconds = seconds
+errs.FloodWaitError = _FloodWaitError
+tltypes.User = _User
+sys.modules["telethon"] = tl; sys.modules["telethon.errors"] = errs
+sys.modules["telethon.tl"] = tlmod; sys.modules["telethon.tl.types"] = tltypes
+
+def dt(h): return datetime(2026, 7, 12, h, 0, tzinfo=timezone.utc)
+
+class _Dialog:
+    def __init__(self, entity, when): self.entity = entity; self.date = when; self.is_group = False
+class _Msg:
+    def __init__(self, sender, when, out=False): self.sender = sender; self.date = when; self.out = out
+
+class FakeClient:
+    def __init__(self, dialogs, msgs): self._dialogs = dialogs; self._msgs = msgs
+    def iter_dialogs(self, limit=None):
+        return iter(self._dialogs[:limit] if limit else self._dialogs)
+    def iter_messages(self, entity):
+        return iter(self._msgs.get(entity.id, []))
+
+# 3 eligible dialogs at 10:00, 12:00, 14:00 (activity times); cap covers 2.
+uA, uB, uC = _User(1, "A"), _User(2, "B"), _User(3, "C")
+dialogs = [_Dialog(uC, dt(14)), _Dialog(uA, dt(10)), _Dialog(uB, dt(12))]  # unsorted
+msgs = {1: [_Msg(uA, dt(10))], 2: [_Msg(uB, dt(12))], 3: [_Msg(uC, dt(14))]}
+client = FakeClient(dialogs, msgs)
+
+since = dt(8)
+senders, truncated, nwm = ktp.collect(client, me_id=999, since=since, now=dt(21),
+    include_groups=False, scan_dialogs=100, limit_dialogs=2, limit_msgs=100, quiet=True)
+ids = sorted(s["user_id"] for s in senders)
+assert truncated is True, "3 eligible > cap 2 must truncate"
+assert ids == [1, 2], f"oldest-first cover A,B: {ids}"          # C (newest) deferred
+assert nwm == dt(12), f"watermark = newest covered (B@12): {nwm}"  # monotonic, < now
+# Next run from dt(12): only C remains, completes, advances to now.
+senders2, truncated2, nwm2 = ktp.collect(client, me_id=999, since=dt(12), now=dt(21),
+    include_groups=False, scan_dialogs=100, limit_dialogs=2, limit_msgs=100, quiet=True)
+ids2 = sorted(s["user_id"] for s in senders2)
+assert ids2 == [3], f"remainder C covered next run: {ids2}"
+assert truncated2 is False and nwm2 == dt(21), f"complete → now: {truncated2} {nwm2}"
+print("T10B_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T10b: collector covers oldest-first, truncation advances cursor to covered boundary (no livelock)" || fail "T10b: collector livelock/monotonic progress"
 
 # ---------------------------------------------------------------------------
 # T11: a same-day re-collection must MERGE with an existing UNPROCESSED
@@ -421,6 +501,49 @@ assert ids2 == [3], f"consumed rows must not be re-merged: {ids2}"
 print("T11_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T11: same-day re-collection merges unprocessed identities, replaces consumed ones" || fail "T11: same-day envelope overwrite loses identities"
+
+# ---------------------------------------------------------------------------
+# T11b: a same-day merge whose union exceeds the sender cap must set
+# truncated AND hold the watermark — the dropped identities beyond the cap
+# would otherwise be lost behind an advanced cursor.
+# ---------------------------------------------------------------------------
+HUB11B="$TMPDIR_TEST/hub-t11b"; make_hub "$HUB11B"
+$PY - "$HUB11B" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+ts = ktp.ts
+from datetime import datetime, timezone
+hub = Path(sys.argv[1])
+now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
+
+def sender(uid):
+    return {"name": f"P{uid}", "username": "", "user_id": uid, "phone": "",
+            "chat_type": "private", "first_ts": "t", "last_ts": "t", "count": 1}
+def env(senders):
+    return {"schema": ts.SCHEMA, "date": "2026-07-12", "period": "daily",
+            "generated_at": "2026-07-12T21:00:00Z", "available": True,
+            "truncated": False, "senders": senders}
+
+# Run 1: 400 unprocessed identities, complete → watermark = now.
+ktp.finalize_run(hub, env([sender(i) for i in range(1, 401)]), now)
+wm1 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+assert wm1 == "2026-07-12T21:00:00Z", wm1
+# Run 2 same day: 200 more NEW ids → union 600 > cap 500 → overflow.
+later = datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
+ktp.finalize_run(hub, env([sender(i) for i in range(401, 601)]), later)
+data = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+assert len(data["senders"]) == 500, len(data["senders"])
+assert data["truncated"] is True, "overflowed merge must flag truncated"
+wm2 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+assert wm2 == "2026-07-12T21:00:00Z", f"overflow merge must HOLD watermark, got {wm2}"
+print("T11B_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T11b: merge past the sender cap flags truncated and holds the watermark" || fail "T11b: silent merge overflow"
 
 # ---------------------------------------------------------------------------
 # T12: a sender WITHOUT a username still has a stable identity — the reader
