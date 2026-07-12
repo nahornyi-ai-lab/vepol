@@ -47,7 +47,10 @@ _BOT_LOCAL_PART_RE = re.compile(
     r"info|hello|hi|admin|support|help|contact|"
     r"team|sales|billing|invoice|invoices|"
     r"calendar|cal|notify-cal)"
-    r"[\d_-]*@",
+    # numeric/sub-address tails: invoice2@, no-reply_3@, and plus-tags
+    # (invoice+statements@ — real 2026-07-12 dogfood junk) are the same
+    # mailbox class as the bare name.
+    r"[\d_-]*(\+[^@]*)?@",
     re.IGNORECASE,
 )
 

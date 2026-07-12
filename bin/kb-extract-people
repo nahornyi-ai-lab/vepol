@@ -44,7 +44,7 @@ import _kb_profile  # noqa: E402
 from _kb_people import card, filters, index as idx_mod  # noqa: E402
 from _kb_people.dedup import find_existing, resolve as dedup_resolve  # noqa: E402
 from _kb_people.locks import cards_lock  # noqa: E402
-from _kb_people.sources import mail_source  # noqa: E402
+from _kb_people.sources import mail_source, telegram_source  # noqa: E402
 from _kb_people.sources.project_source import (  # noqa: E402
     extract_pass1, extract_pass2, dedup_hits, _make_mcp_runner,
 )
@@ -61,6 +61,7 @@ ARCHIVED_STATUSES = {"archived"}
 # Audit key for the mail connector. Colon keeps it disjoint from
 # registry project slugs (kebab-case, never contain ':').
 MAIL_AUDIT_KEY = "mail:envelopes"
+TELEGRAM_AUDIT_KEY = "telegram:envelopes"
 
 # Documented contention exit code for the run-level lock (spec AC10).
 EXIT_LOCK_CONTENTION = 2
@@ -662,6 +663,106 @@ def _process_mail_envelopes(hub: Path, rejected: list[dict],
 
 
 # ---------------------------------------------------------------------------
+# Telegram connector (telegram-people/v1 envelopes → staged / live sighting).
+# ---------------------------------------------------------------------------
+
+def _process_telegram_envelopes(hub: Path, rejected: list[dict],
+                                audit: dict) -> None:
+    """Consume pending telegram identity envelopes (People Notebook D2
+    staged-only policy; owner directive 2026-07-12 replaced the
+    deprecated multibot journal with the direct `kb-telegram-people`
+    collector).
+
+    Policy per sender:
+      - username matches an existing live card's telegram locator
+        (deterministic identity signal) → live sighting upsert with
+        source ref `telegram:daily-<date>` and a count-only summary —
+        never message content (the envelope cannot carry any by
+        schema);
+      - new sender passing filters → staged card via the existing
+        stage_for_review machinery (phone/username carried onto the
+        staged card);
+      - name-fuzzy match without a locator match (ambiguous) → staged
+        with `possible_duplicate_of`, never auto-merged.
+
+    Each envelope is marked in the processed-watermark after apply, so
+    re-running the same envelope proposes nothing.
+    """
+    src = telegram_source.TelegramSource(hub)
+    pending, warnings = src.pending_envelopes()
+    if warnings:
+        audit.setdefault("warnings", []).extend(warnings)
+    if not pending:
+        return
+    proj = {
+        "files_scanned": [],
+        "envelopes_processed": [],
+        "senders_seen": 0,
+        "live_upserted": 0,
+        "drafts_created": 0,
+        "sightings_appended": 0,
+        "dropped_blocklist": 0,
+        "dropped_rejected_yaml": 0,
+        "errors": [],
+    }
+    audit["projects"][TELEGRAM_AUDIT_KEY] = proj
+
+    for item in pending:
+        env = item["env"]
+        day = env["date"]
+        source_ref = f"telegram:daily-{day}"
+        kept, dropped = src.filter_senders(env["senders"])
+        proj["senders_seen"] += len(env["senders"])
+        proj["dropped_blocklist"] += dropped
+        for s in kept:
+            if _is_rejected({"telegram": s["telegram"], "name": s["name"]},
+                            rejected):
+                proj["dropped_rejected_yaml"] += 1
+                continue
+            summary = f"{s['count']} messages (telegram)"
+            uid = (idx_mod.lookup_by_telegram(s["telegram"])
+                   if s["telegram"] else None)
+            if uid:
+                with cards_lock():
+                    slug = idx_mod.get_slug(uid)
+                if slug and (card.PEOPLE_DIR / f"{slug}.md").exists():
+                    card.upsert_sighting(slug, day, source_ref, summary)
+                    proj["live_upserted"] += 1
+                    continue
+                # Index points at a missing card — fall through to staging.
+            possible = ""
+            _uid2, strategy = find_existing(s["name"], "")
+            if strategy == "name-match-high":
+                possible = idx_mod.get_slug(_uid2) or ""
+            elif strategy.startswith("name-match-ambiguous:"):
+                possible = strategy.split(":", 1)[1]
+            display = s["name"] or s["telegram"].lstrip("@")
+            base_slug = card._slugify(display) or f"unknown-{uuid.uuid4().hex[:8]}"
+            hit = {"date": day, "source_ref": source_ref, "context": summary}
+            kwargs = {
+                "name": display,
+                "telegram": s["telegram"],
+                "phone": s["phone"],
+                "first_met": day,
+                "first_met_context": source_ref,
+                "last_seen": day,
+                "source": "telegram",
+            }
+            if possible:
+                kwargs["possible_duplicate_of"] = possible
+            # Resolve + existence + write happen atomically inside
+            # _stage_new_card; D1 "new items" counts NEWLY created
+            # candidates only (same rule as the mail path).
+            _path, created = _stage_new_card(base_slug, [hit], kwargs)
+            if created:
+                proj["drafts_created"] += 1
+            else:
+                proj["sightings_appended"] = proj.get("sightings_appended", 0) + 1
+        telegram_source.mark_processed(hub, item["key"], item["sha"])
+        proj["envelopes_processed"].append(item["key"])
+
+
+# ---------------------------------------------------------------------------
 # Per-project scan.
 # ---------------------------------------------------------------------------
 
@@ -950,6 +1051,17 @@ def _cmd_run_locked(args, hub: Path) -> int:
                 {"kind": "mail_source_exception", "detail": str(e)}
             )
 
+    # Telegram connector: same contract as mail — default in cycle mode
+    # when envelopes exist; --no-telegram opts out; backfill runs stay
+    # project-only; a missing or broken envelope never fails the run.
+    if not args.backfill and not getattr(args, "no_telegram", False):
+        try:
+            _process_telegram_envelopes(hub, rejected, audit)
+        except Exception as e:
+            audit.setdefault("warnings", []).append(
+                {"kind": "telegram_source_exception", "detail": str(e)}
+            )
+
     _finalize_audit(audit)
     audit_path = _write_audit(hub, audit)
     if not args.quiet:
@@ -971,6 +1083,7 @@ def _cmd_run_locked(args, hub: Path) -> int:
                     list(people_dir.glob("*.staged-sightings.md"))) if people_dir.is_dir() else []
     new_items = audit["totals"].get("drafts_created", 0)
     mail_proj = audit["projects"].get(MAIL_AUDIT_KEY, {})
+    tg_proj = audit["projects"].get(TELEGRAM_AUDIT_KEY, {})
     # Telegram review push (people-review-telegram spec 2026-07-05) is the
     # PRIMARY review surface and is deliberately NOT under the D1 digest
     # gate: it delivers any staged candidate not already in the outbox,
@@ -1000,6 +1113,8 @@ def _cmd_run_locked(args, hub: Path) -> int:
             new_count=new_items,
             mail_staged=mail_proj.get("drafts_created", 0),
             mail_upserts=mail_proj.get("live_upserted", 0),
+            tg_staged=tg_proj.get("drafts_created", 0),
+            tg_upserts=tg_proj.get("live_upserted", 0),
             nudge=nudge,
         )
         if not channel_send("people-staged", msg):
@@ -1038,12 +1153,13 @@ def _record_digest_sent(hub: Path) -> None:
 
 def staged_digest_message(names: list, total: int, hub, *,
                           new_count: int = 0, mail_staged: int = 0,
-                          mail_upserts: int = 0, nudge: bool = False) -> str:
+                          mail_upserts: int = 0, tg_staged: int = 0,
+                          tg_upserts: int = 0, nudge: bool = False) -> str:
     """User-facing staged-review digest in the profile language (spec:
     user-language-setting-2026-06-12). CLI command lines stay literal —
     they are commands, not prose. `nudge` renders the weekly reminder
-    variant (D1); mail counts add one line when the mail connector
-    contributed this run."""
+    variant (D1); mail/telegram counts add one line each when that
+    connector contributed this run."""
     shown = ", ".join(names)
     more = f" (+{total - len(names)})" if total > len(names) else ""
     lang = _kb_profile.get_language(hub)
@@ -1058,6 +1174,8 @@ def staged_digest_message(names: list, total: int, hub, *,
             head = f"👥 Ревью карточек: {total} staged-карточек ждут ревью: {shown}{more}"
         mail_line = (f"Почта: {mail_staged} новых отправителей в staged, "
                      f"{mail_upserts} live-обновлений")
+        tg_line = (f"Telegram: {tg_staged} новых собеседников в staged, "
+                   f"{tg_upserts} live-обновлений")
         list_label, decide_label = "Список", "Решение"
     else:
         if nudge:
@@ -1070,10 +1188,14 @@ def staged_digest_message(names: list, total: int, hub, *,
             head = f"👥 People review: {total} staged cards await review: {shown}{more}"
         mail_line = (f"Mail: {mail_staged} new senders staged, "
                      f"{mail_upserts} live sightings applied")
+        tg_line = (f"Telegram: {tg_staged} new correspondents staged, "
+                   f"{tg_upserts} live sightings applied")
         list_label, decide_label = "List", "Decide"
     lines = [head]
     if mail_staged or mail_upserts:
         lines.append(mail_line)
+    if tg_staged or tg_upserts:
+        lines.append(tg_line)
     lines.append(f"{list_label}: kb-extract-people --hub {hub} --list-staged")
     lines.append(f"{decide_label}: kb-extract-people --hub {hub} "
                  f"--approve <slug> | --reject <slug>")
@@ -1330,6 +1452,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-mail", action="store_true",
                    help="skip the mail-people/v1 senders envelopes "
                         "(mail connector is on by default in cycle mode)")
+    p.add_argument("--no-telegram", action="store_true",
+                   help="skip the telegram-people/v1 identity envelopes "
+                        "(telegram connector is on by default in cycle mode)")
 
     p.add_argument("--date", type=str, help="override audit date (testing)")
     p.add_argument("--json", action="store_true",

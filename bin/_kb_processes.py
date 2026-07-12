@@ -156,12 +156,34 @@ DEFAULT_PROCESSES_YAML = """\
   run: kb-morning-digest --period evening
   outputs: [file, notebooklm_audio]
 
+# Telegram people collector (People Notebook): aggregates WHO wrote in
+# private dialogs into a daily identity envelope — names/usernames/counts
+# only, never message text. Enable only after a one-time
+# `kb-telegram-people --login` (or a bootstrapped session) succeeds.
+# Listed BEFORE people-extract: same after:retro tick consumes the fresh
+# envelope in the same pass (kb-tick runs processes in file order).
+- id: telegram-people
+  enabled: false
+  when: after:retro
+  run: kb-telegram-people --hub ~/knowledge --quiet
+  outputs: [file]
+
 # Enable only after watermark bootstrap: kb-extract-people --init-watermarks
 - id: people-extract
   enabled: false
   when: after:retro
   run: kb-extract-people --hub ~/knowledge --no-llm --quiet
   outputs: [people, telegram, file]
+
+# Companies/assets rollup from grep-prefix log events into companies/ and
+# personal/assets.md — never people (the People Notebook staging layer owns
+# person flow; the scope is hardcoded in kb-entity-rollup). Needs the
+# orchestrator cycle's cycle-<date>.json; enable together with that cycle.
+- id: entity-rollup
+  enabled: false
+  when: after:people-extract
+  run: kb-entity-rollup
+  outputs: [file]
 
 # Enable only after the launchd-equivalent smoke passes (see release spec).
 - id: people-remind
@@ -170,12 +192,15 @@ DEFAULT_PROCESSES_YAML = """\
   run: kb-people-remind --horizon 0
   outputs: [telegram]
 
-# kb-calendar-sync is attendee→People ingestion, not a calendar writer.
+# Calendar attendees → People Notebook, staged-only (D2): a known email
+# upserts a live sighting; new people ONLY reach the review queue. This is
+# an MCP reader, not a calendar writer. Enable after the Google Calendar
+# MCP connector is authorized; list it before people-extract.
 - id: calendar
   enabled: false
-  when: on-demand
-  run: kb-calendar-sync --dry-run
-  outputs: [file]
+  when: after:retro
+  run: kb-calendar-sync --days 2
+  outputs: [people, telegram, file]
 
 # Self-improvement is proposal + eval + review only; never auto-apply.
 - id: process-improve

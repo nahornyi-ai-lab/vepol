@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""kb-telegram-people — collect WHO wrote in Telegram into a daily
+identity envelope for the People Notebook.
+
+Owner directive 2026-07-12: the multibot supervisor is deprecated;
+Telegram is read directly with the owner's credentials. This collector
+connects READ-ONLY with its own dedicated session, walks dialogs whose
+last activity falls inside the collection window, and aggregates sender
+identities — name, username, user_id, phone (when visible), chat type,
+message count. It never stores message text, and the envelope schema
+(`telegram-people/v1`, validated by
+`_kb_people.sources.telegram_source`) has no field that could carry it.
+
+Output: `<hub>/personal/telegram/people/<YYYY-MM-DD>-daily.json` (0600,
+atomic). personal/ is gitignored and never synced. Consumption is
+staged-only in kb-extract-people — nothing here writes people cards.
+
+Session: `<hub>/personal/telegram/.people-collector.session`. If
+missing, it is bootstrapped as a consistent SQLite snapshot of the
+already-authorized supervisor session (legacy but authorized), or
+interactively via --login on machines without one. The collector never
+shares a live session file with another process.
+
+Credentials: TG_API_ID / TG_API_HASH from the environment, else from
+the env file at $KB_TG_ENV_FILE (default ~/.orchestrator/multibot.env).
+
+Failure model (mirrors mail): any failure writes an available:false
+envelope for the day (unless a good one already exists) and exits
+non-zero so kb-tick retries — degradation is visible, never silent.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _kb_people.sources import telegram_source as ts  # noqa: E402
+
+DEFAULT_ENV_FILE = Path.home() / ".orchestrator" / "multibot.env"
+LEGACY_SESSION = Path.home() / ".orchestrator" / "multibot-supervisor.session"
+
+FIRST_RUN_LOOKBACK_HOURS = 48
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _say(msg: str, quiet: bool) -> None:
+    if not quiet:
+        print(f"kb-telegram-people: {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"kb-telegram-people: {msg}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Credentials + session.
+# ---------------------------------------------------------------------------
+
+def _load_env_file(path: Path) -> dict:
+    out: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _credentials() -> tuple[int, str] | None:
+    api_id = os.environ.get("TG_API_ID", "").strip()
+    api_hash = os.environ.get("TG_API_HASH", "").strip()
+    if not (api_id and api_hash):
+        env_file = Path(os.environ.get("KB_TG_ENV_FILE", str(DEFAULT_ENV_FILE)))
+        data = _load_env_file(env_file)
+        api_id = api_id or data.get("TG_API_ID", "")
+        api_hash = api_hash or data.get("TG_API_HASH", "")
+    if not (api_id.isdigit() and api_hash):
+        return None
+    return int(api_id), api_hash
+
+
+def session_path(hub: Path) -> Path:
+    return hub / "personal" / "telegram" / ".people-collector.session"
+
+
+def _bootstrap_session(dest: Path, quiet: bool) -> bool:
+    """Snapshot-clone the authorized legacy session into `dest`.
+
+    sqlite3 backup API gives a consistent copy even while the legacy
+    process holds the file. Both copies share one Telegram auth key —
+    fine for parallel request/response use; the files themselves are
+    never shared between processes.
+    """
+    src = Path(os.environ.get("KB_TG_BOOTSTRAP_SESSION", str(LEGACY_SESSION)))
+    if not src.exists():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(f"file:{src}?mode=ro", uri=True) as s, \
+                sqlite3.connect(dest) as d:
+            s.backup(d)
+        os.chmod(dest, 0o600)
+    except sqlite3.Error as e:
+        _warn(f"session bootstrap failed: {e}")
+        return False
+    _say(f"session bootstrapped from {src}", quiet)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Collection window watermark.
+# ---------------------------------------------------------------------------
+
+def watermark_path(hub: Path) -> Path:
+    return hub / "personal" / "telegram" / ".people-collector-watermark.json"
+
+
+def read_since(hub: Path, now: datetime) -> datetime:
+    try:
+        data = json.loads(watermark_path(hub).read_text(encoding="utf-8"))
+        last = datetime.strptime(data["last_run_utc"], _TS_FMT).replace(
+            tzinfo=timezone.utc)
+        if last < now:
+            return last
+    except Exception:
+        pass
+    return now - timedelta(hours=FIRST_RUN_LOOKBACK_HOURS)
+
+
+def advance_watermark(hub: Path, now: datetime) -> None:
+    ts._atomic_write_json(watermark_path(hub), {
+        "schema_version": 1,
+        "last_run_utc": now.strftime(_TS_FMT),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Envelope IO.
+# ---------------------------------------------------------------------------
+
+def _write_envelope(hub: Path, env: dict) -> Path:
+    d = ts.envelopes_dir(hub)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{ts.envelope_key(env)}.json"
+    fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(env, f, indent=2, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return path
+
+
+def _unavailable_envelope(day: str, now: datetime) -> dict:
+    return {
+        "schema": ts.SCHEMA, "date": day, "period": "daily",
+        "generated_at": now.strftime(_TS_FMT),
+        "available": False, "truncated": False, "senders": [],
+    }
+
+
+def _good_envelope_exists(hub: Path, day: str) -> bool:
+    p = ts.envelopes_dir(hub) / f"{day}-daily.json"
+    try:
+        env = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return ts.validate_envelope(env) and env.get("available") is True
+
+
+def _fail(hub: Path, day: str, now: datetime, reason: str) -> int:
+    _warn(reason)
+    if not _good_envelope_exists(hub, day):
+        env = _unavailable_envelope(day, now)
+        if ts.validate_envelope(env):
+            _write_envelope(hub, env)
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Collection.
+# ---------------------------------------------------------------------------
+
+_PHONE_CLEAN_RE = re.compile(r"[^0-9 +()-]")
+
+
+def _sender_row(user, first_ts: str, last_ts: str, count: int,
+                chat_type: str) -> dict:
+    name = " ".join(x for x in [(user.first_name or "").strip(),
+                                (user.last_name or "").strip()] if x)
+    username = (user.username or "").strip().lower()
+    phone = _PHONE_CLEAN_RE.sub("", (user.phone or "").strip())
+    if phone and not phone.startswith("+"):
+        phone = "+" + phone
+    return {
+        "name": name[:200],
+        "username": username,
+        "user_id": int(user.id),
+        "phone": phone[:32],
+        "chat_type": chat_type,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "count": count,
+    }
+
+
+def collect(client, me_id: int, since: datetime, *, include_groups: bool,
+            limit_dialogs: int, limit_msgs: int,
+            quiet: bool) -> tuple[list[dict], bool]:
+    """Walk recent dialogs, aggregate human senders since `since`.
+
+    Returns (senders, truncated). Only identities are read; message
+    objects are consulted for sender/date and discarded.
+    """
+    from telethon.errors import FloodWaitError
+    from telethon.tl.types import User
+
+    agg: dict[int, dict] = {}
+    truncated = False
+    dialogs_seen = 0
+    yielded = 0
+    try:
+        # NOTE: iter_dialogs yields PINNED dialogs first, so the stream is
+        # not strictly date-sorted — an old pinned chat must be skipped,
+        # never treated as the end of the fresh window (first real smoke
+        # 2026-07-12 returned 0 dialogs because of that). The walk itself
+        # is bounded by limit_dialogs instead.
+        for dialog in client.iter_dialogs(limit=limit_dialogs):
+            yielded += 1
+            if dialog.date and dialog.date.astimezone(timezone.utc) <= since:
+                continue  # no activity inside the window (or old pinned)
+            dialogs_seen += 1
+            entity = dialog.entity
+            if isinstance(entity, User):
+                if entity.bot or entity.is_self or entity.deleted:
+                    continue
+                chat_type = "private"
+            elif include_groups and (dialog.is_group):
+                chat_type = "group"
+            else:
+                continue
+            msgs_seen = 0
+            for m in client.iter_messages(entity):
+                if m.date and m.date.astimezone(timezone.utc) <= since:
+                    break
+                msgs_seen += 1
+                if msgs_seen > limit_msgs:
+                    truncated = True
+                    break
+                if m.out:
+                    continue  # our own message
+                sender = entity if chat_type == "private" else m.sender
+                if not isinstance(sender, User):
+                    continue
+                if sender.bot or sender.is_self or sender.deleted:
+                    continue
+                if int(sender.id) == me_id:
+                    continue
+                ts_str = m.date.astimezone(timezone.utc).strftime(_TS_FMT)
+                row = agg.get(sender.id)
+                if row is None:
+                    agg[sender.id] = {
+                        "user": sender, "first_ts": ts_str,
+                        "last_ts": ts_str, "count": 1,
+                        "chat_type": chat_type,
+                    }
+                else:
+                    row["count"] += 1
+                    # iter_messages walks newest→oldest.
+                    row["first_ts"] = ts_str
+    except FloodWaitError as e:
+        _warn(f"flood-wait ({e.seconds}s) — stopping with a partial window")
+        truncated = True
+    if yielded >= limit_dialogs:
+        truncated = True  # there may be fresh dialogs beyond the cap
+
+    senders = [
+        _sender_row(r["user"], r["first_ts"], r["last_ts"], r["count"],
+                    r["chat_type"])
+        for r in agg.values()
+    ]
+    senders.sort(key=lambda s: (-s["count"], s["user_id"]))
+    if len(senders) > 500:
+        senders = senders[:500]
+        truncated = True
+    _say(f"dialogs={dialogs_seen} senders={len(senders)} truncated={truncated}",
+         quiet)
+    return senders, truncated
+
+
+# ---------------------------------------------------------------------------
+# Main.
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Collect Telegram sender identities (never message "
+                    "text) into a daily people envelope.")
+    ap.add_argument("--hub", required=True)
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--date", default="",
+                    help="envelope date (default: today UTC)")
+    ap.add_argument("--include-groups", action="store_true",
+                    help="also collect group-chat senders (default: "
+                         "private dialogs only)")
+    ap.add_argument("--login", action="store_true",
+                    help="interactive first-time login for the dedicated "
+                         "session (asks for a code in the terminal)")
+    ap.add_argument("--limit-dialogs", type=int, default=100)
+    ap.add_argument("--limit-msgs", type=int, default=300)
+    args = ap.parse_args()
+
+    hub = Path(args.hub).expanduser().resolve()
+    now = datetime.now(timezone.utc)
+    day = args.date or now.strftime("%Y-%m-%d")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        _warn(f"bad --date {day!r}")
+        return 2
+
+    creds = _credentials()
+    if creds is None:
+        return _fail(hub, day, now,
+                     "no TG_API_ID/TG_API_HASH (env or env-file) — "
+                     "telegram people collection unavailable")
+    api_id, api_hash = creds
+
+    sess = session_path(hub)
+    if not sess.exists() and not args.login:
+        if not _bootstrap_session(sess, args.quiet):
+            return _fail(hub, day, now,
+                         "no collector session and no bootstrap source; "
+                         "run `kb-telegram-people --login` once")
+
+    try:
+        from telethon.sync import TelegramClient
+    except ImportError:
+        return _fail(hub, day, now,
+                     "telethon is not installed — "
+                     "pip install telethon to enable telegram people")
+
+    since = read_since(hub, now)
+    _say(f"window since {since.strftime(_TS_FMT)}", args.quiet)
+
+    try:
+        sess.parent.mkdir(parents=True, exist_ok=True)
+        with TelegramClient(str(sess), api_id, api_hash,
+                            receive_updates=False) as client:
+            if args.login:
+                pass  # TelegramClient.__enter__ ran the interactive start()
+            if not client.is_user_authorized():
+                return _fail(hub, day, now,
+                             "collector session is not authorized; run "
+                             "`kb-telegram-people --login` once")
+            me = client.get_me()
+            senders, truncated = collect(
+                client, int(me.id), since,
+                include_groups=args.include_groups,
+                limit_dialogs=args.limit_dialogs,
+                limit_msgs=args.limit_msgs,
+                quiet=args.quiet)
+    except Exception as e:
+        return _fail(hub, day, now, f"telegram collection failed: {e}")
+
+    env = {
+        "schema": ts.SCHEMA, "date": day, "period": "daily",
+        "generated_at": now.strftime(_TS_FMT),
+        "available": True, "truncated": bool(truncated),
+        "senders": senders,
+    }
+    if not ts.validate_envelope(env):
+        return _fail(hub, day, now,
+                     "built an envelope that fails its own validator — "
+                     "refusing to write senders")
+    path = _write_envelope(hub, env)
+    advance_watermark(hub, now)
+    _say(f"envelope written: {path}", args.quiet)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

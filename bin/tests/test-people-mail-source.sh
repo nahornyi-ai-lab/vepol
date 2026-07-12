@@ -175,12 +175,13 @@ senders = [
     s("owner-self@corp.io"),          # owner-self
     s("receipts@vendor.io"),          # role mailbox, not a person
     s("demo@example.com"),            # RFC-reserved doc domain — a fixture
+    s("invoice+statements@vendor.io"),  # plus-tagged role mailbox (2026-07-12 dogfood junk)
     s("JANE.SMITH@Client.ORG", "Jane Smith"),  # lowercased on keep
 ]
 kept, dropped = ms.MailSource(hub).filter_senders(senders)
 emails = [k["email"] for k in kept]
 assert emails == ["jane@acme.com", "jane.smith@client.org"], emails
-assert dropped == 7, f"expected 7 dropped, got {dropped}"
+assert dropped == 8, f"expected 8 dropped, got {dropped}"
 assert kept[0]["name"] == "Jane Doe"
 print("T3_PASS")
 PYEOF

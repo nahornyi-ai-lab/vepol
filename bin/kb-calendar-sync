@@ -23,17 +23,126 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import click
-from _kb_people import card, index, dedup
-from _kb_people.channel import send
+from _kb_people import card, index
 from _kb_mcp.runner import McpHostError, McpResponseError, McpToolError
+
+
+def _load_extractor():
+    """Load the kb-extract-people module — it owns the staging machinery
+    (_stage_new_card under one cards_lock, .rejected.yaml matching,
+    find_existing). Loaded lazily so `--help` stays cheap."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader(
+        "kb_extract_people", str(Path(__file__).parent / "kb-extract-people"))
+    mod = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader("kb_extract_people", loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def apply_contacts(contacts: list, hub: Path, *, dry_run: bool = False):
+    """Apply calendar attendees under the People Notebook D2 policy —
+    the SAME rules as the mail connector:
+
+      - email matches an existing live card (deterministic identity
+        signal) → live sighting upsert, source `calendar/<request-id>`;
+      - everything else → *.staged.md candidate for owner review —
+        NEVER a direct live card, never the legacy draft-card path
+        (which wrote live files with draft:true, bypassing staging);
+      - .rejected.yaml identities are dropped (strong-id equality).
+
+    Returns (counts, staged_names).
+    """
+    import uuid as _uuid
+    kbx = _load_extractor()
+    rejected = kbx._load_rejected(hub)
+    counts = {"live_upserted": 0, "staged_new": 0,
+              "sightings_appended": 0, "dropped_rejected": 0}
+    staged_names: list = []
+
+    # Deduplicate by email within this batch. Also fill in a fallback
+    # display name from the email's local part when the source emitted
+    # an empty `name` — an empty name slugifies to "" and breaks
+    # downstream card handling.
+    seen_emails: set = set()
+    unique_contacts = []
+    for c in contacts:
+        key = c["email"].lower()
+        if key not in seen_emails:
+            seen_emails.add(key)
+            if not (c.get("name") or "").strip():
+                c["name"] = c["email"].split("@", 1)[0]
+            unique_contacts.append(c)
+
+    for c in unique_contacts:
+        if kbx._is_rejected({"email": c["email"], "name": c["name"]},
+                            rejected):
+            counts["dropped_rejected"] += 1
+            continue
+        # Provenance: tag each sighting with a short request_id slice so an
+        # audit can grep all rows from one fetch. Per
+        # docs/methodology/mcp-first-sources.md § Security: provenance.
+        rid = (c.get("request_id") or "")[:8]
+        sighting_source = f"calendar/{rid}" if rid else "calendar"
+        summary = (c.get("context") or "")[:300]
+
+        uid, strategy = kbx.find_existing(c["name"], c["email"])
+        if dry_run:
+            click.echo(f"  [{strategy}] {c['name']} <{c['email']}> — {summary}")
+            continue
+
+        if strategy == "email-match":
+            with kbx.cards_lock():
+                slug = index.get_slug(uid)
+            if slug and (card.PEOPLE_DIR / f"{slug}.md").exists():
+                card.upsert_sighting(slug, c["date"], sighting_source, summary)
+                counts["live_upserted"] += 1
+                continue
+            # Index points at a missing card — fall through to staging.
+        possible = ""
+        if strategy == "name-match-high":
+            possible = index.get_slug(uid) or ""
+        elif strategy.startswith("name-match-ambiguous:"):
+            possible = strategy.split(":", 1)[1]
+        display = c["name"] or c["email"].split("@", 1)[0].replace(
+            ".", " ").replace("_", " ")
+        base_slug = card._slugify(display) or f"unknown-{_uuid.uuid4().hex[:8]}"
+        hit = {"date": c["date"], "source_ref": sighting_source,
+               "context": summary}
+        kwargs = {
+            "name": display,
+            "email": c["email"],
+            "first_met": c["date"],
+            "first_met_context": sighting_source,
+            "last_seen": c["date"],
+            "source": "calendar",
+        }
+        if possible:
+            kwargs["possible_duplicate_of"] = possible
+        _path, created = kbx._stage_new_card(base_slug, [hit], kwargs)
+        if created:
+            counts["staged_new"] += 1
+            staged_names.append(display)
+        else:
+            counts["sightings_appended"] += 1
+
+    return counts, staged_names
 
 
 @click.command()
 @click.option("--days", default=30, show_default=True, help="Days back to scan")
 @click.option("--dry-run", is_flag=True, help="Print what would happen, no writes")
-def main(days, dry_run):
-    """Sync Google Calendar attendees to people/ contacts via MCP."""
+@click.option("--hub", default=str(Path.home() / "knowledge"),
+              show_default=True, help="Hub root (people/ lives beneath it)")
+def main(days, dry_run, hub):
+    """Sync Google Calendar attendees to the People Notebook via MCP
+    (staged-only: new attendees always land in review, never live)."""
     from _kb_people.sources.calendar_source import CalendarSource
+
+    hub_path = Path(hub).expanduser().resolve()
+    card.PEOPLE_DIR = hub_path / "people"
+    index.INDEX_PATH = hub_path / "people" / "_index.yaml"
 
     click.echo(f"Scanning Google Calendar (last {days} days){'  [DRY RUN]' if dry_run else ''}...")
 
@@ -69,84 +178,26 @@ def main(days, dry_run):
         click.echo("No attendees found.")
         return
 
-    # Deduplicate by email within this batch. Also fill in a fallback
-    # display name from the email's local part when the source emitted
-    # an empty `name` — Calendar attendees with no displayName produce
-    # empty names, and an empty name slugifies to "" which lands the
-    # card at `<people>/.md` (a hidden file) and breaks downstream
-    # `card.load(slug)`. Local-part-as-name (e.g. "alice" from
-    # "alice@example.com") is a safe, recoverable default that the user
-    # can correct later.
-    seen_emails: set[str] = set()
-    unique_contacts = []
-    for c in contacts:
-        key = c["email"].lower()
-        if key not in seen_emails:
-            seen_emails.add(key)
-            if not (c.get("name") or "").strip():
-                c["name"] = c["email"].split("@", 1)[0]
-            unique_contacts.append(c)
-
-    updated = 0
-    created_draft = 0
-    created = 0
-
-    draft_names = []
-
-    for c in unique_contacts:
-        result = dedup.resolve(c["name"], email=c["email"])
-        action = result["action"]
-
-        if dry_run:
-            click.echo(f"  [{action}] {c['name']} <{c['email']}> — {c['context']}")
-            continue
-
-        # Provenance: tag each sighting with a short request_id slice so an
-        # audit can grep all rows from one fetch. Per
-        # docs/methodology/mcp-first-sources.md § Security: provenance.
-        rid = (c.get("request_id") or "")[:8]
-        sighting_source = f"calendar/{rid}" if rid else "calendar"
-
-        if action == "update":
-            uid = result["uid"]
-            slug = index.get_slug(uid)
-            if slug:
-                card.upsert_sighting(slug, c["date"], sighting_source, c["context"])
-                index.register(uid, slug, c["name"], {"email": c["email"]})
-                updated += 1
-
-        else:
-            is_draft = action == "create-draft"
-            dup_of = result.get("possible_duplicate_of", "")
-            path = card.create(
-                c["name"],
-                email=c["email"],
-                source="calendar",
-                draft=is_draft,
-                possible_duplicate_of=dup_of,
-            )
-            slug = path.stem
-            post = card.load(slug)
-            uid = post["id"]
-            index.register(uid, slug, c["name"], {"email": c["email"]})
-            card.upsert_sighting(slug, c["date"], sighting_source, c["context"])
-
-            if is_draft:
-                created_draft += 1
-                draft_names.append(c["name"])
-            else:
-                created += 1
-
+    counts, staged_names = apply_contacts(contacts, hub_path, dry_run=dry_run)
     if dry_run:
         return
 
-    click.echo(f"\nDone: {updated} updated, {created} created, {created_draft} drafts.")
+    click.echo(
+        f"\nDone: {counts['live_upserted']} live sightings, "
+        f"{counts['staged_new']} staged for review, "
+        f"{counts['sightings_appended']} appended, "
+        f"{counts['dropped_rejected']} rejected-dropped.")
 
-    if draft_names:
-        names_list = "\n".join(f"  • {n}" for n in draft_names[:10])
-        suffix = f"\n  … and {len(draft_names) - 10} more" if len(draft_names) > 10 else ""
-        msg = f"📋 New contacts from calendar — review drafts in people/:\n{names_list}{suffix}"
-        send("people-drafts", msg)
+    # Staged candidates reach the owner through the Telegram review
+    # buttons (primary surface; idempotent per candidate). Soft-fails —
+    # staged files stay the source of truth either way.
+    if staged_names:
+        try:
+            from _kb_people import review_telegram as _rt
+            _rt.push(hub_path, quiet=True)
+        except Exception as e:
+            click.echo(f"review push failed (staged files remain): {e}",
+                       err=True)
 
 
 if __name__ == "__main__":

@@ -221,6 +221,60 @@ print("T10_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T10: Calendar source sanitize" || fail "T10: Calendar source"
 
+# T11: calendar apply is staged-only (People Notebook D2): a known live email
+# upserts a live sighting; every other attendee lands as a *.staged.md
+# candidate — never a direct live card, never the legacy draft-card path.
+python3 - << 'PYEOF'
+import sys, os
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / "knowledge" / "bin"))
+import tempfile
+import importlib.util
+from importlib.machinery import SourceFileLoader
+import _kb_people.card as card, _kb_people.index as idx
+
+hub = Path(tempfile.mkdtemp()) ; (hub / "people").mkdir()
+card.PEOPLE_DIR = hub / "people"; idx.INDEX_PATH = hub / "people" / "_index.yaml"
+
+_l = SourceFileLoader("kbcal", str(Path.home()/"knowledge"/"bin"/"kb-calendar-sync"))
+kbcal = importlib.util.module_from_spec(importlib.util.spec_from_loader("kbcal", _l))
+_l.exec_module(kbcal)
+
+# Known person, live card + registered email.
+p = card.create("Known Person", email="known@corp.io", source="manual", draft=False)
+post = card.load(p.stem)
+idx.register(post["id"], p.stem, "Known Person", {"email": "known@corp.io"})
+
+contacts = [
+    {"name": "Known Person", "email": "known@corp.io", "date": "2026-07-12",
+     "context": "Weekly sync", "request_id": "req12345"},
+    {"name": "New Attendee", "email": "new.attendee@corp.io", "date": "2026-07-12",
+     "context": "Intro call", "request_id": "req12345"},
+    {"name": "New Attendee", "email": "new.attendee@corp.io", "date": "2026-07-12",
+     "context": "dup within batch", "request_id": "req12345"},
+]
+counts, staged_names = kbcal.apply_contacts(contacts, hub)
+assert counts["live_upserted"] == 1, counts
+assert counts["staged_new"] == 1, counts
+assert "calendar/req12345" in (hub / "people" / "known-person.md").read_text(), "live sighting missing"
+staged = hub / "people" / "new-attendee.staged.md"
+assert staged.exists(), f"staged card missing: {sorted(p.name for p in (hub/'people').iterdir())}"
+txt = staged.read_text()
+assert "source: calendar" in txt and "new.attendee@corp.io" in txt, txt[:200]
+assert not (hub / "people" / "new-attendee.md").exists(), "live card minted for a new attendee (must be staged-only)"
+assert staged_names == ["New Attendee"], staged_names
+
+# Rejected identity is dropped.
+(hub / "people" / ".rejected.yaml").write_text("- name: Spam Guy\n  email: spam@corp.io\n")
+counts2, _ = kbcal.apply_contacts(
+    [{"name": "Spam Guy", "email": "spam@corp.io", "date": "2026-07-12",
+      "context": "x", "request_id": ""}], hub)
+assert counts2["dropped_rejected"] == 1, counts2
+assert not (hub / "people" / "spam-guy.staged.md").exists(), "rejected attendee staged anyway"
+print("T11_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T11: calendar apply staged-only (known → live sighting, new → staged, rejected dropped)" || fail "T11: calendar staged-only policy"
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

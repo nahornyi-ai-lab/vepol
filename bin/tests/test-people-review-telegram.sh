@@ -893,11 +893,16 @@ slug: zzzbot
 EOF
 $PY -c "
 import json
+from datetime import datetime, timedelta, timezone
+# sent_at must be RECENT: pending entries older than PENDING_TTL_DAYS are
+# deferred (anti-starvation) and would free the window — a hardcoded date
+# here made the whole test rot after 7 calendar days (broke 2026-07-12).
+recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 items = {}
 for i in range(8):
     items[f'full{i:06d}'] = {'slug': f'p{i}', 'kind': 'new-card', 'chat_id': 777,
                              'message_id': 100 + i, 'state': 'pending',
-                             'sent_at': '2026-07-05T12:00:00+00:00'}
+                             'sent_at': recent}
 json.dump({'schema_version': 1, 'offset': 0, 'items': items},
           open('$HUB25I/people/.review-outbox.json', 'w'))
 "

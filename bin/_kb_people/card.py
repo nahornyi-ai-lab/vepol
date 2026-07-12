@@ -60,7 +60,7 @@ def _default_frontmatter(name: str, slug: str, **kwargs) -> dict:
         "email": kwargs.get("email", ""),
         "telegram": kwargs.get("telegram", ""),
         "linkedin": "",
-        "phone": "",
+        "phone": kwargs.get("phone", ""),
         "company": kwargs.get("company", ""),
         "role": kwargs.get("role", ""),
         "location": "",

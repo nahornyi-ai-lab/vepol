@@ -72,7 +72,7 @@ _ROLE_LOCAL_PART_RE = re.compile(
     r"security|abuse|postmaster|webmaster|mailer-daemon|root|"
     r"careers|jobs|hr|press|media|privacy|legal|"
     r"feedback|surveys?|events|community|store|shop|services?)"
-    r"[\d_.-]*@",
+    r"[\d_.-]*(\+[^@]*)?@",
     re.IGNORECASE,
 )
 

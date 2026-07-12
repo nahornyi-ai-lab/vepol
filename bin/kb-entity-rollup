@@ -1,0 +1,18 @@
+#!/bin/zsh
+# kb-entity-rollup — scheduled entry point for the companies/assets rollup
+# (People Notebook spec D7).
+#
+# Why a wrapper: kb-tick executes `run:` commands without a shell, so the
+# KB_ENTITY_ROLLUP feature flag cannot be set inline; and the rollup must
+# ALWAYS run category-scoped — `person` events belong to the People
+# Notebook staging layer and may never bypass it with direct people/
+# writes. The scope is hardcoded here on purpose.
+#
+# Reads today's `.orchestrator/cycle-<date>.json` (no cycle file → clean
+# no-op audit). Manual runs may pass `--date YYYY-MM-DD` through.
+set -euo pipefail
+
+HUB="${KB_HUB:-$HOME/knowledge}"
+export KB_ENTITY_ROLLUP=1
+exec python3 "$HUB/bin/kb_entity_apply.py" apply \
+  --hub "$HUB" --categories companies,assets "$@"
