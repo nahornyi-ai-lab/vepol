@@ -229,21 +229,18 @@ def _merge_senders(old: list, new: list) -> tuple[list, bool]:
     return merged[:_MAX_SENDERS], overflowed
 
 
-def finalize_run(hub: Path, env: dict, next_watermark: datetime) -> Path | None:
+def finalize_run(hub: Path, env: dict,
+                 next_watermark: datetime | None) -> Path | None:
     """Persist a collection result: merge with an existing UNPROCESSED
     same-day envelope (a same-day retry must never overwrite identities
-    the extractor has not consumed yet), write atomically, and move the
-    watermark forward to `next_watermark` — the collector passes `now`
-    for a complete window and the newest activity it fully covered for a
-    truncated one, so the cursor is always monotonic and a truncated run
-    resumes the remainder instead of losing it or livelocking.
+    the extractor has not consumed yet), write atomically, and advance
+    the watermark ONLY on a clean run.
 
-    A truncated result (this run's OR a merged-in prior one's OR a merge
-    overflow past the sender cap) must not let the watermark jump past
-    uncovered work: on truncation the watermark is NOT advanced beyond
-    the prior value here — the collector already computed a safe
-    covered-boundary, and if the merge itself overflows we hold the
-    line entirely."""
+    `next_watermark` is a datetime for a complete window (advance to it)
+    or None for a truncated one (HOLD the cursor — the whole window is
+    re-covered next run, so nothing is skipped). A merge that overflows
+    the sender cap also forces a hold: the dropped identities beyond the
+    cap must not fall behind an advanced cursor."""
     day = env["date"]
     path = ts.envelopes_dir(hub) / f"{day}-daily.json"
     merge_overflow = False
@@ -266,14 +263,9 @@ def finalize_run(hub: Path, env: dict, next_watermark: datetime) -> Path | None:
               "refusing to write senders")
         return None
     out = _write_envelope(hub, env)
-    if env.get("truncated"):
-        # Never advance past uncovered work. If the merge overflowed the
-        # sender cap we can't trust the collector's boundary, so hold the
-        # watermark entirely; otherwise use the collector's covered floor.
-        if not merge_overflow:
-            advance_watermark(hub, next_watermark)
-        _warn("window truncated — watermark advanced only to covered "
-              "boundary; the next run resumes the remainder")
+    if next_watermark is None or merge_overflow or env.get("truncated"):
+        _warn("window truncated/overflowed — watermark HELD; the next run "
+              "re-covers the whole window")
     else:
         advance_watermark(hub, next_watermark)
     return out
@@ -316,38 +308,57 @@ def _sender_row(user, first_ts: str, last_ts: str, count: int,
 
 
 _MAX_SENDERS = 500
+# Watermark overlap: advance the cursor 1s before `now` so a message
+# arriving in the same (second-granularity) instant we read the window
+# is re-covered next run rather than falling into the `<= since` gap.
+# The re-cover is idempotent (staged/live dedup).
+_WATERMARK_BACK_S = 1
 
 
 def collect(client, me_id: int, since: datetime, now: datetime, *,
-            include_groups: bool, scan_dialogs: int, limit_dialogs: int,
-            limit_msgs: int, quiet: bool) -> tuple[list[dict], bool, datetime]:
-    """Walk recent dialogs OLDEST-first, aggregate human senders since
-    `since`. Returns (senders, truncated, next_watermark).
+            include_groups: bool, scan_max: int, msg_guard: int,
+            quiet: bool) -> tuple[list[dict], bool, datetime | None]:
+    """Aggregate human senders since `since`. Returns
+    (senders, truncated, next_watermark_or_None).
 
-    Coverage is monotonic-forward so a truncated run can never livelock:
-    eligible dialogs (activity after `since`) are sorted oldest-first
-    and covered up to `limit_dialogs`. If more remain, the UNCOVERED
-    ones are strictly NEWER than everything covered, so the watermark
-    advances to the newest activity actually covered and the next run
-    resumes from exactly there — each run strictly advances the cursor
-    and the backlog drains in bounded rounds. A complete run advances
-    to `now`. Only identities are read; message objects are consulted
-    for sender/date and discarded.
+    Completeness by construction, not by a cursor trick: `iter_dialogs`
+    yields PINNED dialogs first, then the rest strictly newest-first, so
+    we skip pinned dialogs (their date is unreliable as an end marker)
+    and STOP at the first non-pinned dialog older than `since` — every
+    dialog with activity in the window is therefore visited, with no
+    fixed dialog cap to silently exclude the tail. Each eligible dialog's
+    messages are walked newest-first and stopped at `since`, with no
+    message cap in the normal path.
+
+    Truncation is a LOUD, rare signal (a FloodWait, or a runaway guard
+    hit), NOT a silent partial cover: on truncation we return
+    next_watermark=None so `finalize_run` HOLDS the cursor and the whole
+    window is re-covered next run — cheap for a daily window, and it can
+    never skip a person. A clean run advances to `now - 1s`.
+
+    Only identities are read; message objects are consulted for
+    sender/date and discarded.
     """
     from telethon.errors import FloodWaitError
     from telethon.tl.types import User
 
-    # 1) Bounded scan for eligible dialogs. iter_dialogs yields PINNED
-    #    dialogs first, so the stream is not strictly date-sorted — we
-    #    must scan a bounded prefix and filter by activity, never treat
-    #    an old pinned chat as the end of the window.
-    eligible = []  # (activity_dt, entity, chat_type)
+    eligible = []  # (entity, chat_type)
     truncated = False
+    scanned = 0
     try:
-        for dialog in client.iter_dialogs(limit=scan_dialogs):
+        for dialog in client.iter_dialogs():
+            scanned += 1
+            if scanned > scan_max:
+                # Pure runaway backstop — should never fire for a daily
+                # window. If it does, hold the cursor and re-cover.
+                _warn(f"dialog scan exceeded {scan_max} — holding cursor")
+                truncated = True
+                break
+            if getattr(dialog, "pinned", False):
+                continue  # pinned float to the top regardless of age
             act = dialog.date.astimezone(timezone.utc) if dialog.date else None
             if act is None or act <= since:
-                continue
+                break  # non-pinned are newest-first → the rest are older
             entity = dialog.entity
             if isinstance(entity, User):
                 if entity.bot or entity.is_self or entity.deleted:
@@ -357,31 +368,27 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
                 chat_type = "group"
             else:
                 continue
-            eligible.append((act, entity, chat_type))
+            eligible.append((entity, chat_type))
     except FloodWaitError as e:
-        _warn(f"flood-wait ({e.seconds}s) during dialog scan — partial")
+        _warn(f"flood-wait ({e.seconds}s) during dialog scan — holding cursor")
         truncated = True
-
-    # 2) Oldest-first, cover up to limit_dialogs.
-    eligible.sort(key=lambda t: t[0])
-    if len(eligible) > limit_dialogs:
-        truncated = True
-        eligible = eligible[:limit_dialogs]
 
     agg: dict[int, dict] = {}
-    covered_newest = since
     try:
-        for act, entity, chat_type in eligible:
-            msgs_seen = 0
+        for entity, chat_type in eligible:
+            seen = 0
             for m in client.iter_messages(entity):
                 mdt = m.date.astimezone(timezone.utc) if m.date else None
                 if mdt is None or mdt <= since:
                     break
-                msgs_seen += 1
-                if msgs_seen > limit_msgs:
-                    # A single dialog with more messages than the cap in
-                    # one window is rare; we keep the newest `limit_msgs`
-                    # (iter_messages is newest-first) and flag truncation.
+                seen += 1
+                if seen > msg_guard:
+                    # Runaway guard: a single dialog with more than
+                    # msg_guard messages in one window. Do NOT mark this
+                    # dialog covered — hold the cursor so the older
+                    # messages (which may include the only human sender,
+                    # e.g. behind a burst of outgoing) are re-covered.
+                    _warn("per-dialog message guard hit — holding cursor")
                     truncated = True
                     break
                 if m.out:
@@ -404,11 +411,8 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
                 else:
                     row["count"] += 1
                     row["first_ts"] = ts_str  # walking newest→oldest
-            # This dialog is fully covered — advance the coverage cursor.
-            if act > covered_newest:
-                covered_newest = act
     except FloodWaitError as e:
-        _warn(f"flood-wait ({e.seconds}s) during message walk — partial")
+        _warn(f"flood-wait ({e.seconds}s) during message walk — holding cursor")
         truncated = True
 
     senders = [
@@ -421,14 +425,11 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
         senders = senders[:_MAX_SENDERS]
         truncated = True
 
-    # A complete run covers the whole window → advance to now. A
-    # truncated run advances only to the newest activity it fully
-    # covered (never past uncovered-but-newer dialogs), guaranteeing
-    # forward progress without skipping the remainder.
-    next_watermark = now if not truncated else covered_newest
+    next_watermark = None if truncated else (
+        now - timedelta(seconds=_WATERMARK_BACK_S))
+    wm_txt = "HOLD" if next_watermark is None else next_watermark.strftime(_TS_FMT)
     _say(f"eligible={len(eligible)} senders={len(senders)} "
-         f"truncated={truncated} watermark→{next_watermark.strftime(_TS_FMT)}",
-         quiet)
+         f"truncated={truncated} watermark→{wm_txt}", quiet)
     return senders, truncated, next_watermark
 
 
@@ -450,13 +451,12 @@ def main() -> int:
     ap.add_argument("--login", action="store_true",
                     help="interactive first-time login for the dedicated "
                          "session (asks for a code in the terminal)")
-    ap.add_argument("--scan-dialogs", type=int, default=400,
-                    help="how many dialogs to scan for activity (pinned "
-                         "dialogs sort first, so scan wider than cover)")
-    ap.add_argument("--limit-dialogs", type=int, default=200,
-                    help="max eligible dialogs covered per run (oldest-first; "
-                         "the rest resume next run)")
-    ap.add_argument("--limit-msgs", type=int, default=1000)
+    ap.add_argument("--scan-max", type=int, default=5000,
+                    help="runaway backstop on total dialogs scanned "
+                         "(the scan stops naturally at the watermark)")
+    ap.add_argument("--msg-guard", type=int, default=5000,
+                    help="runaway backstop on messages walked per dialog "
+                         "(the walk stops naturally at the watermark)")
     args = ap.parse_args()
 
     hub = Path(args.hub).expanduser().resolve()
@@ -507,9 +507,8 @@ def main() -> int:
             senders, truncated, next_watermark = collect(
                 client, int(me.id), since, now,
                 include_groups=args.include_groups,
-                scan_dialogs=args.scan_dialogs,
-                limit_dialogs=args.limit_dialogs,
-                limit_msgs=args.limit_msgs,
+                scan_max=args.scan_max,
+                msg_guard=args.msg_guard,
                 quiet=args.quiet)
     except Exception as e:
         return _fail(hub, day, now, f"telegram collection failed: {e}")

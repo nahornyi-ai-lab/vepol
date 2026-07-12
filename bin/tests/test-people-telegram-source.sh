@@ -341,9 +341,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # T10: watermark contract in finalize_run — a COMPLETE run advances to the
-# collector's `now`; a TRUNCATED run advances only to the covered boundary
-# the collector computed (never past uncovered-but-newer work); a merge that
-# overflows the sender cap HOLDS the watermark entirely.
+# collector's boundary; a TRUNCATED run (next_watermark=None, OR the env
+# already flagged truncated, OR a merge overflow) HOLDS the cursor so the
+# whole window is re-covered; never regresses.
 # ---------------------------------------------------------------------------
 HUB10="$TMPDIR_TEST/hub-t10"; make_hub "$HUB10"
 $PY - "$HUB10" <<'PYEOF'
@@ -357,34 +357,37 @@ ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)
 from datetime import datetime, timezone
 hub = Path(sys.argv[1])
 now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
-boundary = datetime(2026, 7, 12, 18, 0, tzinfo=timezone.utc)  # covered floor < now
 
 def env(truncated, senders=None):
     return {"schema": ktp.ts.SCHEMA, "date": "2026-07-12", "period": "daily",
             "generated_at": "2026-07-12T21:00:00Z", "available": True,
             "truncated": truncated, "senders": senders or []}
 
-# Truncated → watermark = the collector's covered boundary, NOT now.
-ktp.finalize_run(hub, env(True), boundary)
-wm = json.loads(ktp.watermark_path(hub).read_text())
-assert wm["last_run_utc"] == "2026-07-12T18:00:00Z", wm
-# Complete → advances to now.
+def wm():
+    p = ktp.watermark_path(hub)
+    return json.loads(p.read_text())["last_run_utc"] if p.exists() else None
+
+# Truncated (next_watermark=None) → HOLD: no watermark written.
+ktp.finalize_run(hub, env(True), None)
+assert wm() is None, f"truncated run must hold the cursor, got {wm()}"
+# Complete → advance to the boundary the collector passed.
 ktp.finalize_run(hub, env(False), now)
-wm = json.loads(ktp.watermark_path(hub).read_text())
-assert wm["last_run_utc"] == "2026-07-12T21:00:00Z", wm
-# Monotonic: a later truncated run with an older boundary never regresses.
+assert wm() == "2026-07-12T21:00:00Z", wm()
+# A later env-truncated run must NOT regress or move the cursor.
 ktp.finalize_run(hub, env(True), datetime(2026, 7, 12, 5, 0, tzinfo=timezone.utc))
-wm = json.loads(ktp.watermark_path(hub).read_text())
-assert wm["last_run_utc"] == "2026-07-12T21:00:00Z", f"watermark regressed: {wm}"
+assert wm() == "2026-07-12T21:00:00Z", f"cursor moved on truncation: {wm()}"
+# Monotonic: an out-of-order older complete run never regresses.
+ktp.finalize_run(hub, env(False), datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc))
+assert wm() == "2026-07-12T21:00:00Z", f"watermark regressed: {wm()}"
 print("T10_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T10: watermark advances to now (complete) / covered boundary (truncated), never regresses" || fail "T10: watermark contract"
+[[ $? -eq 0 ]] && ok "T10: complete run advances; truncated/overflow HOLDS; cursor never regresses" || fail "T10: watermark contract"
 
 # ---------------------------------------------------------------------------
-# T10b: the collector itself (via a fake Telethon client) makes MONOTONIC
-# forward progress under a dialog cap — a truncated run advances the cursor
-# to the newest dialog it covered (oldest-first), so re-running drains the
-# backlog instead of livelocking on the same capped prefix.
+# T10b: the collector (via a fake Telethon client) is COMPLETE by construction
+# — it skips pinned dialogs, stops at the first non-pinned dialog older than
+# `since` (so no fixed cap can exclude the tail), and advances to now-1s on a
+# clean run. A FloodWait mid-scan HOLDS the cursor (re-cover next run).
 # ---------------------------------------------------------------------------
 HUB10B="$TMPDIR_TEST/hub-t10b"; make_hub "$HUB10B"
 $PY - "$HUB10B" <<'PYEOF'
@@ -395,16 +398,14 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 _l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
 ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-# telethon is imported lazily inside collect(); provide a stub module so the
-# `from telethon...` lines resolve and isinstance(x, User) works.
 import types
 class _User:
-    def __init__(self, uid, first, username="", bot=False):
+    def __init__(self, uid, first, username=""):
         self.id = uid; self.first_name = first; self.last_name = ""
         self.username = username; self.phone = ""
-        self.bot = bot; self.is_self = False; self.deleted = False
+        self.bot = False; self.is_self = False; self.deleted = False
 tl = types.ModuleType("telethon"); errs = types.ModuleType("telethon.errors")
 tltypes = types.ModuleType("telethon.tl.types"); tlmod = types.ModuleType("telethon.tl")
 class _FloodWaitError(Exception):
@@ -413,43 +414,110 @@ errs.FloodWaitError = _FloodWaitError
 tltypes.User = _User
 sys.modules["telethon"] = tl; sys.modules["telethon.errors"] = errs
 sys.modules["telethon.tl"] = tlmod; sys.modules["telethon.tl.types"] = tltypes
+FW = _FloodWaitError
 
 def dt(h): return datetime(2026, 7, 12, h, 0, tzinfo=timezone.utc)
-
 class _Dialog:
-    def __init__(self, entity, when): self.entity = entity; self.date = when; self.is_group = False
+    def __init__(self, entity, when, pinned=False):
+        self.entity = entity; self.date = when; self.is_group = False; self.pinned = pinned
 class _Msg:
     def __init__(self, sender, when, out=False): self.sender = sender; self.date = when; self.out = out
-
 class FakeClient:
-    def __init__(self, dialogs, msgs): self._dialogs = dialogs; self._msgs = msgs
+    def __init__(self, dialogs, msgs, flood_after=None):
+        self._dialogs = dialogs; self._msgs = msgs; self._flood_after = flood_after
     def iter_dialogs(self, limit=None):
-        return iter(self._dialogs[:limit] if limit else self._dialogs)
+        for i, d in enumerate(self._dialogs):
+            if self._flood_after is not None and i == self._flood_after:
+                raise FW(30)
+            yield d
     def iter_messages(self, entity):
         return iter(self._msgs.get(entity.id, []))
 
-# 3 eligible dialogs at 10:00, 12:00, 14:00 (activity times); cap covers 2.
-uA, uB, uC = _User(1, "A"), _User(2, "B"), _User(3, "C")
-dialogs = [_Dialog(uC, dt(14)), _Dialog(uA, dt(10)), _Dialog(uB, dt(12))]  # unsorted
-msgs = {1: [_Msg(uA, dt(10))], 2: [_Msg(uB, dt(12))], 3: [_Msg(uC, dt(14))]}
+uP, uA, uB = _User(9, "Pinned Old"), _User(1, "A"), _User(2, "B")
+# Stream: a PINNED old dialog first (must be covered, not treated as end),
+# then newest-first non-pinned A@14, B@10, then an OLD non-pinned @6 (stop).
+uOld = _User(3, "Old")
+dialogs = [
+    _Dialog(uP, dt(2), pinned=True),   # old but pinned → skip, don't stop
+    _Dialog(uA, dt(14)),
+    _Dialog(uB, dt(10)),
+    _Dialog(uOld, dt(6)),              # older than since(8) → STOP here
+    _Dialog(_User(4, "NeverSeen"), dt(5)),
+]
+msgs = {1: [_Msg(uA, dt(14))], 2: [_Msg(uB, dt(10))], 3: [_Msg(uOld, dt(6))],
+        4: [_Msg(_User(4, "NeverSeen"), dt(5))]}
 client = FakeClient(dialogs, msgs)
-
-since = dt(8)
-senders, truncated, nwm = ktp.collect(client, me_id=999, since=since, now=dt(21),
-    include_groups=False, scan_dialogs=100, limit_dialogs=2, limit_msgs=100, quiet=True)
+senders, truncated, nwm = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+    include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
 ids = sorted(s["user_id"] for s in senders)
-assert truncated is True, "3 eligible > cap 2 must truncate"
-assert ids == [1, 2], f"oldest-first cover A,B: {ids}"          # C (newest) deferred
-assert nwm == dt(12), f"watermark = newest covered (B@12): {nwm}"  # monotonic, < now
-# Next run from dt(12): only C remains, completes, advances to now.
-senders2, truncated2, nwm2 = ktp.collect(client, me_id=999, since=dt(12), now=dt(21),
-    include_groups=False, scan_dialogs=100, limit_dialogs=2, limit_msgs=100, quiet=True)
-ids2 = sorted(s["user_id"] for s in senders2)
-assert ids2 == [3], f"remainder C covered next run: {ids2}"
-assert truncated2 is False and nwm2 == dt(21), f"complete → now: {truncated2} {nwm2}"
+assert truncated is False, "clean run"
+assert ids == [1, 2], f"covers non-pinned A,B in window; stops before Old/NeverSeen: {ids}"
+assert nwm == dt(21) - timedelta(seconds=1), f"clean → now-1s: {nwm}"
+
+# FloodWait mid-scan → HOLD (next_watermark None).
+client2 = FakeClient(dialogs, msgs, flood_after=1)
+_s, trunc2, nwm2 = ktp.collect(client2, me_id=999, since=dt(8), now=dt(21),
+    include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
+assert trunc2 is True and nwm2 is None, f"flood-wait must hold: {trunc2} {nwm2}"
 print("T10B_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T10b: collector covers oldest-first, truncation advances cursor to covered boundary (no livelock)" || fail "T10b: collector livelock/monotonic progress"
+[[ $? -eq 0 ]] && ok "T10b: collector complete-by-construction (skip pinned, stop at since); flood-wait holds cursor" || fail "T10b: collector completeness"
+
+# ---------------------------------------------------------------------------
+# T10c: a person whose only incoming message sits BEHIND a burst of my own
+# outgoing messages is still recovered — the runaway guard must not falsely
+# mark a dialog covered. With a tiny guard the dialog holds the cursor
+# instead of advancing past the unseen sender.
+# ---------------------------------------------------------------------------
+HUB10C="$TMPDIR_TEST/hub-t10c"; make_hub "$HUB10C"
+$PY - "$HUB10C" <<'PYEOF'
+import sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+from datetime import datetime, timezone
+import types
+class _User:
+    def __init__(self, uid, first):
+        self.id = uid; self.first_name = first; self.last_name = ""
+        self.username = ""; self.phone = ""
+        self.bot = False; self.is_self = False; self.deleted = False
+tl = types.ModuleType("telethon"); errs = types.ModuleType("telethon.errors")
+tltypes = types.ModuleType("telethon.tl.types"); tlmod = types.ModuleType("telethon.tl")
+class _FW(Exception):
+    def __init__(self, seconds=0): self.seconds = seconds
+errs.FloodWaitError = _FW; tltypes.User = _User
+sys.modules["telethon"] = tl; sys.modules["telethon.errors"] = errs
+sys.modules["telethon.tl"] = tlmod; sys.modules["telethon.tl.types"] = tltypes
+def dt(h,m=0): return datetime(2026, 7, 12, h, m, tzinfo=timezone.utc)
+class _Dialog:
+    def __init__(self, e, w): self.entity=e; self.date=w; self.is_group=False; self.pinned=False
+class _Msg:
+    def __init__(self, s, w, out=False): self.sender=s; self.date=w; self.out=out
+class FakeClient:
+    def __init__(self, d, m): self._d=d; self._m=m
+    def iter_dialogs(self, limit=None): return iter(self._d)
+    def iter_messages(self, e): return iter(self._m.get(e.id, []))
+me = _User(999, "Me"); person = _User(1, "Person")
+# Newest-first: 2 of my outgoing, THEN the person's incoming (older).
+dlg = _Dialog(person, dt(14))
+msgs = {1: [_Msg(me, dt(14), out=True), _Msg(me, dt(13, 30), out=True),
+            _Msg(person, dt(13))]}
+client = FakeClient([dlg], msgs)
+# Tiny guard=2: the person's message (3rd) is beyond the guard.
+s, trunc, nwm = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+    include_groups=False, scan_max=5000, msg_guard=2, quiet=True)
+assert trunc is True and nwm is None, f"guard hit must hold cursor, not advance: {trunc} {nwm}"
+# With an adequate guard the person is recovered.
+s2, trunc2, nwm2 = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+    include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
+assert [x["user_id"] for x in s2] == [1] and trunc2 is False, f"person recovered: {s2}"
+print("T10C_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T10c: sender behind an outgoing burst — guard holds cursor, never false-covers" || fail "T10c: msg-guard false-cover"
 
 # ---------------------------------------------------------------------------
 # T11: a same-day re-collection must MERGE with an existing UNPROCESSED
