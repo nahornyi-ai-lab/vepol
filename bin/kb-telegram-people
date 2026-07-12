@@ -95,6 +95,30 @@ def session_path(hub: Path) -> Path:
     return hub / "personal" / "telegram" / ".people-collector.session"
 
 
+def _acquire_collector_lock(hub: Path):
+    """Non-blocking exclusive flock held for the whole collector run.
+
+    Envelope read/merge/write and watermark advancement must be one
+    critical section per hub: two concurrent collectors could interleave
+    (one advances the cursor, the other overwrites the envelope with a
+    partial result — stranding the first run's senders behind the
+    cursor), and the _fail path could clobber a freshly written good
+    envelope. Returns an open fd (caller closes at exit — closing
+    releases the flock) or None on contention; contention means another
+    run is live, so the caller must exit WITHOUT writing anything.
+    """
+    path = hub / "personal" / "telegram" / ".people-collector.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def _ensure_session_security(sess: Path) -> None:
     """Secure the session file and its directory BEFORE any client work.
 
@@ -547,6 +571,14 @@ def main() -> int:
     day = args.date or now.strftime("%Y-%m-%d")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
         _warn(f"bad --date {day!r}")
+        return 2
+
+    # One collector per hub, for the WHOLE run (incl. the _fail writes) —
+    # see _acquire_collector_lock. On contention exit 2 without touching
+    # the envelope or watermark; kb-tick retries next tick.
+    lock_fd = _acquire_collector_lock(hub)
+    if lock_fd is None:
+        _warn("another kb-telegram-people run is live — exiting (lock)")
         return 2
 
     creds = _credentials()

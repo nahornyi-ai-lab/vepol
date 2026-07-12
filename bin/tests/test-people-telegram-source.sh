@@ -710,6 +710,47 @@ PYEOF
 [[ $? -eq 0 ]] && ok "T15: incomplete merge never evicts behind-cursor senders (prev is sacred; new re-covers)" || fail "T15: R6 eviction counterexample"
 
 # ---------------------------------------------------------------------------
+# T16 (R7): the whole collector run is serialized by an exclusive lock —
+# concurrent invocations could interleave envelope read/merge/write against
+# the watermark (run A advances the cursor, run B overwrites the envelope
+# with a partial result → A's senders stranded), and _fail could clobber a
+# freshly written good envelope. On contention: exit 2, NOTHING written.
+# ---------------------------------------------------------------------------
+HUB16="$TMPDIR_TEST/hub-t16"; make_hub "$HUB16"
+LOCK_RC=$($PY - "$HUB16" <<'PYEOF'
+import os, subprocess, sys
+from pathlib import Path
+os.environ.setdefault("SRC_BIN", str(Path.home() / "knowledge" / "bin"))
+sys.path.insert(0, os.environ["SRC_BIN"])
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", os.environ["SRC_BIN"] + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+hub = Path(sys.argv[1])
+fd = ktp._acquire_collector_lock(hub)
+assert fd is not None, "first acquire must succeed"
+env = dict(os.environ); env.pop("TG_API_ID", None); env.pop("TG_API_HASH", None)
+env["KB_TG_ENV_FILE"] = str(hub / "nonexistent.env")
+p = subprocess.run([sys.executable, os.environ["SRC_BIN"] + "/kb-telegram-people",
+                    "--hub", str(hub), "--quiet", "--date", "2026-07-12"],
+                   capture_output=True, text=True, env=env, timeout=60)
+envelope = hub / "personal/telegram/people/2026-07-12-daily.json"
+print(f"rc={p.returncode} envelope={'yes' if envelope.exists() else 'no'}")
+os.close(fd)
+# Lock released → same no-creds run now degrades normally (rc=1 + unavailable envelope).
+p2 = subprocess.run([sys.executable, os.environ["SRC_BIN"] + "/kb-telegram-people",
+                     "--hub", str(hub), "--quiet", "--date", "2026-07-12"],
+                    capture_output=True, text=True, env=env, timeout=60)
+print(f"after={p2.returncode} envelope2={'yes' if envelope.exists() else 'no'}")
+PYEOF
+)
+if [[ "$LOCK_RC" == *"rc=2 envelope=no"* && "$LOCK_RC" == *"after=1 envelope2=yes"* ]]; then
+  ok "T16: collector run-lock — contention exits 2 writing nothing; released lock degrades normally"
+else
+  fail "T16: collector lock missing/leaky ($LOCK_RC)"
+fi
+
+# ---------------------------------------------------------------------------
 # T12: a sender WITHOUT a username still has a stable identity — the reader
 # derives an `id:<user_id>` locator so the same person never mints a second
 # suffixed staged card on the next envelope.
