@@ -45,6 +45,7 @@ try:
     import _kb_profile  # type: ignore
 except Exception:  # pragma: no cover - profile module optional
     _kb_profile = None
+from _kb_codex import CodexUnavailable, codex_bin
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 PROJ = pathlib.Path(os.environ.get("MONEY_RADAR_PROJECT", os.getcwd()))
@@ -68,13 +69,18 @@ CEILING_S = 1500
 SMOKE_TIMEOUT_S = 45
 OVERLAP_LIMIT = 0.34
 OVERLAP_MIN_SHARED = 2          # min shared salient tokens to merge (false-merge guard)
-# Money Radar v2 (spec money-radar-spec-2026-06-21): a fast-money intelligence feed.
+# Money Radar v2 (spec money-radar-spec-2026-06-21): a pain-first fast-money
+# intelligence feed.
 # NO mechanical filters — no capital/time/score caps, no demand-proof gate. The owner
 # is the filter; the radar just surfaces 1-2 of the most interesting real money flows.
+# Owner update 2026-06-26: money is usually hiding where people complain in numbers, so
+# pain intensity and audience density are ranking signals, not hard gates.
 FINDS_DEFAULT = 1          # finds per digest by default
 FINDS_MAX = 2              # may show 2 when worth it (e.g. one white + one grey/black)
-RANK_W_MONEY = 0.6         # rank = 0.6*money_real + 0.4*interest + corroboration bonus
-RANK_W_INTEREST = 0.4
+RANK_W_MONEY = 0.45        # rank = money + interest + pain + density + corroboration
+RANK_W_INTEREST = 0.25
+RANK_W_PAIN = 0.20
+RANK_W_DENSITY = 0.10
 CORROB_BONUS = 5.0         # per extra agent that found a similar candidate (cap +15)
 CORROB_BONUS_CAP = 15.0
 SECOND_FIND_MIN_RANK = 50.0  # default digest auto-promotes a 2nd find only if a strong
@@ -222,10 +228,16 @@ def default_roster() -> list:
     # the CLI allows it (claude tool allowlist excludes write; grok denies write/
     # shell tools; agy --print returns text) so the orchestrator stays the sole
     # writer; codex needs workspace-write for network, confined to a throwaway cwd.
-    return [
-        {
+    try:
+        codex = codex_bin()
+        codex_available = True
+    except CodexUnavailable as exc:
+        codex = str(exc.path)
+        codex_available = False
+    roster = [{
             "id": "codex", "kind": "capture-file", "role": "structured", "web": True,
-            "bin": "/Applications/Codex.app/Contents/Resources/codex",
+            "bin": codex,
+            "available": codex_available,
             # network_access: codex needs it for `web search`. mcp_servers={} + plugins={}:
             # strip the inherited chrome-devtools/browser MCP, which HANGS forever under the
             # sandbox (no Chrome/tty to --autoConnect) → empty output → 420s kill (diag
@@ -242,7 +254,8 @@ def default_roster() -> list:
                      "-c", "plugins={}",
                      "--output-last-message", "{out}", "{prompt}"],
             "smoke_token": "CODEX_OK", "timeout_s": 420,
-        },
+        }]
+    roster.extend([
         {
             "id": "claude", "kind": "stdout", "role": "execution", "web": True,
             "bin": "/opt/homebrew/bin/claude",
@@ -268,7 +281,8 @@ def default_roster() -> list:
                      "--print-timeout", "8m"],
             "smoke_token": "AGY_OK", "timeout_s": 540,
         },
-    ]
+    ])
+    return roster
 
 
 class RosterError(Exception):
@@ -300,6 +314,8 @@ def load_roster(with_social: bool) -> list:
         web = a.get("web")
         if not isinstance(web, bool):
             raise RosterError(f"{aid}: missing/malformed web flag")
+        if "available" in a and not isinstance(a.get("available"), bool):
+            raise RosterError(f"{aid}: malformed available flag")
         if not isinstance(a.get("bin"), str) or not a.get("bin"):
             raise RosterError(f"{aid}: missing/malformed bin")
         if not isinstance(a.get("argv"), list) or not a.get("argv"):
@@ -529,12 +545,17 @@ topic: money radar daily context pack (trusted-only)
 Trusted-only context assembled deterministically by the orchestrator. No agent text,
 no external web content.
 
-- Mission: a fast-money INTELLIGENCE feed — where and how people make fast/big money
-  RIGHT NOW, across the full spectrum (white/grey/black). Research for awareness +
-  opportunity-spotting, NOT action.
+- Mission: a pain-first fast-money INTELLIGENCE feed — where people complain,
+  struggle, ask for workarounds, or gather in numbers RIGHT NOW, and where money is
+  forming around that pain. Track the full spectrum (white/grey/black). Research for
+  awareness + opportunity-spotting, NOT action.
 - Operator: {cfg['location']}. Edge: {cfg['edge']}.
 - NO limits: no capital/time/score caps, no demand-proof requirement, ANY direction.
   Surface bold, real money flows — not safe generic gruel. The operator is the filter.
+- Primary signal: complaints, angry threads, repeated support questions, "I hate this"
+  posts, manual workarounds, people asking "how do I fix/find/pay for X", crowded
+  discussions, and communities where the same pain repeats. Where many people complain,
+  there may be money.
 - Interest hints (not limits): {lanes}.
 - Yesterday: {prev_line}
 """
@@ -547,14 +568,21 @@ no external web content.
 AGENT_OUTPUT_RULES = (
     "Return ONLY one JSON object, no prose before or after, exactly:\n"
     '{"candidates":[{"title":"","band":"white|grey|black","money_flow":"",'
-    '"who_earns":"","why_now":"","how_it_works":"","rough_numbers":"",'
-    '"proof_links":[""],"risk":"","how_to_try":"","interest":0,"money_real":0}]}\n'
-    "You are a FAST-MONEY INTELLIGENCE researcher, not a safe-opportunity finder. Find "
-    "where and how people make fast/big money RIGHT NOW. Be bold and concrete — real "
-    "money flows, not generic 'build a cheap chatbot' gruel. NO caps on capital, time, "
-    "or scale; ANY direction. `interest` and `money_real` are 0-100 numbers (your read "
-    "of how interesting it is, and how confirmed the money is) — used to rank, never to "
-    "filter. Set `band`:\n"
+    '"pain_signal":"","audience_density":"","who_earns":"","why_now":"",'
+    '"how_it_works":"","rough_numbers":"","proof_links":[""],"risk":"",'
+    '"how_to_try":"","interest":0,"money_real":0,"pain_intensity":0,'
+    '"audience_density_score":0}]}\n'
+    "You are a PAIN-FIRST FAST-MONEY INTELLIGENCE researcher, not a safe-opportunity "
+    "finder. Start from pain: complaints, angry posts, repeated support questions, "
+    "manual workarounds, crowded threads, people asking how to fix/find/pay for X. "
+    "Then find where and how people make fast/big money around that pain RIGHT NOW. "
+    "Be bold and concrete — real money flows, not generic 'build a cheap chatbot' "
+    "gruel. NO caps on capital, time, or scale; ANY direction. `pain_signal` must "
+    "state the concrete complaint/struggle and where it appears. `audience_density` "
+    "must state whether this is many people / repeated discussion / a crowded niche "
+    "or only a few anecdotes. `interest`, `money_real`, `pain_intensity`, and "
+    "`audience_density_score` are 0-100 numbers — used to rank, never to filter. "
+    "Set `band`:\n"
     "- white = legal mainstream → fill how_to_try with concrete fast steps.\n"
     "- grey = legal but edgy/taboo (adult content, gambling/casino, aggressive-but-legal "
     "arbitrage) → how_to_try is fine (it's legal); flag regulatory risk.\n"
@@ -590,30 +618,35 @@ def _lang_directive() -> str:
     # this is meant to prevent (Codex stop-review 2026-06-22, "T19 guards the wrong set").
     if code == "en" or name is None:
         return ""
-    return (f"\nLANGUAGE: write every candidate field VALUE — title, money_flow, who_earns, "
-            f"why_now, how_it_works, rough_numbers, risk, how_to_try — in {name}. Keep the "
-            f"JSON keys and the band value (white/grey/black) in English; proof_links as-is.\n")
+    return (f"\nLANGUAGE: write every candidate field VALUE — title, money_flow, "
+            f"pain_signal, audience_density, who_earns, why_now, how_it_works, "
+            f"rough_numbers, risk, how_to_try — in {name}. Keep the JSON keys and the "
+            f"band value (white/grey/black) in English; proof_links as-is.\n")
 
 
 def agent_prompt(adapter: dict, date_iso: str, context: str) -> str:
     role = adapter.get("role", "structured")
     lens = {
-        "structured": "Find concrete, structural/arbitrage money schemes with real flows.",
-        "execution": "Explain the mechanics and who actually earns on each flow.",
+        "structured": "Find concrete complaint clusters that reveal structural/arbitrage money flows.",
+        "execution": "Explain the pain mechanics and who actually earns on each flow.",
         "social": "Hunt live social signal (X/Twitter, Reddit, Telegram-adjacent, forums) "
-                  "for what's making fast money right now, including grey/black chatter.",
-        "adversarial": "Find the bold angle others miss; flag what's fake, late, or illegal.",
-    }.get(role, "Find where fast money is being made right now.")
-    return (f"# Money radar — fast-money intelligence, {date_iso}\n\n{lens}\n\n"
+                  "for what people complain about in numbers and where money forms around it, "
+                  "including grey/black chatter.",
+        "adversarial": "Find the painful angle others miss; flag what's fake, late, or illegal.",
+    }.get(role, "Find where pain clusters are turning into fast money right now.")
+    return (f"# Money radar — pain-first fast-money intelligence, {date_iso}\n\n{lens}\n\n"
             f"Use this trusted context:\n\n{context}\n\n{AGENT_OUTPUT_RULES}\n{_lang_directive()}\n"
             "Use your web/search tools to check what's happening RIGHT NOW (X/Twitter, "
-            "Reddit, marketplaces, forums) and cite concrete proof. Keep it tight: a few "
+            "Reddit, marketplaces, forums), prioritizing complaints, dense discussions, "
+            "manual workaround threads, and repeated pain signals. Cite concrete proof. Keep it tight: a few "
             "targeted searches, then return 2-3 of the most interesting finds as JSON and "
             "stop — do NOT explore the local repository or do open-ended multi-step work.\n")
 
 
 def smoke_agent(adapter: dict) -> bool:
     """Known-token preflight; empty/timeout/wrong token = failure."""
+    if adapter.get("available") is False:
+        return False
     token = adapter["smoke_token"]
     prompt = f"Reply with exactly {token} and nothing else."
     out, rc = _exec(adapter, prompt, adapter["smoke_timeout_s"], None)
@@ -1022,6 +1055,10 @@ def validate_candidate(c: dict):
     c["interest"] = 50.0 if c["interest"] is None else max(0.0, min(100.0, c["interest"]))
     c["money_real"] = _num(c.get("money_real"))
     c["money_real"] = 50.0 if c["money_real"] is None else max(0.0, min(100.0, c["money_real"]))
+    c["pain_intensity"] = _num(c.get("pain_intensity"))
+    c["pain_intensity"] = 50.0 if c["pain_intensity"] is None else max(0.0, min(100.0, c["pain_intensity"]))
+    c["audience_density_score"] = _num(c.get("audience_density_score"))
+    c["audience_density_score"] = 50.0 if c["audience_density_score"] is None else max(0.0, min(100.0, c["audience_density_score"]))
     if c["band"] == "black":
         c["how_to_try"] = ""   # awareness only — never operational steps for illegal
         _defang_black_steps(c)  # also strip step-lists smuggled into other fields
@@ -1048,12 +1085,15 @@ def _defang_black_steps(c: dict) -> None:
 
 
 def rank_score(cl: dict) -> float:
-    """Deterministic rank: 0.6*money_real + 0.4*interest + corroboration bonus."""
+    """Deterministic rank: money + interest + pain + density + corroboration bonus."""
     c = cl["candidate"]
     money = _num(c.get("money_real")) or 0.0
     interest = _num(c.get("interest")) or 0.0
+    pain = _num(c.get("pain_intensity")) or 0.0
+    density = _num(c.get("audience_density_score")) or 0.0
     bonus = min(CORROB_BONUS * max(0, cl.get("corroboration", 1) - 1), CORROB_BONUS_CAP)
-    return RANK_W_MONEY * money + RANK_W_INTEREST * interest + bonus
+    return (RANK_W_MONEY * money + RANK_W_INTEREST * interest +
+            RANK_W_PAIN * pain + RANK_W_DENSITY * density + bonus)
 
 
 def radar_finds_count() -> int:
@@ -1143,13 +1183,42 @@ def annotate_liveness(ranked: list) -> None:
 # Rendering (owner language)
 # --------------------------------------------------------------------------
 
-def owner_lang() -> str:
+_PINNED_LANG = None
+
+
+def _read_profile_lang() -> str:
     if _kb_profile is not None:
         try:
             return _kb_profile.get_language(HUB)
         except Exception:
             return "en"
     return "en"
+
+
+def owner_lang() -> str:
+    # Resolved ONCE per run by pin_run_language(): both prompt-time (_lang_directive) and
+    # render-time (labels) reads return the same value, so a profile edit or transient
+    # _kb_profile fallback mid-run can't ship content in one language under chrome in another
+    # (Codex stop-review 2026-06-22). Unpinned (tests / ad-hoc) → live profile read.
+    return _PINNED_LANG if _PINNED_LANG is not None else _read_profile_lang()
+
+
+def pin_run_language() -> str:
+    global _PINNED_LANG
+    _PINNED_LANG = _read_profile_lang()
+    return _PINNED_LANG
+
+
+def _gate_cache_language(manifest: dict, run_lang: str) -> bool:
+    # Cached agent captures carry CONTENT in the language they were produced in. If the run
+    # language changed since (e.g. a profile edit between a failed attempt and its retry),
+    # reusing them would render old-language content under new-language chrome — drop the
+    # stale cache so agents re-run in the current language (Codex stop-review 2026-06-22).
+    # A cache with no recorded language is pre-pinning/legacy → also treated as stale.
+    if manifest.get("agents") and manifest.get("language") != run_lang:
+        manifest["agents"] = {}
+        return True
+    return False
 
 
 # Digest chrome (labels) is rendered in the owner's profile language, NOT a hardcoded one
@@ -1159,6 +1228,7 @@ def owner_lang() -> str:
 # (enforced by test T19) so content and chrome never drift apart.
 L = {
     "en": {"hdr": "💸 Money radar", "why": "Why now", "flow": "Money flow",
+           "pain": "Pain signal", "density": "Audience density",
            "who": "Who earns", "how": "How it works", "numbers": "Numbers",
            "risk": "Risk", "try": "How to try", "verify": "intelligence — you decide",
            "none": "nothing notable today", "unavail": "agents unavailable today (quota/outage)",
@@ -1169,6 +1239,7 @@ L = {
            "confidence": "confidence",
            "conf_vals": {"high": "high", "medium": "medium", "low": "low"}},
     "ru": {"hdr": "💸 Money radar", "why": "Почему сейчас", "flow": "Денежный поток",
+           "pain": "Сигнал боли", "density": "Плотность аудитории",
            "who": "Кто зарабатывает", "how": "Как устроено", "numbers": "Цифры",
            "risk": "Риск", "try": "Как попробовать", "verify": "разведка — решаешь сам",
            "none": "сегодня без находок", "unavail": "агенты сегодня недоступны (квота/сбой)",
@@ -1179,6 +1250,7 @@ L = {
            "confidence": "уверенность",
            "conf_vals": {"high": "высокая", "medium": "средняя", "low": "низкая"}},
     "uk": {"hdr": "💸 Money radar", "why": "Чому зараз", "flow": "Грошовий потік",
+           "pain": "Сигнал болю", "density": "Щільність аудиторії",
            "who": "Хто заробляє", "how": "Як це працює", "numbers": "Цифри",
            "risk": "Ризик", "try": "Як спробувати", "verify": "розвідка — вирішуєш сам",
            "none": "сьогодні без знахідок", "unavail": "агенти сьогодні недоступні (квота/збій)",
@@ -1189,26 +1261,29 @@ L = {
            "confidence": "впевненість",
            "conf_vals": {"high": "висока", "medium": "середня", "low": "низька"}},
     "es": {"hdr": "💸 Money radar", "why": "Por qué ahora", "flow": "Flujo de dinero",
+           "pain": "Señal de dolor", "density": "Densidad de audiencia",
            "who": "Quién gana", "how": "Cómo funciona", "numbers": "Cifras",
            "risk": "Riesgo", "try": "Cómo probar", "verify": "inteligencia — tú decides",
            "none": "hoy sin hallazgos", "unavail": "agentes no disponibles hoy (cuota/caída)",
            "quorum": "Quórum", "withheld": "fuentes ocultas por seguridad",
            "steps_removed": "(pasos operativos eliminados — solo concienciación)",
            "bands": {"white": "⚪ blanca", "grey": "🟡 gris", "black": "⚫ negra"},
-           "rank": "rango", "agents": "agentes", "proof": "fuentes",
+           "rank": "puntuación", "agents": "agentes", "proof": "fuentes",
            "confidence": "confianza",
            "conf_vals": {"high": "alta", "medium": "media", "low": "baja"}},
     "de": {"hdr": "💸 Money radar", "why": "Warum jetzt", "flow": "Geldfluss",
+           "pain": "Schmerzsignal", "density": "Publikumsdichte",
            "who": "Wer verdient", "how": "Wie es funktioniert", "numbers": "Zahlen",
-           "risk": "Risiko", "try": "Wie ausprobieren", "verify": "Aufklärung — du entscheidest",
+           "risk": "Risiko", "try": "Ausprobieren", "verify": "Aufklärung — du entscheidest",
            "none": "heute nichts Nennenswertes", "unavail": "Agenten heute nicht verfügbar (Kontingent/Ausfall)",
            "quorum": "Quorum", "withheld": "Quellen aus Sicherheitsgründen zurückgehalten",
            "steps_removed": "(operative Schritte entfernt — nur zur Information)",
            "bands": {"white": "⚪ weiß", "grey": "🟡 grau", "black": "⚫ schwarz"},
            "rank": "Rang", "agents": "Agenten", "proof": "Quellen",
-           "confidence": "Konfidenz",
+           "confidence": "Sicherheit",
            "conf_vals": {"high": "hoch", "medium": "mittel", "low": "niedrig"}},
     "fr": {"hdr": "💸 Money radar", "why": "Pourquoi maintenant", "flow": "Flux d'argent",
+           "pain": "Signal de douleur", "density": "Densité d'audience",
            "who": "Qui gagne", "how": "Comment ça marche", "numbers": "Chiffres",
            "risk": "Risque", "try": "Comment essayer", "verify": "renseignement — à toi de décider",
            "none": "rien à signaler aujourd'hui", "unavail": "agents indisponibles aujourd'hui (quota/panne)",
@@ -1219,6 +1294,7 @@ L = {
            "confidence": "confiance",
            "conf_vals": {"high": "élevée", "medium": "moyenne", "low": "faible"}},
     "pt": {"hdr": "💸 Money radar", "why": "Por que agora", "flow": "Fluxo de dinheiro",
+           "pain": "Sinal de dor", "density": "Densidade de público",
            "who": "Quem ganha", "how": "Como funciona", "numbers": "Números",
            "risk": "Risco", "try": "Como testar", "verify": "inteligência — você decide",
            "none": "hoje sem achados", "unavail": "agentes indisponíveis hoje (cota/falha)",
@@ -1229,23 +1305,25 @@ L = {
            "confidence": "confiança",
            "conf_vals": {"high": "alta", "medium": "média", "low": "baixa"}},
     "it": {"hdr": "💸 Money radar", "why": "Perché ora", "flow": "Flusso di denaro",
+           "pain": "Segnale di dolore", "density": "Densità del pubblico",
            "who": "Chi guadagna", "how": "Come funziona", "numbers": "Numeri",
            "risk": "Rischio", "try": "Come provare", "verify": "intelligence — decidi tu",
            "none": "oggi niente di rilevante", "unavail": "agenti non disponibili oggi (quota/guasto)",
            "quorum": "Quorum", "withheld": "fonti nascoste per sicurezza",
            "steps_removed": "(passaggi operativi rimossi — solo consapevolezza)",
            "bands": {"white": "⚪ bianca", "grey": "🟡 grigia", "black": "⚫ nera"},
-           "rank": "rango", "agents": "agenti", "proof": "fonti",
+           "rank": "punteggio", "agents": "agenti", "proof": "fonti",
            "confidence": "affidabilità",
            "conf_vals": {"high": "alta", "medium": "media", "low": "bassa"}},
     "pl": {"hdr": "💸 Money radar", "why": "Dlaczego teraz", "flow": "Przepływ pieniędzy",
+           "pain": "Sygnał bólu", "density": "Gęstość odbiorców",
            "who": "Kto zarabia", "how": "Jak to działa", "numbers": "Liczby",
            "risk": "Ryzyko", "try": "Jak spróbować", "verify": "rozpoznanie — sam decydujesz",
            "none": "dziś brak znalezisk", "unavail": "agenci dziś niedostępni (limit/awaria)",
            "quorum": "Kworum", "withheld": "źródła ukryte ze względów bezpieczeństwa",
            "steps_removed": "(kroki operacyjne usunięte — tylko świadomość)",
            "bands": {"white": "⚪ biała", "grey": "🟡 szara", "black": "⚫ czarna"},
-           "rank": "ranga", "agents": "agentów", "proof": "źródła",
+           "rank": "wynik", "agents": "agentów", "proof": "źródła",
            "confidence": "pewność",
            "conf_vals": {"high": "wysoka", "medium": "średnia", "low": "niska"}},
 }
@@ -1263,7 +1341,8 @@ def render_agent_note(date_iso: str, agent: dict) -> str:
         return ", ".join(ls[:3]) or "none"
     body = "\n".join(
         f"- [{c.get('band','?')}] {c.get('title','?')} — interest {c.get('interest','?')}, "
-        f"money_real {c.get('money_real','?')}; links: {_links(c)}"
+        f"money_real {c.get('money_real','?')}, pain {c.get('pain_intensity','?')}, "
+        f"density {c.get('audience_density_score','?')}; links: {_links(c)}"
         for c in agent["candidates"]) or "(none)"
     return f"""---
 slug: money-radar-{date_iso}-{agent['id']}
@@ -1293,7 +1372,8 @@ def _find_block(i, r, lab, prefix=""):
     # Only emit fields the agent actually filled — an empty value must not render as a
     # dangling "Label:" line (live-smoke quality nit 2026-06-21: claude left how_it_works
     # blank and the digest showed "Как устроено:" with nothing after it).
-    for key, lbl in (("money_flow", lab['flow']), ("who_earns", lab['who']),
+    for key, lbl in (("money_flow", lab['flow']), ("pain_signal", lab['pain']),
+                     ("audience_density", lab['density']), ("who_earns", lab['who']),
                      ("why_now", lab['why']), ("how_it_works", lab['how']),
                      ("rough_numbers", lab['numbers']), ("risk", lab['risk'])):
         val = str(c.get(key) or "").strip()   # str(): an agent may send a number/obj
@@ -1335,6 +1415,7 @@ def render_report(date_iso: str, ranked: list, nogo: list, agents: list, confide
         lines.append(f"- [{c.get('band','?')}] {c.get('title','?')}: "
                      f"rank {r.get('rank_score',0):.0f} "
                      f"(money_real {c.get('money_real','?')}, interest {c.get('interest','?')}, "
+                     f"pain {c.get('pain_intensity','?')}, density {c.get('audience_density_score','?')}, "
                      f"corroboration {r['corroboration']})")
     lines.append("\n## Awareness / not pursued (other finds + reasons)\n")
     for c, reason in nogo:
@@ -1525,6 +1606,13 @@ def _run_locked(date_iso: str, roster: list, force: bool) -> int:
     manifest["started"] = now_iso()
     manifest.setdefault("agents", {})
 
+    # Pin the run language ONCE; every downstream owner_lang() (prompt + render + defang)
+    # returns this value, and any stale-language cache is dropped (Codex stop-review 2026-06-22).
+    run_lang = pin_run_language()
+    if _gate_cache_language(manifest, run_lang):
+        log(f"{date_iso}: profile language now {run_lang}; dropped stale-language cache")
+    manifest["language"] = run_lang
+
     before = _snapshot()
 
     # Context pack
@@ -1615,6 +1703,8 @@ def _run_locked(date_iso: str, roster: list, force: bool) -> int:
             nogo.append((cl["candidate"], reason))
     ranked.sort(key=lambda r: (-r["rank_score"],
                                -(_num(r["candidate"].get("money_real")) or 0.0),
+                               -(_num(r["candidate"].get("pain_intensity")) or 0.0),
+                               -(_num(r["candidate"].get("audience_density_score")) or 0.0),
                                -r["corroboration"], (r["candidate"].get("title") or "")))
     ranked, others = select_finds(ranked)   # 1-2 finds, band-diverse (owner 2026-06-21)
     for r in others:
@@ -1636,6 +1726,10 @@ def _run_locked(date_iso: str, roster: list, force: bool) -> int:
 
     digest = render_digest(date_iso, ranked, agents, confidence, nogo, unavailable=False)
     guarded_write(RADAR_REPORTS / f"{date_iso}-digest.txt", digest, date_iso)
+    # Also mirror the rendered prose digest into ORCH so hub-anchored kb-morning-digest can
+    # find it as its preferred money block (spec D9-producer). ORCH allowlist already permits
+    # any money-radar-<date>* name (is_allowlisted).
+    guarded_write(ORCH / f"money-radar-{date_iso}-digest.txt", digest, date_iso)
 
     manifest["report"] = {"ranked": [r["candidate"].get("title") for r in ranked],
                           "nogo": [c.get("title") for c, _ in nogo],
@@ -1668,6 +1762,8 @@ def _finish_unavailable(date_iso, agents, manifest, before) -> int:
     guarded_write(RADAR_REPORTS / f"{date_iso}.md", report, date_iso)
     digest = render_digest(date_iso, [], agents, "low", [], unavailable=True)
     guarded_write(RADAR_REPORTS / f"{date_iso}-digest.txt", digest, date_iso)
+    # Mirror to ORCH for kb-morning-digest (spec D9-producer); see completed path.
+    guarded_write(ORCH / f"money-radar-{date_iso}-digest.txt", digest, date_iso)
     manifest["status"] = "degraded-unavailable"
     manifest["error"] = None
     save_manifest(date_iso, manifest)

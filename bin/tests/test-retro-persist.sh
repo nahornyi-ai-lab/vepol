@@ -53,6 +53,26 @@ EOF
 }
 
 run_retro() { KB_HUB="$HUB" KB_RETRO_DRY=1 "$SRC_BIN/kb-retro" 2>/dev/null; }
+run_prompt() { KB_HUB="$HUB" KB_RETRO_PROMPT_ONLY=1 "$SRC_BIN/kb-retro" 2>/dev/null; }
+
+# ── v0.5.1 AC1: prompt time authority framing ───────────────────────────────
+PROMPT=$(run_prompt)
+if [[ -z "$PROMPT" ]]; then
+  fail "v0.5.1 AC1: kb-retro prompt-only produced no output"
+else
+  [[ "$PROMPT" == *"утренний бриф — это план"* \
+     && "$PROMPT" == *"исторический контекст"* ]] \
+    && ok "v0.5.1 AC1: prompt frames the morning brief as plan/history" \
+    || fail "v0.5.1 AC1: prompt does not frame the morning brief as plan/history"
+  [[ "$PROMPT" == *"Текущее состояние почты бери только из вечернего"* \
+     && "$PROMPT" == *"вечерние блоки побеждают утренний бриф"* ]] \
+    && ok "v0.5.1 AC1: prompt gives evening mail/current-state precedence" \
+    || fail "v0.5.1 AC1: prompt lacks evening mail/current-state precedence"
+  [[ "$PROMPT" == *"Не смешивай отсутствие daily-inbox"* \
+     && "$PROMPT" == *"не поломка mail briefing"* ]] \
+    && ok "v0.5.1 source-health: daily-inbox gaps are not mail-briefing breakage" \
+    || fail "v0.5.1 source-health: prompt can still label daily-inbox gaps as mail breakage"
+fi
 
 # ── AC1: retro section appended to the day file ──────────────────────────────
 day_file
@@ -97,15 +117,29 @@ N_RETRO=$(grep -c '^## Retro (' "$HUB/briefs/$TODAY.md")
   && ok "AC1: re-run keeps exactly one '## Retro' section (got $N_RETRO)" \
   || fail "AC1: re-run duplicated the Retro section (got $N_RETRO)"
 
-# ── AC1: missing day file degrades gracefully ────────────────────────────────
+# ── AC1 (amended by morning-digest-inputs-rebalance D11, R-impl blocker 1):
+# a missing day file no longer stays missing — kb-retro creates a MINIMAL day
+# file (frontmatter + Retro section) so the delivery evidence is durable and a
+# later planner regeneration cannot re-fire the retro (AC-9 exactly-once). The
+# file must NOT fabricate brief content: no `delivery:` key (the brief still
+# counts as undelivered) and no brief text.
 rm -f "$HUB/briefs/$TODAY.md"
 run_retro >/dev/null; RC3=$?
 [[ $RC3 -eq 0 ]] \
   && ok "AC1: missing day file — no crash (rc=0)" \
   || fail "AC1: missing day file crashed kb-retro (rc=$RC3)"
-[[ ! -f "$HUB/briefs/$TODAY.md" ]] \
-  && ok "AC1: missing day file is not silently created" \
-  || fail "AC1: kb-retro created a day file out of nothing"
+DAYF="$HUB/briefs/$TODAY.md"
+[[ -f "$DAYF" && "$(head -n 1 "$DAYF")" == "---" ]] \
+  && ok "AC1: minimal day file created for retro evidence (D11)" \
+  || fail "AC1: minimal day file not created"
+grep -q '^## Retro (' "$DAYF" \
+  && ok "AC1: retro persisted into the minimal day file" \
+  || fail "AC1: retro not persisted into minimal day file"
+if awk 'NR==1&&$0=="---"{fm=1;next} fm&&$0=="---"{exit 0} fm&&index($0,"delivery: ")==1{exit 1}' "$DAYF"; then
+  ok "AC1: no phantom brief delivery key in minimal day file"
+else
+  fail "AC1: minimal day file fabricated a brief delivery key"
+fi
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

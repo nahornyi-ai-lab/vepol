@@ -86,6 +86,213 @@ PY
 rc=$?
 [[ $rc -eq 0 ]] && ok "codex-host guards all pass" || fail "codex-host guards failed"
 
+# ── process-group timeout: descendant holds inherited pipes ─────────────────
+# Old subprocess.run(timeout=...) kills only the leader and then blocks while a
+# descendant keeps stdout/stderr open. The fixed runner owns a process group and
+# returns a typed timeout within the bounded cleanup grace.
+cat > "$TMP/codex-descendant" <<'SH'
+#!/bin/sh
+(sleep 30) &
+echo $! >"$KB_TEST_CHILD_PID_FILE"
+sleep 30
+SH
+chmod +x "$TMP/codex-descendant"
+
+KB_MAIL_SRC_BIN="$SRC_BIN" KB_CODEX_BIN="$TMP/codex-descendant" \
+KB_TEST_CHILD_PID_FILE="$TMP/child.pid" \
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 6 python3 - <<'PY'
+import os, sys, time
+sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
+from _kb_mail.errors import MailUnavailable
+from _kb_mail.host import CodexHostRunner
+
+started = time.monotonic()
+try:
+    CodexHostRunner().call("x", timeout_s=1)
+    raise SystemExit("timeout call unexpectedly succeeded")
+except MailUnavailable as exc:
+    elapsed = time.monotonic() - started
+    assert "timeout after 1s" in str(exc), str(exc)
+    assert "process_group_gone=true" in str(exc), str(exc)
+    assert elapsed < 5.0, elapsed
+PY
+timeout_rc=$?
+if [[ -s "$TMP/child.pid" ]]; then
+  child_pid=$(cat "$TMP/child.pid")
+  if kill -0 "$child_pid" 2>/dev/null; then
+    child_state=$(ps -o stat= -p "$child_pid" 2>/dev/null | tr -d ' ' || true)
+    if [[ "$child_state" == Z* ]]; then
+      child_alive=0
+    else
+      kill -9 "$child_pid" 2>/dev/null || true
+      child_alive=1
+    fi
+  else
+    child_alive=0
+  fi
+else
+  child_alive=1
+fi
+[[ $timeout_rc -eq 0 && $child_alive -eq 0 ]] \
+  && ok "timeout kills owned process group and closes descendant-held pipes" \
+  || fail "timeout leaked/hung descendant (rc=$timeout_rc child_alive=$child_alive)"
+
+# Runtime budgets are checked through the injectable host seam — the test never
+# sleeps 240/300 seconds.
+KB_MAIL_SRC_BIN="$SRC_BIN" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
+from _kb_mail import adapter
+
+calls = []
+class Host:
+    def call(self, prompt, *, timeout_s):
+        calls.append((prompt, timeout_s))
+        if "transcription step" in prompt:
+            return {"ok": True, "items": [{"thread_ref":"t", "message_ref":"m",
+                    "date":"2026-07-11", "time":"10:00", "sender_label":"x",
+                    "sender_email":"x@example.com", "subject":"s", "body_raw":"b"}]}
+        return {"ok": True, "items": [{"index":0, "classification":"fyi",
+                "urgency":"low", "action_needed":False, "summary":"s",
+                "proposed_actions":[], "privacy_flags":[], "confidence":"high"}]}
+
+adapter.ProductionBackend(host=Host()).fetch("morning", {"from":"a", "to":"b"})
+assert [timeout for _, timeout in calls] == [240, 300], calls
+PY
+[[ $? -eq 0 ]] && ok "read/classify budgets are 240s/300s" \
+  || fail "mail phase budgets are not 240s/300s"
+
+# Phase attribution remains visible inside the typed MailUnavailable boundary.
+KB_MAIL_SRC_BIN="$SRC_BIN" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
+from _kb_mail.adapter import ProductionBackend
+from _kb_mail.errors import MailUnavailable
+
+class HostRead:
+    def call(self, prompt, *, timeout_s):
+        raise RuntimeError("boom")
+
+try:
+    ProductionBackend(host=HostRead()).fetch("morning", {"from":"a", "to":"b"})
+except MailUnavailable as exc:
+    assert str(exc).startswith("read:"), str(exc)
+else:
+    raise AssertionError("read failure was not typed")
+
+class HostClassify:
+    calls = 0
+    def call(self, prompt, *, timeout_s):
+        self.calls += 1
+        if self.calls == 1:
+            return {"ok": True, "items": [{"thread_ref":"t", "message_ref":"m",
+                    "date":"2026-07-11", "time":"10:00", "sender_label":"x",
+                    "sender_email":"x@example.com", "subject":"s", "body_raw":"b"}]}
+        raise RuntimeError("boom")
+
+try:
+    ProductionBackend(host=HostClassify()).fetch("morning", {"from":"a", "to":"b"})
+except MailUnavailable as exc:
+    assert str(exc).startswith("classify:"), str(exc)
+else:
+    raise AssertionError("classify failure was not typed")
+PY
+[[ $? -eq 0 ]] && ok "mail failures record read/classify phase attribution" \
+  || fail "mail phase attribution missing"
+
+# Cleanup race seams: an already-exited leader/group and a second communicate
+# timeout remain bounded, close inherited pipes, and report the saved PGID gone.
+KB_MAIL_SRC_BIN="$SRC_BIN" python3 - <<'PY'
+import os, signal, subprocess, sys
+sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
+import _kb_mail.host as host
+
+class Pipe:
+    def __init__(self): self.closed = False
+    def close(self): self.closed = True
+
+class Proc:
+    def __init__(self):
+        self.stdout, self.stderr = Pipe(), Pipe()
+        self.calls = 0
+        self.killed = False
+    def communicate(self, timeout):
+        self.calls += 1
+        raise subprocess.TimeoutExpired("fake", timeout)
+    def kill(self): self.killed = True
+    def wait(self, timeout): return 0
+
+proc = Proc()
+orig = host.os.killpg
+def gone(pgid, sig):
+    raise ProcessLookupError
+host.os.killpg = gone
+try:
+    assert host._best_effort_kill_group(proc, 424242) is True
+finally:
+    host.os.killpg = orig
+assert proc.killed and proc.stdout.closed and proc.stderr.closed
+
+proc = Proc()
+def denied(pgid, sig):
+    raise PermissionError("denied")
+host.os.killpg = denied
+try:
+    assert host._best_effort_kill_group(proc, 424243) is False
+finally:
+    host.os.killpg = orig
+assert proc.killed and proc.stdout.closed and proc.stderr.closed
+PY
+[[ $? -eq 0 ]] && ok "cleanup races stay bounded and probe the saved process group" \
+  || fail "cleanup race/probe contract failed"
+
+# A timeout envelope must not advance either watermark byte; the next clean run
+# catches up from the same lower bound and advances only after durable success.
+WM_HUB="$TMP/watermark-hub"; WM_FAKE="$TMP/watermark-fake"
+mkdir -p "$WM_HUB/personal/mail" "$WM_FAKE"
+printf '{"morning":"2026-07-09T06:00:00+02:00","evening":"2026-07-09T20:00:00+02:00"}\n' \
+  > "$WM_HUB/personal/mail/watermarks.json"
+cp "$WM_HUB/personal/mail/watermarks.json" "$TMP/watermarks.before"
+WM_OUT=$(KB_HUB="$WM_HUB" KB_CODEX_BIN="$TMP/codex-descendant" \
+  KB_TEST_CHILD_PID_FILE="$TMP/wm-child.pid" \
+  KB_MAIL_NOW="2026-07-11T12:00:00+02:00" \
+  python3 - "$SRC_BIN" <<'PY'
+import importlib.machinery, importlib.util, pathlib, sys
+src = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(src))
+from _kb_mail import adapter
+adapter._READ_TIMEOUT_S = 1
+loader = importlib.machinery.SourceFileLoader("mail_timeout_e2e", str(src / "kb-mail-brief"))
+spec = importlib.util.spec_from_loader("mail_timeout_e2e", loader)
+brief = importlib.util.module_from_spec(spec)
+sys.modules["mail_timeout_e2e"] = brief
+loader.exec_module(brief)
+sys.argv = ["kb-mail-brief", "--period", "morning", "--write", "--json"]
+raise SystemExit(brief.main())
+PY
+)
+cmp -s "$TMP/watermarks.before" "$WM_HUB/personal/mail/watermarks.json"
+wm_timeout_rc=$?
+printf 'ok\n' > "$WM_FAKE/mode"
+printf '[]\n' > "$WM_FAKE/threads.json"
+WM_OK=$(KB_HUB="$WM_HUB" KB_MAIL_FAKE_DIR="$WM_FAKE" \
+  KB_MAIL_NOW="2026-07-11T12:05:00+02:00" \
+  "$SRC_BIN/kb-mail-brief" --period morning --write --json)
+WM_OUT="$WM_OUT" WM_OK="$WM_OK" python3 - <<'PY'
+import json, os
+bad = json.loads(os.environ["WM_OUT"])
+good = json.loads(os.environ["WM_OK"])
+assert bad["available"] is False and bad["watermark"] is None
+assert bad["errors"] == ["gmail_unavailable:timeout"], bad
+assert good["available"] is True
+assert good["window"]["from"] == "2026-07-09T20:00:00+02:00", good
+assert good["watermark"] == "2026-07-11T12:05:00+02:00", good
+PY
+wm_catchup_rc=$?
+[[ $wm_timeout_rc -eq 0 && $wm_catchup_rc -eq 0 ]] \
+  && ok "timeout preserves watermark; next success catches up and advances" \
+  || fail "timeout/catch-up watermark contract failed"
+
 # ── kb-mail-brief must NEVER exit non-zero on bad mail-host output ────────────
 # A malformed / junk Codex response must degrade to available:false (exit 0), so
 # it can never block daily/retro (which run after:mail-*).

@@ -41,7 +41,7 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
     """Enumerate every artifact tracked in the install manifest.
 
     Driven by:
-      - seed/knowledge/bin/kb-* — managed scripts (excluding .retired and hidden)
+      - seed/{knowledge/,}bin/kb-* and _kb_*.py — managed scripts/modules
       - seed/knowledge/_template/** — managed templates
       - seed/knowledge/AGENTS.md — user-templated hub contract
       - seed/knowledge/CLAUDE.md — user-templated Claude Code adapter
@@ -53,19 +53,26 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
     (`agy`) reads AGENTS.md natively via `agy --add-dir <path>`.
     """
     items: list[dict] = []
-    bin_dir = seed / "knowledge" / "bin"
-    if bin_dir.is_dir():
+    bin_candidates = (
+        (seed / "knowledge" / "bin", "knowledge/bin"),
+        (seed / "bin", "bin"),
+    )
+    for bin_dir, source_prefix in bin_candidates:
+        if not bin_dir.is_dir():
+            continue
         for child in sorted(bin_dir.iterdir()):
             if not child.is_file():
                 continue
             if child.name.startswith(".") or child.name.endswith(".retired"):
                 continue
-            if not child.name.startswith("kb-"):
+            is_script = child.name.startswith("kb-")
+            is_shared_module = child.name.startswith("_kb_") and child.suffix == ".py"
+            if not (is_script or is_shared_module):
                 continue
             items.append({
                 "artifact_id": child.name,
                 "category": "managed",
-                "source_path": f"knowledge/bin/{child.name}",
+                "source_path": f"{source_prefix}/{child.name}",
                 "install_path": str(home / "knowledge" / "bin" / child.name),
             })
 

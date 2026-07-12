@@ -204,8 +204,9 @@ def main() -> int:
                     "claim_owner": task.fields.get("claim_owner"),
                     "claim_id": task.fields.get("claim_id"),
                 })
-            _emit(rows, args.json_out)
-            if not args.json_out:
+            if args.json_out:
+                _emit(rows, args.json_out)
+            else:
                 for row in rows:
                     print(f"{row['status']}: {row['plan_item_id']} — {row['title']}")
             return 0

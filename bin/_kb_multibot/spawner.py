@@ -24,6 +24,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from _kb_codex import CodexUnavailable, codex_bin
+
 
 @dataclasses.dataclass
 class SpawnResult:
@@ -73,17 +75,11 @@ def _claude_path() -> str | None:
 
 
 def _codex_path() -> str | None:
-    """Locate `codex` CLI."""
-    fp = shutil.which("codex")
-    if fp:
-        return fp
-    for cand in (
-        Path("/opt/homebrew/bin/codex"),
-        Path("/usr/local/bin/codex"),
-    ):
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return str(cand)
-    return None
+    """Resolve the one production Codex CLI."""
+    try:
+        return codex_bin()
+    except CodexUnavailable:
+        return None
 
 
 class BaseAdapter:

@@ -39,11 +39,11 @@ Before doing ANY mutation, verify these one-by-one and **stop with explicit mess
 | Bun | `bun --version` | "Run `brew install oven-sh/bun/bun` then re-run" |
 | Python ≥ 3.11 | `python3 --version` | "Run `brew install python@3.13` then re-run" |
 | Claude CLI ≥ 2.1.113 | `claude --version` | "Run `npm install -g @anthropic-ai/claude-code` then `claude login`, then re-run" |
-| Codex CLI | `codex --version` | "Run `npm install -g @openai/codex` then `codex login`, then re-run" |
+| Codex CLI | `$HOME/.local/bin/codex --version` | "Run `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=\"$HOME/.local/bin\" sh`, then `$HOME/.local/bin/codex login`, then re-run" |
 | Antigravity CLI (optional reviewer) | `agy --version` | "Run `npm install -g agy (https://antigravity.google/cli/install.sh)`, configure auth, then re-run" |
 | ripgrep | `rg --version` | "Run `brew install ripgrep` then re-run" |
 | Logged into Claude | `claude config get` doesn't error | "Run `claude login` and complete browser auth, then re-run" |
-| Logged into Codex | `codex config get` or check token file | "Run `codex login`, then re-run" |
+| Logged into Codex | `$HOME/.local/bin/codex config get` or check token file | "Run `$HOME/.local/bin/codex login`, then re-run" |
 
 The skill should run all checks first, list the missing items, give the user copy-paste commands to fix, and exit. Only proceed when ALL preflight checks pass.
 

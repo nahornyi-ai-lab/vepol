@@ -85,15 +85,70 @@ case "$UI_LANG" in
     ;;
 esac
 
+# D11 (spec morning-digest-inputs-rebalance-2026-07-11, Phase D): VERIFIED
+# delivery — parse the Telegram response (ok==true + result.message_id). A
+# discarded response is NOT delivery evidence; the verified message_id lands in
+# TG_MSG_ID and the function returns non-zero when the send is unverified.
+TG_MSG_ID=""
 send_tg() {
   local text="$1"
+  TG_MSG_ID=""
   if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
     print -- "$text"
-  else
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-      -d "chat_id=${TELEGRAM_CHAT_ID}" \
-      --data-urlencode "text=$text" > /dev/null
+    TG_MSG_ID="dry-run"
+    return 0
   fi
+  local resp
+  resp=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=$text")
+  TG_MSG_ID=$(print -r -- "$resp" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if d.get("ok") is True and isinstance(d.get("result"), dict) \
+        and d["result"].get("message_id") is not None:
+    print(d["result"]["message_id"])
+')
+  [[ -n "$TG_MSG_ID" ]]
+}
+
+# D11: update delivery-evidence keys in the day file YAML frontmatter IN PLACE,
+# preserving the body byte-for-byte. The frontmatter is the CANONICAL delivery
+# marker: the brief file alone does not prove delivery.
+update_day_frontmatter() { # $1=file, then key value pairs
+  python3 - "$@" <<'PY'
+import sys
+path = sys.argv[1]
+pairs = sys.argv[2:]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+if not lines or lines[0] != "---":
+    sys.exit(1)
+try:
+    end = lines[1:].index("---") + 1
+except ValueError:
+    sys.exit(1)
+fm, body = lines[1:end], lines[end + 1:]
+for i in range(0, len(pairs), 2):
+    key, value = pairs[i], pairs[i + 1]
+    row = f"{key}: {value}"
+    for j, line in enumerate(fm):
+        if line.startswith(key + ":"):
+            fm[j] = row
+            break
+    else:
+        fm.append(row)
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(["---"] + fm + ["---"] + body))
+PY
+}
+
+# Read one frontmatter key (empty when absent / no frontmatter).
+day_frontmatter_get() { # $1=file $2=key
+  awk -v k="$2" 'NR==1&&$0=="---"{fm=1;next} fm&&$0=="---"{exit} fm&&index($0,k": ")==1{print substr($0,length(k)+3)}' "$1" 2>/dev/null
 }
 
 PREFLIGHT_JSON=$("$HUB/bin/kb-brief-preflight" 2>/dev/null || print -- '{"generated_at":null,"projects":[],"warnings":[],"changed_since_yesterday":[],"do_not_surface":[]}')
@@ -199,43 +254,96 @@ if [[ "${KB_BRIEF_PROMPT_ONLY:-}" == "1" ]]; then
   exit 0
 fi
 
-cd "$HUB"
-set +e
-RAW=$("$ORCH" --cwd "$HUB" --timeout "$BRIEF_TIMEOUT" "$PROMPT" 2>&1)
-RC=$?
-set -e
-
-if [ "$RC" -ne 0 ]; then
-  echo "[$(date -Iseconds)] orchestrator failed rc=$RC" >> "$LOG"
-  echo "$RAW" >> "$LOG"
-  case "$RC" in
-    2)  BRIEF="$L_ERR_RC2 $LOG" ;;
-    75) BRIEF="$L_ERR_RC75 $LOG" ;;
-    *)  BRIEF="$L_ERR_OTHER (rc=$RC). $L_ERR_CHECK $LOG" ;;
-  esac
-  # short path — send error and exit
-  send_tg "$L_HEADER $TODAY $NOW
-
-$BRIEF"
-  exit 0
+# D11: delivery-only retry. A same-day brief that is already VERIFIED-delivered
+# is a no-op; one that exists but is not verified-delivered reuses its body and
+# repeats only the delivery — never a second LLM run. Reuse requires a VALID
+# shape (YAML frontmatter + non-empty body): a legacy/frontmatter-less or empty
+# file is regenerated and overwritten, never a stuck retry.
+BRIEFS_DIR="$HUB/briefs"
+BRIEF_FILE="$BRIEFS_DIR/$TODAY.md"
+REUSE=0
+PARTS_SENT=0
+if [[ -f "$BRIEF_FILE" ]]; then
+  if [[ "$(head -n 1 "$BRIEF_FILE" 2>/dev/null)" == "---" ]]; then
+    DELIVERY_STATE=$(day_frontmatter_get "$BRIEF_FILE" delivery)
+    if [[ "$DELIVERY_STATE" == "telegram_ok" ]]; then
+      echo "[$(date -Iseconds)] brief already verified-delivered for $TODAY, no-op" >> "$LOG"
+      print -- "brief already delivered for $TODAY"
+      exit 0
+    fi
+    # Body up to the first Retro/Reflection section (appended later by
+    # kb-retro; generated briefs never emit those headings themselves) — only
+    # the morning brief text is resent.
+    REUSE_BODY=$(awk 'NR==1&&$0=="---"{fm=1;next} fm&&$0=="---"{fm=0;body=1;next} body&&/^## (Retro|Reflection) \(/{exit} body' "$BRIEF_FILE")
+    REUSE_BODY=$(print -- "$REUSE_BODY" | awk 'NF {p=1} p' | awk '{lines[NR]=$0} END {for(i=NR;i>=1;i--) if(lines[i]!~/^[[:space:]]*$/){last=i;break} for(i=1;i<=last;i++) print lines[i]}')
+    if [[ -n "$REUSE_BODY" ]]; then
+      REUSE=1
+      BRIEF="$REUSE_BODY"
+      # Durable per-part delivery state: parts already verified-sent by an
+      # earlier run are never resent (split part 1 ok + part 2 failed must not
+      # duplicate part 1 on retry).
+      PARTS_SENT=$(day_frontmatter_get "$BRIEF_FILE" delivery_parts_sent)
+      [[ "$PARTS_SENT" == <-> ]] || PARTS_SENT=0
+      echo "[$(date -Iseconds)] reusing same-day brief body (delivery=${DELIVERY_STATE:-unknown}, parts_sent=$PARTS_SENT), delivery-only retry" >> "$LOG"
+    else
+      echo "[$(date -Iseconds)] WARN: same-day brief has empty body, regenerating" >> "$LOG"
+    fi
+  else
+    echo "[$(date -Iseconds)] WARN: same-day brief lacks frontmatter (legacy shape), regenerating" >> "$LOG"
+  fi
 fi
 
-# Strip everything up to and including `---BRIEF---` delimiter.
-# If delimiter missing, fall back to full RAW (agent misbehaved; still better to send something).
-if print -- "$RAW" | grep -q '^---BRIEF---$'; then
-  BRIEF=$(print -- "$RAW" | awk '/^---BRIEF---$/{found=1; next} found' )
-else
-  echo "[$(date -Iseconds)] WARN: ---BRIEF--- delimiter missing, sending full output" >> "$LOG"
-  BRIEF="$RAW"
-fi
+if [[ "$REUSE" != "1" ]]; then
+  cd "$HUB"
+  set +e
+  RAW=$("$ORCH" --cwd "$HUB" --timeout "$BRIEF_TIMEOUT" "$PROMPT" 2>&1)
+  RC=$?
+  set -e
 
-# Trim leading/trailing whitespace
-BRIEF=$(print -- "$BRIEF" | awk 'NF {p=1} p' | awk '{lines[NR]=$0} END {for(i=NR;i>=1;i--) if(lines[i]!~/^[[:space:]]*$/){last=i;break} for(i=1;i<=last;i++) print lines[i]}')
+  if [ "$RC" -ne 0 ]; then
+    echo "[$(date -Iseconds)] orchestrator failed rc=$RC" >> "$LOG"
+    echo "$RAW" >> "$LOG"
+    case "$RC" in
+      2)  BRIEF="$L_ERR_RC2 $LOG" ;;
+      75) BRIEF="$L_ERR_RC75 $LOG" ;;
+      *)  BRIEF="$L_ERR_OTHER (rc=$RC). $L_ERR_CHECK $LOG" ;;
+    esac
+    # D11: failure is LOUD — the error Telegram goes out ONCE per date (the
+    # 06-27 4x spam), and the exit is NON-ZERO so kb-tick retries next tick
+    # instead of marking the day fired.
+    ERR_MARK="$HUB/.orchestrator/brief-error-$TODAY.tg"
+    if [[ ! -f "$ERR_MARK" ]]; then
+      mkdir -p "${ERR_MARK:h}"
+      if send_tg "$L_HEADER $TODAY $NOW
+
+$BRIEF"; then
+        : > "$ERR_MARK"
+      fi
+    else
+      echo "[$(date -Iseconds)] error telegram already sent for $TODAY, deduped" >> "$LOG"
+    fi
+    exit 1
+  fi
+
+  # Strip everything up to and including `---BRIEF---` delimiter.
+  # If delimiter missing, fall back to full RAW (agent misbehaved; still better to send something).
+  if print -- "$RAW" | grep -q '^---BRIEF---$'; then
+    BRIEF=$(print -- "$RAW" | awk '/^---BRIEF---$/{found=1; next} found' )
+  else
+    echo "[$(date -Iseconds)] WARN: ---BRIEF--- delimiter missing, sending full output" >> "$LOG"
+    BRIEF="$RAW"
+  fi
+
+  # Trim leading/trailing whitespace
+  BRIEF=$(print -- "$BRIEF" | awk 'NF {p=1} p' | awk '{lines[NR]=$0} END {for(i=NR;i>=1;i--) if(lines[i]!~/^[[:space:]]*$/){last=i;break} for(i=1;i<=last;i++) print lines[i]}')
+fi
 
 CHAR_COUNT=$(print -- "$BRIEF" | wc -m | tr -d ' ')
 
+# Build the ordered list of Telegram parts (1 or 2).
+typeset -a TG_PARTS
 if [ "$CHAR_COUNT" -le "$BRIEF_CHAR_LIMIT" ]; then
-  send_tg "$BRIEF"
+  TG_PARTS=("$BRIEF")
   SPLIT="no"
 else
   # Split at last blank line before BRIEF_CHAR_LIMIT. Fallback: hard split at BRIEF_CHAR_LIMIT.
@@ -252,30 +360,114 @@ else
   ')
   PART1_CHARS=$(print -- "$PART1" | wc -m | tr -d ' ')
   PART2=$(print -- "$BRIEF" | tail -c +$((PART1_CHARS+1)))
-  send_tg "$PART1"
-  sleep 1
-  send_tg "$PART2"
+  TG_PARTS=("$PART1" "$PART2")
   SPLIT="yes"
 fi
 
-DELIVERY="sent"
+# D11: the day file is written BEFORE delivery (delivery: pending) so the body
+# and the per-part progress are durable across a failed send — a retry resends
+# only the parts that never verified, never a second LLM run and never a
+# duplicate of an already-delivered part.
+if [[ "$REUSE" != "1" ]]; then
+  mkdir -p "$BRIEFS_DIR"
+  # Regeneration must never destroy the evening's work: when kb-retro ran
+  # before a late brief (it creates a minimal day file when the brief was
+  # missing), the existing Retro/Reflection sections and their verified
+  # delivery evidence are salvaged into the regenerated file — otherwise the
+  # planner would see retro evidence vanish and re-fire a delivered retro.
+  PRESERVED_TAIL=""
+  PRESERVED_RETRO_STATE=""
+  PRESERVED_RETRO_ID=""
+  PRESERVED_REFLECTION=""
+  if [[ -f "$BRIEF_FILE" && "$(head -n 1 "$BRIEF_FILE" 2>/dev/null)" == "---" ]]; then
+    PRESERVED_TAIL=$(awk '/^## (Retro|Reflection) \(/{f=1} f' "$BRIEF_FILE")
+    PRESERVED_RETRO_STATE=$(day_frontmatter_get "$BRIEF_FILE" retro_delivery)
+    PRESERVED_RETRO_ID=$(day_frontmatter_get "$BRIEF_FILE" retro_delivery_message_id)
+    PRESERVED_REFLECTION=$(day_frontmatter_get "$BRIEF_FILE" reflection)
+  fi
+  {
+    print -- "---"
+    print -- "date: $TODAY"
+    print -- "sent_at: $(date -Iseconds)"
+    print -- "char_count: $CHAR_COUNT"
+    print -- "split: $SPLIT"
+    print -- "delivery: pending"
+    print -- "delivery_parts_total: $#TG_PARTS"
+    print -- "reflection: ${PRESERVED_REFLECTION:-pending}"
+    # Carried retro evidence lands in the SAME atomic replacement (R-impl-3
+    # nit): no window where the file exists without its retro_delivery keys.
+    if [[ -n "$PRESERVED_RETRO_STATE" ]]; then
+      print -- "retro_delivery: $PRESERVED_RETRO_STATE"
+    fi
+    if [[ -n "$PRESERVED_RETRO_ID" ]]; then
+      print -- "retro_delivery_message_id: $PRESERVED_RETRO_ID"
+    fi
+    print -- "---"
+    print -- ""
+    print -- "$BRIEF"
+    if [[ -n "$PRESERVED_TAIL" ]]; then
+      print -- ""
+      print -- "$PRESERVED_TAIL"
+    fi
+  } > "$BRIEF_FILE"
+  if [[ -n "$PRESERVED_TAIL" ]]; then
+    echo "[$(date -Iseconds)] preserved existing Retro/Reflection sections across brief regeneration" >> "$LOG"
+  fi
+  PARTS_SENT=0
+else
+  # The skip-sent-parts optimization is only valid while the split plan is
+  # unchanged; if it drifted (e.g. BRIEF_CHAR_LIMIT changed between runs),
+  # resend everything — a duplicate beats silently-missing content.
+  TOTAL_STORED=$(day_frontmatter_get "$BRIEF_FILE" delivery_parts_total)
+  if [[ -n "$TOTAL_STORED" && "$TOTAL_STORED" != "$#TG_PARTS" ]]; then
+    echo "[$(date -Iseconds)] WARN: split plan changed ($TOTAL_STORED -> $#TG_PARTS parts), resending all parts" >> "$LOG"
+    PARTS_SENT=0
+  fi
+  update_day_frontmatter "$BRIEF_FILE" delivery_parts_total "$#TG_PARTS"
+fi
+
+# D11: every part of the send is VERIFIED (ok==true + message_id); each
+# verified part is recorded durably before the next send. Already-sent parts
+# are skipped on retry.
+SEND_OK=1
+IDX=0
+for PART in "${TG_PARTS[@]}"; do
+  IDX=$((IDX+1))
+  if [ "$IDX" -le "$PARTS_SENT" ]; then
+    echo "[$(date -Iseconds)] part $IDX/$#TG_PARTS already verified-sent, skipping" >> "$LOG"
+    continue
+  fi
+  [ "$IDX" -gt 1 ] && sleep 1
+  if send_tg "$PART"; then
+    PARTS_SENT=$IDX
+    if [[ "${KB_BRIEF_DRY:-}" != "1" ]]; then
+      update_day_frontmatter "$BRIEF_FILE" delivery_parts_sent "$PARTS_SENT"
+      if [ "$IDX" -eq 1 ]; then
+        update_day_frontmatter "$BRIEF_FILE" delivery_message_id "$TG_MSG_ID"
+      fi
+    fi
+  else
+    SEND_OK=0
+    break
+  fi
+done
+
+# D11: the delivery field carries VERIFIED state — telegram_ok only after every
+# part parsed ok==true with a message_id; a generated-but-undelivered brief
+# keeps its file (the digest may still use the same-day content) but exits
+# non-zero so kb-tick retries the delivery.
 if [[ "${KB_BRIEF_DRY:-}" == "1" ]]; then
   DELIVERY="dry-run"
+elif [ "$SEND_OK" -eq 1 ]; then
+  DELIVERY="telegram_ok"
+else
+  DELIVERY="telegram_failed"
 fi
 echo "[$(date -Iseconds)] brief ${DELIVERY} (${CHAR_COUNT} chars, split=${SPLIT})" >> "$LOG"
 
-BRIEFS_DIR="$HUB/briefs"
-mkdir -p "$BRIEFS_DIR"
-BRIEF_FILE="$BRIEFS_DIR/$TODAY.md"
-{
-  print -- "---"
-  print -- "date: $TODAY"
-  print -- "sent_at: $(date -Iseconds)"
-  print -- "char_count: $CHAR_COUNT"
-  print -- "split: $SPLIT"
-  print -- "delivery: $DELIVERY"
-  print -- "reflection: pending"
-  print -- "---"
-  print -- ""
-  print -- "$BRIEF"
-} > "$BRIEF_FILE"
+update_day_frontmatter "$BRIEF_FILE" \
+  sent_at "$(date -Iseconds)" delivery "$DELIVERY"
+if [[ "$DELIVERY" == "telegram_failed" ]]; then
+  echo "[$(date -Iseconds)] telegram send unverified; file kept, will retry delivery next tick" >> "$LOG"
+  exit 1
+fi

@@ -32,9 +32,21 @@ make_hub() {
 [[ -n "${KB_FAKE_GATHER_LOG:-}" ]] && echo idea >>"$KB_FAKE_GATHER_LOG"
 if [[ -s "${KB_HUB:?}/idea.txt" ]]; then cat "$KB_HUB/idea.txt"; else echo '(нет идей)'; fi
 SH
+  # D6 (morning-digest-inputs-rebalance-2026-07-11): the board block now calls
+  # `kb-board list <board> --all --json`. This fake emits a valid JSON array whose
+  # single task title carries the board.txt content, so a board change still
+  # surfaces in the packet (semantic-snapshot test) via the JSON path.
   cat >"$hub/bin/kb-board" <<'SH'
 #!/usr/bin/env bash
-if [[ -s "${KB_HUB:?}/board.txt" ]]; then cat "$KB_HUB/board.txt"; else echo '(нет задач)'; fi
+if [[ "$*" == *"--json"* ]]; then
+  if [[ -s "${KB_HUB:?}/board.txt" ]]; then
+    python3 -c 'import json,sys;print(json.dumps([{"status":"Ready","title":open(sys.argv[1]).read().strip(),"plan_item_id":"t1"}]))' "$KB_HUB/board.txt"
+  else
+    echo '[]'
+  fi
+else
+  if [[ -s "${KB_HUB:?}/board.txt" ]]; then cat "$KB_HUB/board.txt"; else echo '(нет задач)'; fi
+fi
 SH
   cat >"$hub/bin/kb-mail-block" <<'SH'
 #!/usr/bin/env bash
@@ -533,7 +545,24 @@ SPEECH=$(cat "$H/reports/morning-digest-$D.txt" 2>/dev/null)
 [[ $RC -eq 0 && $AFTER -eq $((BEFORE + 1)) && "$SPEECH" == *"SNAPSHOTMONEYV1"* ]] \
   && ok "snapshot: scheduled caller replaces stale same-day delivery exactly once" \
   || bad "snapshot: replacement mismatch rc=$RC sends=$BEFORE->$AFTER speech_marker=$([[ "$SPEECH" == *"SNAPSHOTMONEYV1"* ]] && echo yes || echo no)"
-json_check "$M" 'd["upstream_snapshot"]["schema"] == "morning-input/v1" and d["upstream_snapshot"]["semantic_sha256"].__len__() == 64' "snapshot: replacement stores versioned semantic hash"
+json_check "$M" 'd["upstream_snapshot"]["schema"] == "morning-input/v2" and d["upstream_snapshot"]["semantic_sha256"].__len__() == 64' "snapshot: replacement stores versioned semantic hash"
+
+# D13 compatibility: a stored v1-schema snapshot (pre input-contract upgrade) is
+# NOT corruption — a manual rerun stays a no-op, exactly like the no-provenance
+# legacy path.
+python3 - "$M" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["upstream_snapshot"]={"schema":"morning-input/v1","inputs":[],"semantic_sha256":"0"*64}
+open(p,"w").write(json.dumps(d))
+PY
+: >"$H/render.log"; BEFORE=$(wc -l <"$H/send.log")
+run_digest_synth "$H" --date "$D" >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && $(wc -l <"$H/send.log") -eq $BEFORE && ! -s "$H/render.log" ]] \
+  && ok "snapshot: stored v1 schema upgrades as legacy no-op, not corruption (D13)" \
+  || bad "snapshot: v1-schema manifest mishandled rc=$RC"
+run_scheduled_synth "$H" >/dev/null 2>&1
+json_check "$M" 'd["upstream_snapshot"]["schema"] == "morning-input/v2"' "snapshot: scheduled caller upgrades v1 manifest to v2 once"
 
 # Completion's own hub-log write and mtime-only touch are semantic no-ops.
 BEFORE=$(wc -l <"$H/send.log"); touch "$H/.orchestrator/money-radar-$D-codex-out.txt"
@@ -563,7 +592,7 @@ run_digest_synth "$H" --date "$D" >/dev/null 2>&1
 M="$H/.orchestrator/morning-digest-$D.json"
 python3 - "$M" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["upstream_snapshot"]={"schema":"morning-input/v1","semantic_sha256":"bad"}
+p=sys.argv[1]; d=json.load(open(p)); d["upstream_snapshot"]={"schema":"morning-input/v2","semantic_sha256":"bad"}
 open(p,"w").write(json.dumps(d))
 PY
 : >"$H/render.log"; : >"$H/send.log"
@@ -572,6 +601,24 @@ run_scheduled_synth "$H" >/dev/null 2>&1; RC=$?
   && ok "snapshot: malformed schema makes zero external calls" \
   || bad "snapshot: malformed schema reached an external stage"
 json_check "$M" 'd["status"] == "failed" and d["failed_stage"] == "integrity" and d["retry_disposition"] == "force_required"' "snapshot: malformed schema fails closed"
+
+# Only EXACTLY morning-input/v1 gets the legacy-compat upgrade (D13); an
+# unknown/future schema is integrity corruption, never a silent reset/resend.
+H="$TMP/snapshot-future"; D=$(date +%F); make_hub "$H"
+run_digest_synth "$H" --date "$D" >/dev/null 2>&1
+M="$H/.orchestrator/morning-digest-$D.json"
+python3 - "$M" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["upstream_snapshot"]={"schema":"morning-input/v3","inputs":[],"semantic_sha256":"0"*64}
+open(p,"w").write(json.dumps(d))
+PY
+: >"$H/render.log"; : >"$H/send.log"
+run_scheduled_synth "$H" >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && ! -s "$H/render.log" && ! -s "$H/send.log" ]] \
+  && ok "snapshot: future schema makes zero external calls" \
+  || bad "snapshot: future schema reached an external stage"
+json_check "$M" 'd["status"] == "failed" and d["failed_stage"] == "integrity"' "snapshot: future schema fails closed (no legacy bypass)"
 
 # Flock serializes two stale scheduled callers; contention is retryable rc 75.
 H="$TMP/snapshot-concurrent"; D=$(date +%F); make_hub "$H"
@@ -615,7 +662,9 @@ printf '%s\n' 'SNAPSHOT_ESCALATION_A' >"$H/escalations.md"
 printf '%s\n' '<untrusted-source-nonce-a>SNAPSHOT_MAIL_A</untrusted-source-nonce-a>' >"$H/mail.txt"
 run_digest_synth "$H" --date "$D" >/dev/null 2>&1
 M="$H/.orchestrator/morning-digest-$D.json"
-json_check "$M" '[i["name"] for i in d["upstream_snapshot"]["inputs"]] == ["learning","money_radar","brief","daily_research","ideas","project_state","project_log","project_board","hub_log","escalations","mail"]' "snapshot: full logical input roster is canonical"
+# D13 (v14): "project_board" and "mail" left the input contract with their
+# blocks — the brief is the single day-aggregator.
+json_check "$M" '[i["name"] for i in d["upstream_snapshot"]["inputs"]] == ["learning","money_radar","brief","daily_research","ideas","project_state","project_log","hub_log","escalations"]' "snapshot: full logical input roster is canonical (v2, no board/mail)"
 
 expect_surface_refresh() {
   local label="$1" before after rc
@@ -630,22 +679,38 @@ expect_surface_refresh() {
 printf '%s\n' 'SNAPSHOT_LEARNING_B' >"$H/reports/learning-arxiv-summary-$D.md"; expect_surface_refresh learning
 printf '%s\n' 'SNAPSHOT_MONEY_B' >"$H/.orchestrator/money-radar-$D-codex-out.txt"; expect_surface_refresh money
 printf '%s\n' 'SNAPSHOT_BRIEF_B' >"$H/briefs/$D.md"; expect_surface_refresh brief
-printf '%s\n' '{"marker":"SNAPSHOT_RESEARCH_B"}' >"$H/.orchestrator/daily-research-$D.json"; expect_surface_refresh daily-research
+# D8 (morning-digest-inputs-rebalance-2026-07-11): the daily-research block was
+# removed from the digest (dead 29-day-stale duplicate of the arXiv research), so
+# its artifact is no longer read and a change to it is a semantic no-op — the
+# 'daily_research' key stays in the canonical roster (asserted above) but always
+# renders 'missing'. Assert NO resend (matches the mail-nonce no-op below).
+DR_BEFORE=$(wc -l <"$H/send.log")
+printf '%s\n' '{"marker":"SNAPSHOT_RESEARCH_B"}' >"$H/.orchestrator/daily-research-$D.json"
+run_scheduled_synth "$H" >/dev/null 2>&1; DR_RC=$?
+[[ $DR_RC -eq 0 && $(wc -l <"$H/send.log") -eq $DR_BEFORE ]] \
+  && ok "snapshot surface: daily-research removed (D8) is a semantic no-op" \
+  || bad "snapshot surface: daily-research rc=$DR_RC unexpectedly resent"
 printf '%s\n' 'SNAPSHOT_IDEA_B' >"$H/idea.txt"; expect_surface_refresh idea
 printf '%s\n' 'SNAPSHOT_STATE_B' >"$PROJECT/knowledge/state.md"; expect_surface_refresh project-state
 printf '%s\n' 'SNAPSHOT_PROJECT_LOG_B' >"$PROJECT/knowledge/log.md"; expect_surface_refresh project-log
-printf '%s\n' 'SNAPSHOT_BOARD_B' >"$H/board.txt"; expect_surface_refresh project-board
+# D13: the board block left the digest (brief is the single day-aggregator) —
+# a board change is a semantic no-op, same shape as the D8 daily-research case.
+BOARD_BEFORE=$(wc -l <"$H/send.log")
+printf '%s\n' 'SNAPSHOT_BOARD_B' >"$H/board.txt"
+run_scheduled_synth "$H" >/dev/null 2>&1; BOARD_RC=$?
+[[ $BOARD_RC -eq 0 && $(wc -l <"$H/send.log") -eq $BOARD_BEFORE ]] \
+  && ok "snapshot surface: board removed (D13) is a semantic no-op" \
+  || bad "snapshot surface: board rc=$BOARD_RC unexpectedly resent"
 printf '%s\n' 'SNAPSHOT_HUB_LOG_B' >"$H/log.md"; expect_surface_refresh hub-log
 printf '%s\n' 'SNAPSHOT_ESCALATION_B' >"$H/escalations.md"; expect_surface_refresh escalations
-printf '%s\n' '<untrusted-source-nonce-b>SNAPSHOT_MAIL_B</untrusted-source-nonce-b>' >"$H/mail.txt"; expect_surface_refresh mail
-
-# Fencing nonce changes alone are hash-normalized and do not resend.
-BEFORE=$(wc -l <"$H/send.log")
-sed 's/nonce-b/nonce-c/g' "$H/mail.txt" >"$H/mail.next"; mv "$H/mail.next" "$H/mail.txt"
-run_scheduled_synth "$H" >/dev/null 2>&1; RC=$?
-[[ $RC -eq 0 && $(wc -l <"$H/send.log") -eq $BEFORE ]] \
-  && ok "snapshot surface: mail nonce churn is semantic no-op" \
-  || bad "snapshot surface: mail nonce churn duplicated delivery"
+# D13: the direct mail block left the digest too — a mail-envelope change is a
+# semantic no-op (mail reaches the digest only via the brief's curated prose).
+MAIL_BEFORE=$(wc -l <"$H/send.log")
+printf '%s\n' '<untrusted-source-nonce-b>SNAPSHOT_MAIL_B</untrusted-source-nonce-b>' >"$H/mail.txt"
+run_scheduled_synth "$H" >/dev/null 2>&1; MAIL_RC=$?
+[[ $MAIL_RC -eq 0 && $(wc -l <"$H/send.log") -eq $MAIL_BEFORE ]] \
+  && ok "snapshot surface: mail removed (D13) is a semantic no-op" \
+  || bad "snapshot surface: mail rc=$MAIL_RC unexpectedly resent"
 unset KB_TEST_VEPOL_DEV
 
 # ── 9. Selector: same synthesized text, exactly one delivery adapter ─────────

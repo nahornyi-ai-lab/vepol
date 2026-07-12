@@ -13,7 +13,7 @@
 # fallback-of: <name>  in column 5 marks this tool as a backup for another (optional).
 
 claude     | which-any | claude                              | писать/править код и исполнять (скиллы, интеграции, запуск проекта)
-codex      | which-any | codex                               | анализ, планирование, консервативное второе мнение, большие ресёрчи, куски кода
+codex      | path-any  | $HOME/.local/bin/codex              | анализ, планирование, консервативное второе мнение, большие ресёрчи, куски кода
 agy        | path-any  | $HOME/.local/bin/agy:agy            | независимое мнение, ловит нюансы, что упустили codex и claude (зови: agy --add-dir "$PWD")
 grok       | path-any  | $HOME/.grok/bin/grok:grok           | что пишут в соцсетях сейчас; дерзкий, современный, без догм и цензуры
 notebooklm | path-any  | $HOME/.local/bin/notebooklm:notebooklm | аудио/видео-пересказ для человека

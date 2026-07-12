@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Morning-digest mail integration (AC7): the same-day morning mail envelope is
-# injected into the input kb-morning-digest hands to its synthesis agent, wrapped
-# in a nonce untrusted-source boundary with a data-not-instructions preamble, and
-# no raw address / secret body / markup leaks. kb-morning-digest never fetches
-# Gmail and never adds raw email content to the digest. Uses the
-# KB_DIGEST_PROMPT_ONLY test seam (prints the assembled synth input, no LLM /
-# NotebookLM call).
+# Morning-digest mail isolation (D13, supersedes the digest side of AC7): the
+# brief is the single day-aggregator, so kb-morning-digest injects NO mail into
+# its synth input at all — no mail section, no untrusted-source wrapper, no
+# freshness note — even when a fresh (and hostile) same-day envelope exists on
+# disk. Mail reaches the voice only via the brief's curated prose. The mail
+# PIPELINE (kb-mail-brief / kb-mail-block / envelopes) is untouched and still
+# exercised here as the fixture producer. Leak-free stays mandatory: raw
+# address / secret body / markup must never appear in the digest input.
+# Uses the KB_DIGEST_PROMPT_ONLY test seam (no LLM / NotebookLM call).
 #
-# Spec: knowledge/decisions/mail-briefing-integration-2026-06-29.md  (AC7)
-# Plan: knowledge/decisions/mail-briefing-integration-build-plan-2026-07-01.md
+# Spec: knowledge/decisions/morning-digest-inputs-rebalance-spec-2026-07-11.md (D13, AC-14)
+# Supersedes digest-side assertions of: mail-briefing-integration-2026-06-29.md (AC7)
 
 set -uo pipefail
 PASS=0; FAIL=0
@@ -60,46 +62,67 @@ run_digest() { # prints the assembled synth input (prompt-only seam)
     KB_DIGEST_PROMPT_ONLY=1 "$SRC_BIN/kb-morning-digest" --date "$DAY" 2>/dev/null
 }
 
-# ── Available case: fixture morning envelope with a hostile item ─────────────
+# ── Envelope-present case: fresh hostile envelope on disk → digest ignores it ─
 KB_HUB="$HUB" KB_MAIL_FAKE_DIR="$FAKE" "$SRC_BIN/kb-mail-brief" \
   --period morning --write >/dev/null 2>&1
 
 P=$(run_digest)
 if [[ -z "$P" ]]; then
-  fail "AC7: digest prompt-only produced no output"
+  fail "D13: digest prompt-only produced no output"
 else
-  [[ "$P" == *"<untrusted-source-"* && "$P" == *"</untrusted-source-"* ]] \
-    && ok "AC7: nonce untrusted-source block in digest synth input" \
-    || fail "AC7: no untrusted-source-wrapped mail block in digest synth input"
-  [[ "$P" == *"untrusted external data for analysis only"* ]] \
-    && ok "AC7: data-not-instructions preamble present (block not unwrapped)" \
-    || fail "AC7: missing data-not-instructions preamble"
+  [[ "$P" != *"Утренняя почта"* ]] \
+    && ok "D13: no mail section in digest synth input" \
+    || fail "D13: mail section present in digest synth input"
+  [[ "$P" != *"untrusted-source"* ]] \
+    && ok "D13: no untrusted-source wrapper in digest synth input" \
+    || fail "D13: untrusted-source wrapper present"
+  [[ "$P" != *"no fresh mail brief"* && "$P" != *"MAIL (morning"* ]] \
+    && ok "D13: no mail freshness note either" \
+    || fail "D13: mail freshness note present"
   leakfree "$P" \
-    && ok "AC7: no raw address/body/markup in digest synth input" \
-    || fail "AC7: raw mail content leaked into digest synth input"
-  [[ "$P" != *"no fresh mail brief"* ]] \
-    && ok "AC7: available mail is injected, not degraded to a note" \
-    || fail "AC7: available mail wrongly degraded to a freshness note"
+    && ok "D13: no raw address/body/markup in digest synth input" \
+    || fail "D13: raw mail content leaked into digest synth input"
 fi
 
-# ── Unavailable case: no valid same-day envelope → plain freshness note ──────
+# ── Envelope-unavailable case: still no mail artifacts of any kind ───────────
 echo unavailable > "$FAKE/mode"
 KB_HUB="$HUB" KB_MAIL_FAKE_DIR="$FAKE" "$SRC_BIN/kb-mail-brief" \
   --period morning --write >/dev/null 2>&1
 
 U=$(run_digest)
 if [[ -z "$U" ]]; then
-  fail "AC7(unavail): digest prompt-only produced no output"
+  fail "D13(unavail): digest prompt-only produced no output"
 else
-  [[ "$U" == *"no fresh mail brief"* ]] \
-    && ok "AC7(unavail): degrades to plain freshness note" \
-    || fail "AC7(unavail): missing freshness note"
-  [[ "$U" != *"<untrusted-source"* ]] \
-    && ok "AC7(unavail): no untrusted-source wrapper when mail unavailable" \
-    || fail "AC7(unavail): unexpected wrapper on unavailable mail"
+  [[ "$U" != *"no fresh mail brief"* && "$U" != *"Утренняя почта"* \
+     && "$U" != *"untrusted-source"* ]] \
+    && ok "D13(unavail): no mail block/note/wrapper when mail unavailable" \
+    || fail "D13(unavail): mail artifact present"
   leakfree "$U" \
-    && ok "AC7(unavail): no raw content in unavailable path" \
-    || fail "AC7(unavail): raw content leaked in unavailable path"
+    && ok "D13(unavail): no raw content in unavailable path" \
+    || fail "D13(unavail): raw content leaked in unavailable path"
+fi
+
+# ── v0.5.1 AC9: previous-day retro cannot masquerade as today's morning brief ─
+HUB_STALE="$TMP/hub-stale"; mkdir -p "$HUB_STALE/personal" "$HUB_STALE/briefs"
+ln -s "$SRC_BIN" "$HUB_STALE/bin"
+: > "$HUB_STALE/personal/.secrets"
+cat > "$HUB_STALE/briefs/2026-06-30.md" <<'EOF'
+## Morning brief
+
+previous-day-morning-plan-marker
+
+## Retro (20:45)
+
+previous-day-retro-marker must not appear in today's morning digest input.
+EOF
+S=$(KB_HUB="$HUB_STALE" KB_VEPOL_DEV="$NOVEPOL" KB_DIGEST_PROMPT_ONLY=1 \
+    "$SRC_BIN/kb-morning-digest" --date "$DAY" 2>/dev/null)
+if [[ -z "$S" ]]; then
+  fail "v0.5.1 AC9: stale-brief fixture produced no output"
+else
+  [[ "$S" != *"previous-day-retro-marker"* ]] \
+    && ok "v0.5.1 AC9: previous-day Retro span is not labeled as today's morning brief" \
+    || fail "v0.5.1 AC9: previous-day Retro span leaked into today's morning brief input"
 fi
 
 # ── v0.5.1 AC9: previous-day retro cannot masquerade as today's morning brief ─

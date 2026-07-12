@@ -1,0 +1,90 @@
+{
+  "schema_version": "mail-brief/v1",
+  "generated_at": "2026-07-05T06:15:00+02:00",
+  "period": "morning",
+  "window": {
+    "from": "2026-07-04T20:30:00+02:00",
+    "to": "2026-07-05T06:15:00+02:00"
+  },
+  "available": true,
+  "account_ref": "primary",
+  "watermark": "2026-07-05T06:15:00+02:00",
+  "stats": {
+    "messages_seen": 4,
+    "threads_seen": 4,
+    "threads_included": 4,
+    "threads_deferred": 0
+  },
+  "items": [
+    {
+      "thread_ref": "t-1",
+      "message_ref": "m-1",
+      "date": "2026-07-05",
+      "time": "04:11",
+      "sender_label": "Jane Doe",
+      "subject": "Intro from the conference",
+      "classification": "needs_reply",
+      "urgency": "normal",
+      "action_needed": true,
+      "summary": "Jane follows up after the conference.",
+      "proposed_actions": [
+        {
+          "type": "reply_draft",
+          "summary": "Draft a warm reply."
+        }
+      ],
+      "privacy_flags": [],
+      "confidence": "high"
+    },
+    {
+      "thread_ref": "t-2",
+      "message_ref": "m-2",
+      "date": "2026-07-05",
+      "time": "05:50",
+      "sender_label": "Jane Doe",
+      "subject": "One more thing",
+      "classification": "fyi",
+      "urgency": "low",
+      "action_needed": false,
+      "summary": "Jane adds a detail.",
+      "proposed_actions": [],
+      "privacy_flags": [],
+      "confidence": "medium"
+    },
+    {
+      "thread_ref": "t-3",
+      "message_ref": "m-3",
+      "date": "2026-07-05",
+      "time": "05:12",
+      "sender_label": "Weekly News",
+      "subject": "Your weekly digest",
+      "classification": "newsletter",
+      "urgency": "low",
+      "action_needed": false,
+      "summary": "Weekly newsletter.",
+      "proposed_actions": [],
+      "privacy_flags": [
+        "automated"
+      ],
+      "confidence": "high"
+    },
+    {
+      "thread_ref": "t-4",
+      "message_ref": "m-4",
+      "date": "2026-07-05",
+      "time": "05:30",
+      "sender_label": "Ops Alerts int",
+      "subject": "disk usage",
+      "classification": "ops_alert",
+      "urgency": "normal",
+      "action_needed": false,
+      "summary": "Disk usage alert.",
+      "proposed_actions": [],
+      "privacy_flags": [
+        "automated"
+      ],
+      "confidence": "high"
+    }
+  ],
+  "errors": []
+}

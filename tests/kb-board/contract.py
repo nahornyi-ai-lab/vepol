@@ -590,6 +590,49 @@ def cli_progress_updates_metadata() -> None:
         _check(path.read_text(encoding="utf-8"))
 
 
+def cli_list_non_json_no_repr_line() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_board.md")
+        # (a) non-JSON list prints ONLY the formatted lines — no Python-repr dump.
+        proc = subprocess.run(
+            [str(_cli()), "list", str(path), "--all"],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise ContractFailure(f"kb-board list failed: {proc.stderr or proc.stdout}")
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise ContractFailure("kb-board list produced no output")
+        # The bug printed the rows list repr (starts with '[{') as line 1.
+        if "'plan_item_id':" in proc.stdout or lines[0].lstrip().startswith("[{"):
+            raise ContractFailure(f"list non-JSON leaked a Python-repr line: {lines[0]!r}")
+        import re
+        formatted = re.compile(r"^(Backlog|Ready|In Progress|Blocked|Review|Done|Cancelled): ")
+        if not formatted.match(lines[0]):
+            raise ContractFailure(f"first list line is not a formatted row: {lines[0]!r}")
+        for ln in lines:
+            if not formatted.match(ln):
+                raise ContractFailure(f"unexpected non-formatted list line: {ln!r}")
+        # (c) kb-retro-style grep over the same output still matches active statuses.
+        retro = re.compile(r"^(Backlog|Ready|In Progress|Blocked|Review):")
+        if not any(retro.match(ln) for ln in lines):
+            raise ContractFailure("kb-retro-style grep matched no list lines")
+        # (b) --json output is still valid JSON (a list of row dicts).
+        proc_json = subprocess.run(
+            [str(_cli()), "list", str(path), "--all", "--json"],
+            text=True,
+            capture_output=True,
+        )
+        if proc_json.returncode != 0:
+            raise ContractFailure(f"kb-board list --json failed: {proc_json.stderr or proc_json.stdout}")
+        payload = json.loads(proc_json.stdout)
+        if not isinstance(payload, list) or not payload:
+            raise ContractFailure(f"list --json is not a non-empty JSON list: {proc_json.stdout!r}")
+        if "plan_item_id" not in payload[0]:
+            raise ContractFailure(f"list --json rows missing plan_item_id: {payload[0]!r}")
+
+
 def cli_multi_writer_append_stress() -> None:
     with tempfile.TemporaryDirectory() as d:
         path = _copy_fixture(pathlib.Path(d), "valid_board.md")
@@ -682,6 +725,7 @@ TESTS: list[Callable[[], None]] = [
     lock_backend_import_safe,
     cutover_no_old_writer_gap,
     cli_progress_updates_metadata,
+    cli_list_non_json_no_repr_line,
     cli_multi_writer_append_stress,
 ]
 

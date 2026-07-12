@@ -36,6 +36,8 @@ import uuid
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+from _kb_codex import CodexUnavailable, codex_bin
+
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 STATE_DIR = pathlib.Path(os.environ.get("KB_ORCHESTRATOR_STATE_DIR", HUB / ".orchestrator"))
@@ -435,6 +437,14 @@ def run_claude(
             cooldown_until=compute_cooldown("timeout", snippet),
             snippet=snippet,
         )
+    except OSError as exc:
+        # D11 (morning-digest-inputs-rebalance, Phase D): a missing/broken
+        # claude binary is 'unavailable' → failover proceeds, never a crash.
+        snippet = f"claude launch failed: {exc}"
+        return RunResult(
+            provider="claude", returncode=127, output="", stderr=snippet,
+            category="unavailable", snippet=snippet,
+        )
 
     stderr = proc.stderr or ""
     if proc.returncode == 0:
@@ -469,9 +479,10 @@ def build_codex_command(
     timeout_file: pathlib.Path,
     resume_key: str | None,
 ) -> list[str]:
-    base = ["codex", "exec"]
+    binary = codex_bin()
+    base = [binary, "exec"]
     if resume_key and session.get("codex_session_id"):
-        base = ["codex", "exec", "resume", session["codex_session_id"]]
+        base = [binary, "exec", "resume", session["codex_session_id"]]
     cmd = base + [
         prompt,
         "--skip-git-repo-check",
@@ -500,7 +511,14 @@ def run_codex(
         output_path = pathlib.Path(tmp.name)
 
     try:
-        cmd = build_codex_command(prompt, cwd, add_dirs, session, output_path, resume_key)
+        try:
+            cmd = build_codex_command(prompt, cwd, add_dirs, session, output_path, resume_key)
+        except CodexUnavailable as exc:
+            snippet = str(exc)
+            return RunResult(
+                provider="codex", returncode=127, output="", stderr=snippet,
+                category="unavailable", snippet=snippet,
+            )
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -513,6 +531,14 @@ def run_codex(
                 category="timeout",
                 cooldown_until=compute_cooldown("timeout", snippet),
                 snippet=snippet,
+            )
+        except OSError as exc:
+            # D11: a vanished/broken codex binary after path validation is
+            # 'unavailable' → failover proceeds, never a crash.
+            snippet = f"codex launch failed: {exc}"
+            return RunResult(
+                provider="codex", returncode=127, output="", stderr=snippet,
+                category="unavailable", snippet=snippet,
             )
 
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else ""

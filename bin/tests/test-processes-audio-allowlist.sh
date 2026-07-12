@@ -170,6 +170,132 @@ EOF
 EOF
 } | check_yaml valid "absolute-path run normalizes to the same command (basename)"
 
+# ── AC13: optional per-process `timeout` field (D12) ─────────────────────────
+# absent → default (no behavior change); positive bounded int 60..7200 accepted;
+# anything else fails closed (never silently ignored).
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 3600
+EOF
+} | check_yaml valid "AC13: timeout=3600 accepted"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 60
+EOF
+} | check_yaml valid "AC13: timeout=60 lower bound accepted"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 7200
+EOF
+} | check_yaml valid "AC13: timeout=7200 upper bound accepted"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 59
+EOF
+} | check_yaml invalid "AC13: timeout below 60 fails closed"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 7201
+EOF
+} | check_yaml invalid "AC13: timeout above 7200 fails closed"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 0
+EOF
+} | check_yaml invalid "AC13: timeout=0 fails closed"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: -60
+EOF
+} | check_yaml invalid "AC13: negative timeout fails closed"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: abc
+EOF
+} | check_yaml invalid "AC13: non-integer timeout fails closed"
+
+{ base_procs; cat <<'EOF'
+
+- id: heavy
+  enabled: true
+  when: after:learning
+  run: kb-heavy
+  outputs: [file]
+  timeout: 900.5
+EOF
+} | check_yaml invalid "AC13: fractional timeout fails closed"
+
+# Parsed value shape: present → int; absent → no timeout key (kb-tick applies 1800).
+python3 - "$SRC_BIN" <<'PY' && ok "AC13: parsed timeout is int when present, absent otherwise" \
+                            || fail "AC13: parsed timeout shape wrong"
+import sys
+sys.path.insert(0, sys.argv[1])
+from _kb_processes import parse_processes_text
+text = """\
+- id: a
+  enabled: true
+  when: "07:30"
+  run: kb-a
+  outputs: [file]
+- id: b
+  enabled: true
+  when: after:a
+  run: kb-b
+  outputs: [file]
+  timeout: 3600
+"""
+procs = {p["id"]: p for p in parse_processes_text(text)}
+assert "timeout" not in procs["a"] or procs["a"]["timeout"] is None, procs["a"]
+assert procs["b"]["timeout"] == 3600 and isinstance(procs["b"]["timeout"], int), procs["b"]
+PY
+
 # ── AC5: DEFAULT_PROCESSES_YAML wires both digests, preserves existing edges ─
 python3 - "$SRC_BIN" <<'PY' && ok "AC5: DEFAULT_PROCESSES_YAML valid + both digests wired + edges preserved" \
                             || fail "AC5: DEFAULT_PROCESSES_YAML check failed"

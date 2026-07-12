@@ -14,7 +14,24 @@ upgrading.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Changed
+- **Daily and retro audio now use local Qwen TTS and Telegram MP3 files.**
+  `kb-morning-digest` keeps its existing morning synthesis and trusted evening
+  Retro source, converts only the finalized body to speech text, renders it
+  through the pinned on-demand Qwen3-TTS 1.7B runtime, and sends the MP3 through
+  Telegram `sendAudio`. NotebookLM is no longer called by these scheduled
+  paths. The model is not a daemon and leaves memory after each render. Run
+  `kb-tts-install` once to opt in; missing runtimes remain report/speech-only.
+- **Learning digest reads full arXiv papers by default.** `kb-learning-arxiv`
+  now fetches/caches selected arXiv PDFs, extracts text with `pdftotext`, and
+  sends the extracted paper text to Codex through a prompt file. The manifest
+  contract moves to v4 with per-paper `analysis_source`, `analysis_chars`,
+  `analysis_truncated`, and `analysis_error` provenance; old abstract-only
+  caches no longer satisfy the current delivery contract.
+- **Grok/X/Reddit social checks are opt-in.** The scheduled learning digest no
+  longer calls Grok by default or renders empty X/Reddit boilerplate when no
+  social subscription is available. Set `social_check: grok` in
+  `personal/daily-research.yaml` to re-enable the social lane explicitly.
 
 ## [0.6.0] — 2026-07-11
 

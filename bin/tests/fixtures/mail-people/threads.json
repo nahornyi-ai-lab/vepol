@@ -1,0 +1,45 @@
+[
+  {
+    "thread_ref": "t-1", "message_ref": "m-1",
+    "date": "2026-07-05", "time": "04:11",
+    "sender_label": "Jane Doe", "sender_email": "Jane@Example.com",
+    "recipients": ["owner@example.com"],
+    "subject": "Intro from the conference",
+    "body": "Raw body SECRET-TOKEN-ALPHA should never persist",
+    "classification": "needs_reply", "urgency": "normal", "action_needed": true,
+    "summary": "Jane follows up after the conference.",
+    "proposed_actions": [{"type": "reply_draft", "summary": "Draft a warm reply."}],
+    "privacy_flags": [], "confidence": "high"
+  },
+  {
+    "thread_ref": "t-2", "message_ref": "m-2",
+    "date": "2026-07-05", "time": "05:50",
+    "sender_label": "Jane Doe", "sender_email": "jane@example.com",
+    "recipients": ["owner@example.com"],
+    "subject": "One more thing",
+    "body": "Second raw body SECRET-TOKEN-BETA",
+    "classification": "fyi", "urgency": "low", "action_needed": false,
+    "summary": "Jane adds a detail.",
+    "proposed_actions": [], "privacy_flags": [], "confidence": "medium"
+  },
+  {
+    "thread_ref": "t-3", "message_ref": "m-3",
+    "date": "2026-07-05", "time": "05:12",
+    "sender_label": "Weekly News", "sender_email": "noreply@newsletter.example",
+    "recipients": ["owner@example.com"],
+    "subject": "Your weekly digest",
+    "body": "Newsletter raw body",
+    "classification": "newsletter", "urgency": "low", "action_needed": false,
+    "summary": "Weekly newsletter.",
+    "proposed_actions": [], "privacy_flags": ["automated"], "confidence": "high"
+  },
+  {
+    "thread_ref": "t-4", "message_ref": "m-4",
+    "date": "2026-07-05", "time": "05:30",
+    "sender_label": "Ops Alerts <bot@int>", "subject": "disk usage",
+    "body": "no sender_email on this one",
+    "classification": "ops_alert", "urgency": "normal", "action_needed": false,
+    "summary": "Disk usage alert.",
+    "proposed_actions": [], "privacy_flags": ["automated"], "confidence": "high"
+  }
+]

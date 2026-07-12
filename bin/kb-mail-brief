@@ -37,6 +37,8 @@ from _kb_mail import (  # noqa: E402
     MailDisabled, MailUnavailable, MailWriteError,
     minimize_thread, build_envelope, write_envelope, brief_path,
     validate_envelope,
+    collect_senders, build_people_envelope, validate_people_envelope,
+    people_path,
 )
 from _kb_mail.adapter import get_adapter  # noqa: E402
 from _kb_mail.envelope import mail_dir  # noqa: E402
@@ -180,6 +182,7 @@ def main() -> int:
     advanced_watermark = None
     reason = None
     items = []
+    raw = []
     n_raw = 0
     try:
         raw = [t for t in adapter.fetch(args.period, window) if isinstance(t, dict)]
@@ -212,8 +215,18 @@ def main() -> int:
                    "threads_included": 0, "threads_deferred": 0},
         )
 
+    # People Notebook D2 amendment: the SAME run additionally emits the
+    # senders-identity envelope (mail-people/v1) — bounded sender identity only,
+    # collected from the raw threads BEFORE minimization (minimize_thread drops
+    # sender addresses so they can never reach the brief envelope).
+    people_env = build_people_envelope(
+        period=args.period, day=day, generated_at=generated_at,
+        senders=collect_senders(raw, fallback_ts=generated_at),
+        available=(reason is None),
+    )
+
     if args.write:
-        if not validate_envelope(env):
+        if not validate_envelope(env) or not validate_people_envelope(people_env):
             # Our own build produced an envelope that fails the trust boundary —
             # a schema regression. Fail closed before touching disk.
             print("kb-mail-brief: internal schema error, refusing to write",
@@ -221,6 +234,7 @@ def main() -> int:
             return 1
         try:
             write_envelope(env, brief_path(args.period, day, hub))
+            write_envelope(people_env, people_path(args.period, day, hub))
             if advanced_watermark:
                 _write_watermark(hub, args.period, advanced_watermark)
         except MailWriteError as e:

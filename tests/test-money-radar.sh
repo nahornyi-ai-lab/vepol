@@ -82,7 +82,7 @@ run_radar() { # hub_root extra_args...   (shims all 4 default agents)
   KB_HUB="$d/hub" MONEY_RADAR_PROJECT="$d/proj" \
     KB_PROCESS_OUTPUTS="${OUTPUTS:-telegram,file}" \
     KB_PROCESS_BACKGROUND="${BG:-1}" \
-    MONEY_RADAR_CODEX_BIN="$d/hub/bin/codex-fake" \
+    KB_CODEX_BIN="$d/hub/bin/codex-fake" \
     MONEY_RADAR_CLAUDE_BIN="$d/hub/bin/claude-fake" \
     MONEY_RADAR_GROK_BIN="$d/hub/bin/grok-fake" \
     MONEY_RADAR_ANTIGRAVITY_BIN="$d/hub/bin/agy-fake" \

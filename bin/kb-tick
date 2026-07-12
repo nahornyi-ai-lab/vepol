@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Runs every 15 minutes via launchd. Fires every background process declared
-in personal/processes.yaml (five fields: id, enabled, when, run, outputs) when
-its trigger arrives, and marks per-day fired state in today-plan.json so each
-process runs once per day. Self-heals: if the plan is missing or stale (not
-for today), regenerates it by invoking kb-planner; if processes.yaml is
+in personal/processes.yaml (five required fields: id, enabled, when, run,
+outputs, plus an optional per-process `timeout`) when its trigger arrives, and
+marks per-day fired state in today-plan.json so each process runs once per day.
+Each process's subprocess is capped by its declared `timeout` when set, else by
+the uniform PROCESS_TIMEOUT default. Self-heals: if the plan is missing or stale
+(not for today), regenerates it by invoking kb-planner; if processes.yaml is
 missing, writes safe release defaults; if it is invalid, fails closed and
 runs nothing.
 
-Contract: processes release 2026-06-09 (five-field processes.yaml).
+Contract: processes release 2026-06-09 (five required fields) + optional
+per-process `timeout` (D12, morning-digest-inputs-rebalance-spec-2026-07-11).
 Background runs never call NotebookLM (audio is on-demand/manual only).
 """
 from __future__ import annotations
@@ -38,6 +41,9 @@ LEGACY_FIRED_KEYS = {
     "learning": "daily_research_fired",
 }
 
+# Uniform per-process subprocess cap; a process may override it with its own
+# `timeout` field in processes.yaml (D12). Kept as the default for any process
+# that does not declare one.
 PROCESS_TIMEOUT = 1800
 
 
@@ -168,13 +174,16 @@ def run_process(proc: dict, plan: dict) -> None:
     # (Incident-2026-05-05). launchd's StartInterval=900 re-fires only
     # after the previous instance exits, so blocking shifts the next tick
     # rather than stacking instances.
-    log(f"firing {pid}: {' '.join(cmd)}")
+    # Per-process cap when declared (validated positive-bounded int by
+    # _kb_processes), else the uniform default.
+    timeout = proc.get("timeout") or PROCESS_TIMEOUT
+    log(f"firing {pid}: {' '.join(cmd)} (timeout={timeout}s)")
     try:
         proc_run = subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=PROCESS_TIMEOUT,
+            timeout=timeout,
             env=env,
             check=False,
         )

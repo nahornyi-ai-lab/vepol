@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for kb-learning-arxiv (scheduled learning v2: arXiv-only 3-paper
-# digest + Grok social check + Russian Telegram digest).
+# digest + optional Grok social check + user-language Telegram digest).
 #
 # Spec: learning-arxiv-implementation-spec-2026-06-12 (KB decisions;
 # cross-reviewed round 2: codex approve-with-nits, agy approve-with-nits).
@@ -124,6 +124,37 @@ atom_entry "2606.30003" "Reasoning Evaluation Benchmark: $(printf 'Elaborate Hea
 FIXTURELONG=$TMP/arxiv-long.xml
 write_atom "$FIXTURELONG" "$E/L1.xml" "$E/L2.xml" "$E/L3.xml"
 
+FULLTEXT_DIR=$TMP/fulltext
+mkdir -p "$FULLTEXT_DIR"
+cat > "$FULLTEXT_DIR/2606.10001.txt" <<'EOF'
+FULLTEXT_METHOD_MARKER_10001
+This is the full paper body for 2606.10001, not just the abstract. It includes
+an introduction, method section, ablation table narrative, limitations, and a
+conclusion. The method section explains that the AgentBench benchmark is used
+with multiple tool-use configurations and that the analysis compares planning
+failures before and after MCP-style function calling.
+EOF
+cat > "$FULLTEXT_DIR/2606.10002.txt" <<'EOF'
+FULLTEXT_METHOD_MARKER_10002
+This is the full paper body for 2606.10002. It contains details about the
+hierarchical memory index, retrieval corpus construction, evaluation protocol,
+deployment constraints, and error analysis that are not present in the short
+abstract alone.
+EOF
+cat > "$FULLTEXT_DIR/2606.10003.txt" <<'EOF'
+FULLTEXT_METHOD_MARKER_10003
+This is the full paper body for 2606.10003. It includes the quantization setup,
+on-device hardware assumptions, benchmark split, chain-of-thought scoring
+rubric, a detailed comparison between 4-bit and 8-bit runs, latency notes,
+error categories for failed reasoning traces, and a limitations section.
+EOF
+cat > "$FULLTEXT_DIR/2606.10005.txt" <<'EOF'
+FULLTEXT_METHOD_MARKER_10005
+This is the full paper body for 2606.10005. It includes the multi-agent safety
+alignment setup, adversarial coordination scenarios, safety evaluation protocol,
+robustness metrics, ablation notes, and limitations beyond the short abstract.
+EOF
+
 # --------------------------------------------------------------------------
 # Hub factory + shims
 # --------------------------------------------------------------------------
@@ -170,6 +201,20 @@ EOF
   chmod +x "$d/bin/grok-fake"
 }
 
+enable_grok() { # hub
+  local d="$1"
+  cat > "$d/personal/daily-research.yaml" <<'EOF'
+social_check: grok
+EOF
+}
+
+set_social_check() { # hub value
+  local d="$1" val="$2"
+  cat > "$d/personal/daily-research.yaml" <<EOF
+social_check: $val
+EOF
+}
+
 # Fake Codex translation bin: mimics `codex exec ... --output-last-message <f>`.
 # Writes the JSON body to the -o/--output-last-message target (the path the
 # runner reads) AND echoes to stdout (the fallback path). Tracks call count.
@@ -179,6 +224,7 @@ write_codex() { # hub json-body rc   (translation-only fixture: *_loc fields)
 #!/usr/bin/env bash
 N=\$(cat "$d/codex-calls" 2>/dev/null || echo 0)
 echo \$((N+1)) > "$d/codex-calls"
+printf '%s\n' "\$@" > "$d/codex-argv.txt"
 OUT=""; prev=""
 for a in "\$@"; do
   if [[ "\$prev" == "--output-last-message" || "\$prev" == "-o" ]]; then OUT="\$a"; fi
@@ -237,7 +283,8 @@ run_runner() { # hub fixture extra-env...
   KB_LEARNING_ARXIV_DISABLE_NETWORK=1 \
   KB_LEARNING_ARXIV_FIXTURE="$fixture" \
   KB_LEARNING_ARXIV_GROK_BIN="$d/bin/grok-fake" \
-  KB_LEARNING_ARXIV_TRANSLATE_BIN="$d/bin/codex-fake" \
+  KB_CODEX_BIN="$d/bin/codex-fake" \
+  KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR="$FULLTEXT_DIR" \
   KB_PROCESS_OUTPUTS="telegram,file" \
   KB_PROCESS_BACKGROUND=1 \
   env "$@" "$PY" "$RUNNER" --text-only --date "$TODAY"
@@ -277,19 +324,45 @@ case "$SEL_IDS" in
   *) ok "S1: near-duplicate pair not both selected" ;;
 esac
 # per-paper required fields
-FIELDS_OK=$(mget "$HUB" "all(p.get('title') and p.get('authors') and p.get('link','').startswith('https://arxiv.org/abs/') and p.get('abstract') and p.get('abstract_loc') and p.get('method_loc') and p.get('abstract_source')=='codex' and p.get('summary_loc') and p.get('reason') and isinstance(p.get('scores',{}).get('final'),int) for p in m['selected_papers'])")
-[[ "$FIELDS_OK" == "True" ]] && ok "S1: every paper has title/authors/link/abstract/abstract_loc/method_loc/summary/reason/scores" \
+FIELDS_OK=$(mget "$HUB" "all(p.get('title') and p.get('authors') and p.get('link','').startswith('https://arxiv.org/abs/') and p.get('abstract') and p.get('abstract_loc') and p.get('method_loc') and p.get('abstract_source')=='codex' and p.get('summary_loc') and p.get('reason') and p.get('analysis_source')=='full_text' and p.get('analysis_chars',0) > len(p.get('abstract','')) and p.get('analysis_truncated') is False and isinstance(p.get('scores',{}).get('final'),int) for p in m['selected_papers'])")
+[[ "$FIELDS_OK" == "True" ]] && ok "S1: every paper has title/authors/link/abstract/full-text provenance/abstract_loc/method_loc/summary/reason/scores" \
   || fail "S1: missing per-paper fields"
+grep -q "FULLTEXT_METHOD_MARKER_10001" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
+  && ok "S1: Codex prompt file includes full-text fixture marker" || fail "S1: Codex prompt lacks full-text marker"
+grep -q "analysis_source: full_text" "$HUB/sources/arxiv-learning-translation-codex-$TODAY.md" \
+  && ok "S1: translation source records analysis_source" || fail "S1: translation source missing analysis_source"
+grep -q "learning-arxiv-codex-prompt-$TODAY.md" "$HUB/codex-argv.txt" \
+  && ok "S1: Codex argv points at prompt file" || fail "S1: Codex argv does not point at prompt file"
+ARGV_BYTES=$(wc -c < "$HUB/codex-argv.txt" | tr -d ' ')
+[[ "$ARGV_BYTES" -lt 2000 ]] && ok "S1: Codex argv is short ($ARGV_BYTES bytes)" || fail "S1: Codex argv too large ($ARGV_BYTES bytes)"
 AS=$(mget "$HUB" "m['selected_papers'][0]['scores'].get('author_signal')")
 [[ "$AS" == "0" ]] && ok "S1: author_signal pinned to 0 (v1, no hallucinated affiliations)" \
   || fail "S1: author_signal=$AS (expected 0)"
 [[ -s "$HUB/reports/learning-arxiv-summary-$TODAY.md" ]] && ok "S1: report written" || fail "S1: report missing"
 [[ -s "$HUB/sources/arxiv-learning-snapshot-$TODAY.md" ]] && ok "S1: snapshot source written" || fail "S1: snapshot missing"
-[[ -s "$HUB/sources/arxiv-learning-social-grok-$TODAY.md" ]] && ok "S1: grok social source written" || fail "S1: social source missing"
+[[ ! -e "$HUB/sources/arxiv-learning-social-grok-$TODAY.md" ]] && ok "S1: default-off writes no grok social source" || fail "S1: social source should not exist by default"
 [[ -s "$HUB/sources/arxiv-learning-translation-codex-$TODAY.md" ]] && ok "S1: codex translation source written" || fail "S1: translation source missing"
 [[ "$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)" == "1" ]] && ok "S1: exactly one Codex call" || fail "S1: codex calls=$(cat "$HUB/codex-calls" 2>/dev/null)"
-[[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "1" ]] && ok "S1: exactly one Grok call" || fail "S1: grok calls=$(cat "$HUB/grok-calls" 2>/dev/null)"
-[[ "$(mget "$HUB" "m.get('manifest_version')")" == "3" ]] && ok "S1: manifest_version=3 stamped" || fail "S1: manifest_version"
+[[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "S1: default-off makes zero Grok calls" || fail "S1: grok calls=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)"
+[[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "S1: manifest social_check=skipped" || fail "S1: social_check=$(mget "$HUB" "m.get('social_check')")"
+[[ "$(mget "$HUB" "m.get('grok_rc')")" == "None" ]] && ok "S1: grok_rc=null when skipped" || fail "S1: grok_rc=$(mget "$HUB" "m.get('grok_rc')")"
+[[ "$(mget "$HUB" "m.get('manifest_version')")" == "4" ]] && ok "S1: manifest_version=4 stamped" || fail "S1: manifest_version"
+
+echo "=== S1b: missing full-text fixture + disabled network → abstract_fallback ==="
+HUB=$(new_hub fulltext-fallback)
+EMPTY_FULLTEXT="$TMP/empty-fulltext"; mkdir -p "$EMPTY_FULLTEXT"
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_FULL" 0
+run_runner "$HUB" "$FIXTURE5" KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR="$EMPTY_FULLTEXT" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S1b: rc=0 with missing full text" || fail "S1b: rc=$RC"
+FB=$(mget "$HUB" "all(p.get('analysis_source')=='abstract_fallback' and p.get('analysis_error') for p in m['selected_papers'])")
+[[ "$FB" == "True" ]] && ok "S1b: all papers fall back to abstract with error provenance" || fail "S1b: fallback provenance missing"
+if grep -q "FULLTEXT_METHOD_MARKER" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md"; then
+  fail "S1b: full-text marker leaked into fallback prompt"
+else
+  ok "S1b: fallback prompt has no full-text marker"
+fi
 
 echo "=== S2: digest content (arXiv links only, Russian, statuses split) ==="
 DIGEST=$(cat "$HUB/last-digest.txt" 2>/dev/null || echo "")
@@ -320,11 +393,10 @@ grep -q "Просмотрел .* свежих статей" <<<"$DIGEST" && ok "
 grep -q "по темам подошло" <<<"$DIGEST" && ok "S2: digest states relevant count" || fail "S2: no relevant count"
 REASONS=$(grep -c "Почему выбрана:" <<<"$DIGEST" || true)
 [[ "$REASONS" == "3" ]] && ok "S2: per-paper selection reason present (3)" || fail "S2: reasons=$REASONS"
-grep -q "X: есть" <<<"$DIGEST" && ok "S2: statuses rendered in Russian (X: есть)" || fail "S2: English status leaked"
-if grep -qE "(X|Reddit): (found|weak|not_found|degraded)" <<<"$DIGEST"; then
-  fail "S2: raw status token leaked into digest"
+if grep -qE "(^|[[:space:]])(X|Reddit):" <<<"$DIGEST"; then
+  fail "S2: social status line leaked into default-off digest"
 else
-  ok "S2: no raw status tokens in digest"
+  ok "S2: no X/Reddit status lines in default-off digest"
 fi
 grep -q "Агентное планирование" <<<"$DIGEST" && ok "S2: Russian title from codex rendered" || fail "S2: title_loc not used"
 grep -q "Готовый паттерн планирования" <<<"$DIGEST" && ok "S2: per-paper why_loc from codex rendered" || fail "S2: why_loc not used"
@@ -333,23 +405,31 @@ METHODS=$(grep -c "Как исследовали:" <<<"$DIGEST" || true)
 [[ "$METHODS" == "3" ]] && ok "S2: digest has per-paper method/setup line (3)" || fail "S2: method lines=$METHODS"
 grep -q "Предложенный фреймворк проверяли на AgentBench" <<<"$DIGEST" \
   && ok "S2: digest renders concrete method/setup from Codex" || fail "S2: method_loc not rendered"
-grep -qE "X: " <<<"$DIGEST" && grep -qE "Reddit: " <<<"$DIGEST" \
-  && ok "S2: X and Reddit statuses rendered separately" || fail "S2: X/Reddit not split"
 grep -q "abstract_loc" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
   && grep -q "method_loc" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
   && grep -qi "dataset\\|benchmark\\|experiment\\|setup" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
   && grep -qi "expand.*acronym\\|acronym.*expand" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
   && ok "S2: codex prompt asks for abstract_loc/method_loc and term expansion" || fail "S2: codex prompt missing abstract/method/term contract"
-# And the social prompt must NOT carry translation fields (clean split).
-if grep -q "abstract_loc\|studied_loc\|method_loc\|why_loc" "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md"; then
-  fail "S2: grok prompt still asks for translation fields (split incomplete)"
+# And the social prompt must not be created by default.
+if [[ -e "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md" ]]; then
+  fail "S2: grok prompt created despite social_check off"
 else
-  ok "S2: grok prompt is social-only (no *_loc fields)"
+  ok "S2: no grok prompt by default"
 fi
 grep -q "Аннотация (перевод)" "$HUB/reports/learning-arxiv-summary-$TODAY.md" \
   && ok "S2: report has translated abstract heading" || fail "S2: translated abstract heading missing"
 grep -q "Как исследовали" "$HUB/reports/learning-arxiv-summary-$TODAY.md" \
   && ok "S2: report has method/setup heading" || fail "S2: report method heading missing"
+if grep -q "Проверка X/Reddit\|\\*\\*X:\\*\\*\\|\\*\\*Reddit:\\*\\*\\|Прежнее обсуждение\\|Подтверждения" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
+  fail "S2: default-off report still contains social boilerplate"
+else
+  ok "S2: default-off report omits social boilerplate"
+fi
+if grep -q "arxiv-learning-social-grok" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
+  fail "S2: default-off report links social source"
+else
+  ok "S2: default-off report sources omit social source"
+fi
 grep -q "method_loc: Предложенный фреймворк" "$HUB/sources/arxiv-learning-translation-codex-$TODAY.md" \
   && ok "S2: translation source persists method_loc" || fail "S2: translation source missing method_loc"
 if grep -q "Аннотация (EN)" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
@@ -362,6 +442,11 @@ CALLS=$(wc -l < "$HUB/channel-calls.log" 2>/dev/null | tr -d ' ')
 [[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "S2: digest_delivered=true" || fail "S2: digest_delivered"
 
 echo "=== S3: grok fixture merged per paper ==="
+HUB=$(new_hub grok-optin)
+enable_grok "$HUB"
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_FULL" 0
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 X1=$(mget "$HUB" "[p['social']['x_status'] for p in m['selected_papers'] if p['id']=='2606.10001'][0]")
 R2=$(mget "$HUB" "[p['social']['reddit_status'] for p in m['selected_papers'] if p['id']=='2606.10002'][0]")
 [[ "$X1" == "found" ]] && ok "S3: paper1 x_status=found merged" || fail "S3: paper1 x_status=$X1"
@@ -369,9 +454,25 @@ R2=$(mget "$HUB" "[p['social']['reddit_status'] for p in m['selected_papers'] if
 [[ "$(mget "$HUB" "m['social_check']")" == "ok" ]] && ok "S3: social_check=ok" || fail "S3: social_check"
 grep -q "не найдено\|not_found" "$HUB/reports/learning-arxiv-summary-$TODAY.md" \
   && ok "S3: report carries social statuses" || fail "S3: report missing social statuses"
+grep -q "abstract_loc\\|studied_loc\\|method_loc\\|why_loc" "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md" \
+  && fail "S3: grok prompt asks for translation fields (split incomplete)" || ok "S3: opt-in grok prompt is social-only"
+
+echo "=== S3b: unknown social_check value disables social with warning ==="
+HUB=$(new_hub social-typo)
+set_social_check "$HUB" "banana"
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_FULL" 0
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S3b: rc=0 with unknown social_check" || fail "S3b: rc=$RC"
+[[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "S3b: unknown social_check makes zero Grok calls" || fail "S3b: unexpected grok call"
+[[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "S3b: unknown social_check records skipped" || fail "S3b: social_check=$(mget "$HUB" "m.get('social_check')")"
+grep -q "unknown social_check" "$HUB/logs/learning-arxiv.log" \
+  && ok "S3b: warning logged for unknown social_check" || fail "S3b: missing warning"
 
 echo "=== S4: empty grok → social degraded (not not_found); Codex translation SURVIVES (AC1) ==="
 HUB=$(new_hub grok-empty)
+enable_grok "$HUB"
 write_grok "$HUB" "" 0
 write_codex "$HUB" "$CODEX_FULL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -399,6 +500,7 @@ fi
 
 echo "=== S5: grok rc!=0 → social degraded with provenance; Codex translation survives ==="
 HUB=$(new_hub grok-rc)
+enable_grok "$HUB"
 write_grok "$HUB" "" 3
 write_codex "$HUB" "$CODEX_FULL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -417,6 +519,7 @@ GROK_PARTIAL='{"papers":[
  {"id":"2606.10002","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"ok"}
 ]}'
 HUB=$(new_hub grok-partial)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_PARTIAL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -452,7 +555,7 @@ CALLS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
 [[ "$RC" == "0" && "$CALLS" == "1" ]] && ok "S8: rerun rc=0, no duplicate send" || fail "S8: rc=$RC calls=$CALLS"
 KB_HUB="$HUB" KB_LEARNING_ARXIV_DISABLE_NETWORK=1 KB_LEARNING_ARXIV_FIXTURE="$FIXTURE5" \
   KB_LEARNING_ARXIV_GROK_BIN="$HUB/bin/grok-fake" \
-  KB_LEARNING_ARXIV_TRANSLATE_BIN="$HUB/bin/codex-fake" KB_PROCESS_OUTPUTS="telegram,file" \
+  KB_CODEX_BIN="$HUB/bin/codex-fake" KB_PROCESS_OUTPUTS="telegram,file" \
   "$PY" "$RUNNER" --text-only --date "$TODAY" --force >/dev/null 2>&1
 CALLS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
 [[ "$CALLS" == "2" ]] && ok "S8: --force resends" || fail "S8: force calls=$CALLS"
@@ -479,6 +582,28 @@ GROK_CALLS_AFTER=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
 [[ "$GROK_CALLS_AFTER" == "$GROK_CALLS_BEFORE" ]] && ok "S9: grok not re-invoked on recovery" || fail "S9: grok re-invoked (${GROK_CALLS_BEFORE} -> ${GROK_CALLS_AFTER})"
 SENDS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
 [[ "$SENDS" == "2" ]] && ok "S9: exactly one successful delivery after recovery (2 attempts total)" || fail "S9: sends=$SENDS"
+
+echo "=== S9b: skipped-cache is invalid after social_check flips to grok ==="
+HUB=$(new_hub toggle-social)
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_FULL" 0
+echo 3 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" != "0" ]] && ok "S9b: first default-off delivery fails and leaves cache" || fail "S9b: first rc=$RC"
+[[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "S9b: first manifest social_check=skipped" || fail "S9b: first social_check"
+GROK_BEFORE=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
+CODEX_BEFORE=$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)
+enable_grok "$HUB"
+echo 0 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "S9b: retry after enabling grok succeeds" || fail "S9b: retry rc=$RC"
+GROK_AFTER=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
+CODEX_AFTER=$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)
+[[ "$GROK_AFTER" -gt "$GROK_BEFORE" ]] && ok "S9b: enabling grok invalidates skipped-cache and invokes Grok" || fail "S9b: grok not invoked (${GROK_BEFORE}->${GROK_AFTER})"
+[[ "$CODEX_AFTER" -gt "$CODEX_BEFORE" ]] && ok "S9b: skipped-cache bypass re-runs translation stage" || fail "S9b: codex not re-run (${CODEX_BEFORE}->${CODEX_AFTER})"
+[[ "$(mget "$HUB" "m.get('social_check')")" == "ok" ]] && ok "S9b: final manifest social_check=ok" || fail "S9b: final social_check"
 
 echo "=== S10: fewer than three relevant papers ==="
 HUB=$(new_hub fewer)
@@ -576,6 +701,7 @@ CODEX_EN='{"papers":[
  {"id":"2606.10003","studied_loc":"CoT under quantization.","found_loc":"9 points better."}
 ]}'
 HUB=$(new_hub codex-en)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_EN" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -629,7 +755,16 @@ DIGEST_EN=$(cat "$HUB/last-digest.txt" 2>/dev/null || echo "")
 grep -q "Scanned .* fresh arXiv papers" <<<"$DIGEST_EN" && ok "S19: English stats line" || fail "S19: stats line"
 grep -q "Why selected:" <<<"$DIGEST_EN" && ok "S19: English reason label" || fail "S19: reason label"
 grep -q "Abstract:" <<<"$DIGEST_EN" && ok "S19: English abstract label" || fail "S19: abstract label"
-grep -q "X: found" <<<"$DIGEST_EN" && ok "S19: English status words" || fail "S19: statuses"
+if grep -qE "(^|[[:space:]])(X|Reddit):" <<<"$DIGEST_EN"; then
+  fail "S19: social status line leaked into default-off en digest"
+else
+  ok "S19: no X/Reddit status lines in default-off en digest"
+fi
+if grep -q "X/Reddit check\|Prior discussion\|Evidence" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
+  fail "S19: social boilerplate leaked into default-off en report"
+else
+  ok "S19: en report omits social boilerplate by default"
+fi
 if grep -q "[А-Яа-я]" <<<"$DIGEST_EN"; then
   fail "S19: Cyrillic leaked into en digest"
 else
@@ -656,6 +791,7 @@ grep -q "ISO 639 code 'sr'" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TOD
 
 echo "=== S21: stage cache is language-gated ==="
 HUB=$(new_hub lang-gate)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
 echo 3 > "$HUB/channel-rc"
@@ -679,6 +815,7 @@ else
 fi
 # same-language cache still works (ru → ru, fixture removed)
 HUB=$(new_hub lang-gate-ru)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
 echo 3 > "$HUB/channel-rc"
@@ -690,6 +827,7 @@ RC=$?
 
 echo "=== S22: language switch + failed re-fetch must not resurrect old-language cache ==="
 HUB=$(new_hub lang-switch-fail)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
 echo 3 > "$HUB/channel-rc"
@@ -733,16 +871,17 @@ run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1   # no --force
 RC=$?
 [[ "$RC" == "0" ]] && ok "T11: rc=0" || fail "T11: rc=$RC"
 [[ "$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)" -ge 1 ]] && ok "T11: Codex invoked (stale v1 cache bypassed)" || fail "T11: Codex skipped — stale cache reused"
-[[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" -ge 1 ]] && ok "T11: Grok invoked (stale v1 cache bypassed)" || fail "T11: Grok skipped"
-[[ "$(mget "$HUB" "m.get('manifest_version')")" == "3" ]] && ok "T11: manifest rewritten to v3" || fail "T11: manifest_version not 3"
+[[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "T11: default-off skips Grok while bypassing stale v1 cache" || fail "T11: unexpected grok call"
+[[ "$(mget "$HUB" "m.get('manifest_version')")" == "4" ]] && ok "T11: manifest rewritten to v4" || fail "T11: manifest_version not 4"
 [[ -n "$(mget "$HUB" "m.get('translate_check')")" ]] && ok "T11: translate_check present after migration" || fail "T11: translate_check missing"
+[[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "T11: migrated default-off manifest social_check=skipped" || fail "T11: social_check"
 ABS_C=$(mget "$HUB" "all(p.get('abstract_source')=='codex' for p in m['selected_papers'])")
 [[ "$ABS_C" == "True" ]] && ok "T11: translation now Codex-sourced (not stale grok)" || fail "T11: stale grok translation served"
 METH_C=$(mget "$HUB" "all(p.get('method_loc') for p in m['selected_papers'])")
 [[ "$METH_C" == "True" ]] && ok "T11: method_loc present after migration" || fail "T11: method_loc missing after migration"
 
 # seed a same-day v2 manifest (split Codex/Grok shape) that is otherwise
-# cache-eligible but lacks the new method_loc field/manifest_version 3.
+# cache-eligible but lacks the new method_loc/full-text fields/manifest_version 4.
 HUB3=$(new_hub mig-v2-no-method)
 write_grok "$HUB3" "$GROK_FULL" 0
 write_codex "$HUB3" "$CODEX_FULL" 0
@@ -765,7 +904,9 @@ run_runner "$HUB3" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "T11b: v2 no-method rc=0" || fail "T11b: rc=$RC"
 [[ "$(cat "$HUB3/codex-calls" 2>/dev/null || echo 0)" -ge 1 ]] && ok "T11b: stale v2 cache bypassed (Codex invoked)" || fail "T11b: stale v2 cache reused"
-[[ "$(mget "$HUB3" "m.get('manifest_version')")" == "3" ]] && ok "T11b: v2 rewritten to v3" || fail "T11b: manifest_version"
+[[ "$(mget "$HUB3" "m.get('manifest_version')")" == "4" ]] && ok "T11b: v2 rewritten to v4" || fail "T11b: manifest_version"
+[[ "$(cat "$HUB3/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "T11b: default-off skips Grok after v2 migration" || fail "T11b: unexpected grok call"
+[[ "$(mget "$HUB3" "m.get('social_check')")" == "skipped" ]] && ok "T11b: social_check=skipped after v2 migration" || fail "T11b: social_check"
 METH3=$(mget "$HUB3" "all(p.get('method_loc') for p in m['selected_papers'])")
 [[ "$METH3" == "True" ]] && ok "T11b: method_loc present after v2 migration" || fail "T11b: method_loc missing"
 # delivered v1 manifest must stay untouched (idempotent; needs --force to regenerate)
@@ -782,7 +923,7 @@ run_runner "$HUB2" "$FIXTURE5" >/dev/null 2>&1
 [[ "$(cat "$HUB2/codex-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "T11: delivered v1 manifest left untouched (no Codex call, needs --force)" || fail "T11: delivered manifest re-ran without --force"
 
 echo "=== T12: timeout defaults (Grok 600 / Codex 300) reach subprocess.run + env override (AC6) ==="
-T12=$(KB_HUB="$TMP/t12-hub" $PY <<PYEOF
+T12=$(KB_HUB="$TMP/t12-hub" KB_CODEX_BIN="/usr/bin/true" $PY <<PYEOF
 import os, sys, importlib.util, shutil
 os.makedirs('$TMP/t12-hub/bin', exist_ok=True)
 if os.path.exists('$SRC_BIN/_kb_profile.py'):
@@ -817,6 +958,7 @@ read GD CD GDEF CDEF GOVR COVR <<<"$T12"
 echo "=== T13: Codex failure honesty (AC8, engine-neutral) + partial Codex output ==="
 # 13a: Codex fails, Grok ok → unavailable note must NOT name Grok; social intact
 HUB=$(new_hub codex-fail)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "" 5
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -842,6 +984,7 @@ CODEX_PARTIAL='{"papers":[
  {"id":"2606.10003","title_loc":"bad","abstract_loc":"English passthrough, no translation here.","studied_loc":"English only.","method_loc":"English method too.","found_loc":"English only too."}
 ]}'
 HUB=$(new_hub codex-partial)
+enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_PARTIAL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
@@ -854,6 +997,7 @@ B=$(mget "$HUB" "[p.get('summary_source') for p in m['selected_papers'] if p['id
 
 echo "=== T14: BOTH fail (Codex rc!=0 AND Grok rc!=0) → all degraded, honest, digest still sent ==="
 HUB=$(new_hub both-fail)
+enable_grok "$HUB"
 write_grok "$HUB" "" 3
 write_codex "$HUB" "" 5
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1

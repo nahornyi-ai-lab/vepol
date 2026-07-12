@@ -27,6 +27,8 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 
+from _kb_codex import CodexUnavailable, codex_bin
+
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 TODAY = dt.date.fromisoformat(os.environ.get("KB_DOCTOR_TODAY", dt.date.today().isoformat()))
@@ -2678,40 +2680,87 @@ def _ih_check_binaries(home: pathlib.Path, env_path: str | None = None) -> list[
     return findings
 
 
+def _ih_codex_launcher_drift(canonical: pathlib.Path) -> list[Finding]:
+    findings: list[Finding] = []
+    default_alternatives = (
+        pathlib.Path("/opt/homebrew/bin/codex"),
+        pathlib.Path("/usr/local/bin/codex"),
+        pathlib.Path("/Applications/Codex.app/Contents/Resources/codex"),
+        pathlib.Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+    )
+    injected = os.environ.get("KB_DOCTOR_CODEX_ALT_PATHS", "").strip()
+    alternatives = (tuple(pathlib.Path(p) for p in injected.split(os.pathsep) if p)
+                    if injected else default_alternatives)
+    for candidate in alternatives:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        resolved = candidate.resolve(strict=False)
+        if resolved == canonical:
+            continue
+        state = "broken symlink" if candidate.is_symlink() and not candidate.exists() else "competing executable"
+        findings.append(finding_with_key(
+            "install-health:codex-launcher-drift", "hub", str(candidate),
+            str(candidate), "P2",
+            f"non-canonical Codex launcher present ({state}); production will ignore it",
+            evidence=f"canonical={canonical} candidate_resolves_to={resolved}",
+        ))
+    return findings
+
+
 def _ih_check_codex_currency(env_path: str | None = None) -> list[Finding]:
     import subprocess as _sp
-    path_env = (
-        env_path
-        if env_path is not None
-        else os.environ.get("KB_DOCTOR_INSTALL_HEALTH_PATH",
-                              os.environ.get("PATH", ""))
-    )
-    codex_bin = shutil.which("codex", path=path_env)
-    if not codex_bin:
-        # Already reported by binary-missing.
-        return []
+    findings: list[Finding] = []
     try:
-        res = _sp.run([codex_bin, "--version"], capture_output=True, text=True, timeout=5)
-    except (_sp.SubprocessError, OSError):
-        return []
+        resolved_codex = codex_bin()
+    except CodexUnavailable as exc:
+        canonical = pathlib.Path.home() / ".local" / "bin" / "codex"
+        findings.append(finding(
+            "install-health:codex-missing", "hub",
+            str(canonical), "P1",
+            "canonical standalone Codex executable is missing or non-executable",
+            evidence=str(exc),
+        ))
+        findings.extend(_ih_codex_launcher_drift(canonical.resolve(strict=False)))
+        return findings
+    try:
+        res = _sp.run([resolved_codex, "--version"], capture_output=True, text=True, timeout=5)
+    except (_sp.SubprocessError, OSError) as exc:
+        findings.append(finding(
+            "install-health:codex-version-failed", "hub", resolved_codex, "P1",
+            "canonical Codex exists but --version could not run",
+            evidence=repr(exc),
+        ))
+        findings.extend(_ih_codex_launcher_drift(
+            pathlib.Path(resolved_codex).resolve(strict=False)))
+        return findings
     if res.returncode != 0:
-        return []
+        findings.append(finding(
+            "install-health:codex-version-failed", "hub", resolved_codex, "P1",
+            "canonical Codex --version returned non-zero",
+            evidence=f"returncode={res.returncode}",
+        ))
     output = (res.stdout or res.stderr or "").strip()
     match = re.search(r"(\d+\.\d+\.\d+)", output)
     if not match:
-        return []
-    version = match.group(1)
-    known_good_raw = os.environ.get("KB_DOCTOR_KNOWN_GOOD_CODEX_VERSIONS", "")
-    if not known_good_raw:
-        return []
-    patterns = [p.strip() for p in known_good_raw.split(",") if p.strip()]
-    if any(_ih_version_matches(version, pat) for pat in patterns):
-        return []
-    return [finding(
-        "install-health:codex-version-stale", "hub", codex_bin, "P2",
-        f"codex CLI version {version} outside known-good range {known_good_raw!r}",
-        evidence=f"version={version} known_good={known_good_raw}",
-    )]
+        findings.append(finding(
+            "install-health:codex-version-unparseable", "hub", resolved_codex, "P2",
+            "canonical Codex version output is unparseable",
+            evidence=output[:160],
+        ))
+    else:
+        version = match.group(1)
+        known_good_raw = os.environ.get("KB_DOCTOR_KNOWN_GOOD_CODEX_VERSIONS", "")
+        patterns = [p.strip() for p in known_good_raw.split(",") if p.strip()]
+        if patterns and not any(_ih_version_matches(version, pat) for pat in patterns):
+            findings.append(finding(
+                "install-health:codex-version-stale", "hub", resolved_codex, "P2",
+                f"codex CLI version {version} outside known-good range {known_good_raw!r}",
+                evidence=f"version={version} known_good={known_good_raw}",
+            ))
+
+    canonical = pathlib.Path(resolved_codex).resolve(strict=False)
+    findings.extend(_ih_codex_launcher_drift(canonical))
+    return findings
 
 
 def _ih_version_matches(version: str, pattern: str) -> bool:

@@ -105,6 +105,46 @@ def geo() -> tuple[float, float, str]:
     return FALLBACK_LAT, FALLBACK_LON, FALLBACK_TZ
 
 
+def _day_frontmatter(text: str) -> dict[str, str]:
+    """Parse the day file's simple YAML frontmatter into a flat dict."""
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        return {}
+    fm: dict[str, str] = {}
+    for line in lines[1:]:
+        if line == "---":
+            break
+        if ": " in line:
+            key, _, value = line.partition(": ")
+            fm[key] = value.strip()
+    return fm
+
+
+def _delivery_evidence(today: str) -> tuple[bool, bool]:
+    """D11 (spec morning-digest-inputs-rebalance-2026-07-11, Phase D): fired
+    state is reconstructed from durable VERIFIED-DELIVERY evidence, never from
+    the clock and never from bare file existence.
+
+    brief_fired := briefs/<today>.md exists AND carries `delivery: telegram_ok`;
+    retro_fired := the day file contains a '## Retro (' heading AND carries
+    `retro_delivery: telegram_ok`. Evidence present → fired (a successful
+    earlier send is NEVER repeated); evidence absent or unverified → unfired
+    (the process gets its kb-tick retry).
+    """
+    day_file = HUB / "briefs" / f"{today}.md"
+    if not day_file.is_file():
+        return False, False
+    try:
+        text = day_file.read_text(encoding="utf-8")
+    except OSError:
+        return False, False
+    fm = _day_frontmatter(text)
+    brief_fired = fm.get("delivery") == "telegram_ok"
+    has_retro = text.startswith("## Retro (") or "\n## Retro (" in text
+    retro_fired = has_retro and fm.get("retro_delivery") == "telegram_ok"
+    return brief_fired, retro_fired
+
+
 def sun_times(lat: float, lon: float, tz: str, date: str) -> tuple[datetime.datetime, datetime.datetime]:
     url = (
         f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}"
@@ -127,13 +167,16 @@ def main() -> None:
     if brief > cap:
         brief = cap
     retro = sunset + datetime.timedelta(minutes=15)
-    now_hm = datetime.datetime.now().strftime("%H:%M")
+    # D11: on (late) regeneration, fired state comes from verified delivery
+    # evidence — never `now > planned time` (the clock heuristic silently
+    # swallowed the brief whenever the plan regenerated after brief time).
+    brief_fired, retro_fired = _delivery_evidence(today)
     plan = {
         "date": today,
         "brief_hm": brief.strftime("%H:%M"),
         "retro_hm": retro.strftime("%H:%M"),
-        "brief_fired": now_hm > brief.strftime("%H:%M"),
-        "retro_fired": now_hm > retro.strftime("%H:%M"),
+        "brief_fired": brief_fired,
+        "retro_fired": retro_fired,
         "sunrise": sunrise.strftime("%H:%M"),
         "sunset": sunset.strftime("%H:%M"),
         "lat": lat,

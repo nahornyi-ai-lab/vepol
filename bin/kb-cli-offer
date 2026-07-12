@@ -28,7 +28,7 @@ done
 # name | detect-candidates (colon-sep; abs path or bare name) | what-for | install hint | auto-install cmd (empty = manual only)
 TOOLS=(
   "claude|claude|writes/runs code, skills, MCP, runs the project|Download the desktop app: https://claude.ai/download|"
-  "codex|codex|analysis, planning, conservative second opinion, big research|npm install -g @openai/codex|npm install -g @openai/codex"
+  "codex|\$HOME/.local/bin/codex|analysis, planning, conservative second opinion, big research|Official standalone installer: https://chatgpt.com/codex/install.sh (installs to \$HOME/.local/bin)|curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/vepol-codex-install.sh && CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=\"\$HOME/.local/bin\" sh /tmp/vepol-codex-install.sh"
   "agy|\$HOME/.local/bin/agy:agy|independent second opinion, catches nuances others miss|Antigravity CLI installer (see https://antigravity.google )|"
   "grok|\$HOME/.grok/bin/grok:grok|what's discussed on X/Reddit right now; current, blunt|Grok CLI installer (see https://x.ai )|"
   "notebooklm|\$HOME/.local/bin/notebooklm:notebooklm|audio/video recaps for humans|pipx install notebooklm-py && notebooklm login|pipx install notebooklm-py"

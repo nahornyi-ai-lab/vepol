@@ -26,6 +26,14 @@ from .envelope import (
     read_same_day_envelope,
     brief_path,
 )
+from .people import (
+    PEOPLE_SCHEMA,
+    collect_senders,
+    build_people_envelope,
+    validate_people_envelope,
+    read_people_envelope,
+    people_path,
+)
 
 __all__ = [
     "MailError",
@@ -40,4 +48,10 @@ __all__ = [
     "write_envelope",
     "read_same_day_envelope",
     "brief_path",
+    "PEOPLE_SCHEMA",
+    "collect_senders",
+    "build_people_envelope",
+    "validate_people_envelope",
+    "read_people_envelope",
+    "people_path",
 ]

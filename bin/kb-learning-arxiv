@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """kb-learning-arxiv — scheduled learning: arXiv-only 3-paper digest in the
-user's language, with TWO independent LLM calls — Codex for translation/
-analysis and Grok for an X/Twitter + Reddit social-context check.
+user's language, with Codex for translation/analysis and optional Grok social
+context when explicitly enabled.
 
 Specs: learning-arxiv-implementation-spec-2026-06-12 +
 user-language-setting-2026-06-12 + split-translation-social-2026-06-17
 (KB decisions; all cross-reviewed).
 
 Flow: fetch arXiv Atom → deterministic regex ranking → select up to 3 papers
-→ (1) one Codex call (offline, --sandbox read-only) for user-language
-study/method/result summaries per paper, bounded by title+abstract; (2) one
-Grok call for X/Reddit social context only → short Telegram digest + file artifacts. The two calls
-are INDEPENDENT: a Codex failure degrades only the translation, a Grok failure
-degrades only the social lines (this decoupling is the 2026-06-17 fix — one
-combined Grok call used to time out and degrade everything). The digest/report
-language comes from personal/profile.yaml via _kb_profile.
+→ one Codex call (offline, --sandbox read-only) for user-language
+study/method/result summaries per paper, bounded by title+full paper text
+when the PDF can be extracted, with explicit abstract fallback → short
+Telegram digest + file artifacts. If `social_check: grok` is set explicitly,
+Grok adds X/Reddit social context as an independent optional stage; a Grok
+failure degrades only the social lines. The digest/report language comes from
+personal/profile.yaml via _kb_profile.
 
 Primary selection is arXiv-only by construction: no RSS/HN/GitHub/news
 collector exists in this runner, so official-source links can never outrank
@@ -23,7 +23,7 @@ papers. NotebookLM is never called here — audio stays manual-only.
 Artifacts per date:
   sources/arxiv-learning-snapshot-<DATE>.md
   sources/arxiv-learning-translation-codex-<DATE>.md
-  sources/arxiv-learning-social-grok-<DATE>.md
+  sources/arxiv-learning-social-grok-<DATE>.md (only when social_check: grok)
   reports/learning-arxiv-summary-<DATE>.md
   .orchestrator/learning-arxiv-<DATE>.json (+ .lock)
 
@@ -33,8 +33,10 @@ Env:
   KB_LEARNING_ARXIV_DISABLE_NETWORK 1 = fail fetch unless fixture is set
   KB_LEARNING_ARXIV_GROK_BIN        grok binary override (tests use a fake)
   KB_LEARNING_ARXIV_GROK_TIMEOUT    grok social seconds (default 600)
-  KB_LEARNING_ARXIV_TRANSLATE_BIN   codex binary override (tests use a fake)
+  KB_CODEX_BIN                      codex binary override (tests use a fake)
   KB_LEARNING_ARXIV_CODEX_TIMEOUT   codex translation seconds (default 300)
+  KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR  test fixture dir with <arxiv-id>.txt
+  KB_LEARNING_ARXIV_FULLTEXT_MAX_CHARS    safety cap per paper (default 180000)
   KB_PROCESS_OUTPUTS / KB_PROCESS_BACKGROUND  set by kb-tick
 """
 from __future__ import annotations
@@ -46,13 +48,16 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _kb_profile  # noqa: E402
+from _kb_codex import CodexUnavailable, codex_bin  # noqa: E402
 
 # NOTE: no urllib here, deliberately. On macOS, a urllib fetch in this
 # process leaves CFNetwork/Obj-C state that makes a subsequently spawned
@@ -79,19 +84,63 @@ MAX_PAPERS_DEFAULT = 3
 # with headroom (owner 2026-06-12: slightly more detail per paper).
 DIGEST_BUDGET = 3900
 INCIDENT_ATTEMPTS = 8
-HTTP_TIMEOUT = 30
+# D12 (spec morning-digest-inputs-rebalance-2026-07-11): timeouts are generous
+# with headroom so real generation work is never killed mid-flight. Env-
+# overridable; the defaults carry slack, they are not tuned to the edge.
+HTTP_TIMEOUT = int(os.environ.get("KB_LEARNING_ARXIV_HTTP_TIMEOUT", "60"))  # Atom feed (was 30)
 JACCARD_LIMIT = 0.6
 # Manifest contract version. v2 moved translation out of Grok into Codex.
-# v3 adds first-class method/setup summaries (`method_loc`). Older manifests
-# must NOT satisfy the stage cache, or they would keep delivering abstract-only
-# paper explanations.
-MANIFEST_VERSION = 3
+# v3 adds first-class method/setup summaries (`method_loc`). v4 switches the
+# Codex analysis input from abstract snippets to extracted full paper text
+# when available. Older manifests must NOT satisfy the stage cache, or they
+# would keep delivering abstract-only paper explanations.
+MANIFEST_VERSION = 5
 # Grok now does X/Reddit social ONLY (translation moved to Codex), so its
 # default timeout drops 900→600s. Codex translation is offline text work,
 # fast; 300s is generous. Both overridable via env. Sequential worst case
 # 300+600=900s fits the kb-tick PROCESS_TIMEOUT=1800s wrapper ceiling.
 GROK_TIMEOUT_DEFAULT = 600
-CODEX_TIMEOUT_DEFAULT = 300
+CODEX_TIMEOUT_DEFAULT = 300  # legacy run_codex single-path timeout (kept for compat)
+FULLTEXT_HTTP_TIMEOUT = int(os.environ.get("KB_LEARNING_ARXIV_FULLTEXT_HTTP_TIMEOUT", "180"))  # per PDF (was 90)
+FULLTEXT_MIN_CHARS = 200
+FULLTEXT_MAX_CHARS_DEFAULT = 180000
+
+# D1 — pluggable translate/analysis executor chain (spec morning-digest-inputs-
+# rebalance-2026-07-11). Ported from kb-morning-digest's SYNTH_BACKENDS pattern.
+# codex,claude with claude the always-installed fallback (owner OQ-1). Prompt is
+# ALWAYS delivered by pointer file, never argv.
+TRANSLATE_AGENTS_DEFAULT = "codex,claude"
+# Per-agent 900s (deep multi-paper analysis of up to 180KB full text is real
+# generation work); whole-chain 1800s (room for two unhurried attempts).
+TRANSLATE_TIMEOUT = int(os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_TIMEOUT", "900"))
+TRANSLATE_CHAIN_TIMEOUT = int(os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_CHAIN_TIMEOUT", "1800"))
+# Closed set of per-attempt failure reasons recorded in translate_attempts.
+TRANSLATE_REASONS = {"launch_error", "timeout", "bad_json", "incomplete",
+                     "language_rejected", "oversized", "ok"}
+
+# D2 — target DEPTHS (content-quality guidance for the writer, NOT size caps).
+# A field that parsed but ran pathologically over its target (>= OVERSIZE_FACTOR
+# x target) is rejected as `oversized` → next agent, never silently truncated.
+TARGET_ABSTRACT = 1500
+TARGET_STUDIED = 500
+TARGET_METHOD = 700
+TARGET_FOUND = 700
+TARGET_WHY = 250
+TARGET_TERM_DEF = 160
+OVERSIZE_FACTOR = 3
+TERMS_MIN = 3
+TERMS_MAX = 6
+
+# D4 — since-last-seen watermark (no cross-day dedup ledger). One tz-aware UTC
+# ISO timestamp: the newest submittedDate a DELIVERED digest looked at. Selection
+# is half-open (watermark, now]; the window never reaches back further than
+# WINDOW_MAX_HOURS. Exhaustive descending pagination to the cutoff, bounded by
+# MAX_FETCH_PAGES as a pure anomaly backstop (cap-hit = abort, never partial).
+WATERMARK_FILE = ORCH / "learning-arxiv-watermark"
+WATERMARK_LOCK = ORCH / "learning-arxiv-watermark.lock"
+WINDOW_MAX_HOURS = int(os.environ.get("KB_LEARNING_ARXIV_WINDOW_MAX_HOURS", "48"))
+MAX_FETCH_PAGES = int(os.environ.get("KB_LEARNING_ARXIV_MAX_FETCH_PAGES", "5"))
+FETCH_PAGE_SIZE = int(os.environ.get("KB_LEARNING_ARXIV_FETCH_PAGE_SIZE", "200"))
 
 # Keys in personal/daily-research.yaml that belong to the legacy runner only.
 # `language` is legacy too: personal/profile.yaml is the single source of
@@ -108,6 +157,7 @@ def L(key: str):
     return pack.get(key, LABELS["en"].get(key, key))
 
 SOCIAL_STATUSES = {"found", "weak", "not_found", "degraded"}
+SOCIAL_OFF_VALUES = {"", "off", "none", "skip", "skipped", "disabled", "false", "0", "no"}
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 # Topic keyword groups for the deterministic ranker (spec: Deterministic
@@ -191,7 +241,7 @@ LABELS = {
         },
         "report_title": "arXiv learning — разбор {date}",
         "report_stats": ("Просмотрено свежих статей: {fetched}. Релевантных кандидатов: "
-                         "{relevant}. Выбрано: {n}. Проверка X/Reddit: {social}."),
+                         "{relevant}. Выбрано: {n}."),
         "report_original": "Оригинал",
         "report_authors": "Авторы",
         "report_category": "Категория",
@@ -200,6 +250,9 @@ LABELS = {
         "report_evidence": "Подтверждения",
         "report_abstract": "Аннотация (перевод)",
         "report_runner_ups": "Не вошли (runner-ups)",
+        "report_terms": "Термины",
+        "report_translate_status": "Статус перевода",
+        "no_new_papers": "Новых статей arXiv по AI-agent темам нет — все свежее уже разбирали.",
         "report_sources": "Источники",
     },
     "en": {
@@ -242,7 +295,7 @@ LABELS = {
         },
         "report_title": "arXiv learning — breakdown {date}",
         "report_stats": ("Fresh papers scanned: {fetched}. Relevant candidates: "
-                         "{relevant}. Selected: {n}. X/Reddit check: {social}."),
+                         "{relevant}. Selected: {n}."),
         "report_original": "Original title",
         "report_authors": "Authors",
         "report_category": "Category",
@@ -251,6 +304,9 @@ LABELS = {
         "report_evidence": "Evidence",
         "report_abstract": "Abstract",
         "report_runner_ups": "Runner-ups (not selected)",
+        "report_terms": "Terms",
+        "report_translate_status": "Translation status",
+        "no_new_papers": "No new arXiv AI-agent papers — everything fresh has already been covered.",
         "report_sources": "Sources",
     },
 }
@@ -301,7 +357,7 @@ def load_config() -> dict:
         "learning_topic": "ai_agents",
         "max_papers": MAX_PAPERS_DEFAULT,
         "arxiv_categories": list(DEFAULT_CATEGORIES),
-        "social_check": "grok",
+        "social_check": "off",
     }
     if not CONFIG_PATH.is_file():
         return cfg
@@ -337,7 +393,33 @@ def load_config() -> dict:
                 cfg[key] = val
     if legacy_present:
         log(f"legacy config keys ignored: {', '.join(sorted(legacy_present))}")
+    cfg["social_check"] = normalize_social_check(cfg.get("social_check"))
     return cfg
+
+
+def normalize_social_check(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw == "grok":
+        return "grok"
+    if raw in SOCIAL_OFF_VALUES:
+        return "off"
+    log(f"unknown social_check={raw!r}; social disabled")
+    return "off"
+
+
+def social_enabled(cfg: dict) -> bool:
+    return normalize_social_check(cfg.get("social_check")) == "grok"
+
+
+def social_manifest_enabled(manifest: dict) -> bool:
+    raw = str(manifest.get("social_check") or "").strip().lower()
+    if raw in {"ok", "partial", "degraded"}:
+        return True
+    return normalize_social_check(raw) == "grok"
+
+
+def should_render_social(social_status: str) -> bool:
+    return str(social_status or "").strip().lower() != "skipped"
 
 
 # --------------------------------------------------------------------------
@@ -406,21 +488,20 @@ def acquire_lock(d: str):
 # arXiv fetch + parse
 # --------------------------------------------------------------------------
 
-def build_query(categories: list) -> str:
+def build_query(categories: list, start: int = 0, page_size: int = FETCH_PAGE_SIZE) -> str:
     cat_clause = "+OR+".join(f"cat:{c}" for c in categories)
     return (
         f"{API_BASE}?search_query=({cat_clause})"
-        f"&sortBy=submittedDate&sortOrder=descending&max_results=100"
+        f"&sortBy=submittedDate&sortOrder=descending"
+        f"&start={start}&max_results={page_size}"
     )
 
 
-def fetch_atom(categories: list) -> str:
-    fixture = os.environ.get("KB_LEARNING_ARXIV_FIXTURE", "").strip()
-    if fixture:
-        return pathlib.Path(fixture).read_text(encoding="utf-8")
+def fetch_atom_page(categories: list, start: int) -> str:
+    """One submittedDate-descending page of the Atom feed (network path)."""
     if os.environ.get("KB_LEARNING_ARXIV_DISABLE_NETWORK", "").strip() in {"1", "true", "yes"}:
         raise RuntimeError("network disabled and no fixture provided")
-    url = build_query(categories)
+    url = build_query(categories, start=start)
     log(f"GET {url}")
     proc = subprocess.run(
         ["curl", "-sSL", "--fail", "--max-time", str(HTTP_TIMEOUT), "-A", USER_AGENT, url],
@@ -431,6 +512,110 @@ def fetch_atom(categories: list) -> str:
             f"curl rc={proc.returncode}: {(proc.stderr or '').strip()[:200]}"
         )
     return proc.stdout
+
+
+# --------------------------------------------------------------------------
+# D4 — since-last-seen watermark (no cross-day dedup ledger)
+# --------------------------------------------------------------------------
+
+def now_utc() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def parse_utc(value: str) -> datetime.datetime:
+    """Parse an ISO 8601 timestamp as timezone-AWARE UTC. Fails CLOSED (raises)
+    on an offset-naive or malformed value — never a silent naive comparison
+    (D4/AC-3h). arXiv submittedDate is UTC (`Z`)."""
+    s = (value or "").strip()
+    if not s:
+        raise ValueError("empty timestamp")
+    iso = (s[:-1] + "+00:00") if s.endswith("Z") else s
+    dt_val = datetime.datetime.fromisoformat(iso)  # ValueError on malformed
+    if dt_val.tzinfo is None:
+        raise ValueError(f"offset-naive timestamp rejected: {s!r}")
+    return dt_val.astimezone(datetime.timezone.utc)
+
+
+def paper_submitted(paper: dict) -> datetime.datetime:
+    """The paper's submittedDate as tz-aware UTC (arXiv Atom `published`)."""
+    return parse_utc(paper.get("published", ""))
+
+
+def read_watermark() -> datetime.datetime:
+    """The stored watermark as tz-aware UTC, or None when absent (first run).
+    A present-but-malformed/naive watermark raises (fail closed, AC-3h)."""
+    if not WATERMARK_FILE.is_file():
+        return None
+    raw = WATERMARK_FILE.read_text(encoding="utf-8").strip()
+    if not raw:
+        return None
+    return parse_utc(raw)
+
+
+def effective_cutoff(watermark: datetime.datetime, now: datetime.datetime) -> datetime.datetime:
+    """Lower bound of the half-open selection window (cutoff, now]. The window
+    never reaches back further than WINDOW_MAX_HOURS even if the watermark is
+    very stale (long outage) — a resumed pipeline shows the last ~2 days, not a
+    full backlog. Absent watermark → the floor (first run)."""
+    floor = now - datetime.timedelta(hours=WINDOW_MAX_HOURS)
+    if watermark is None:
+        return floor
+    return max(watermark, floor)
+
+
+def acquire_watermark_lock():
+    """Global advisory flock guarding read→select→deliver→write of the watermark
+    (the watermark is global but the per-date run lock is not, so a manual forced
+    run could race the scheduled one). A contender that cannot take it skips
+    cleanly (non-blocking, same convention as kb-money-radar)."""
+    ORCH.mkdir(parents=True, exist_ok=True)
+    fh = WATERMARK_LOCK.open("a", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
+def advance_watermark(new_dt: datetime.datetime) -> None:
+    """Monotonic compare-and-set: the watermark only ever moves FORWARD
+    (write = max(existing, new)), so an out-of-order or concurrent writer can
+    never rewind it and re-surface already-seen papers (D4/AC-3g). Caller holds
+    the watermark flock."""
+    existing = read_watermark()
+    if existing is not None and new_dt <= existing:
+        return
+    atomic_write(WATERMARK_FILE, new_dt.astimezone(datetime.timezone.utc).isoformat() + "\n")
+
+
+def fetch_window(categories: list, cutoff: datetime.datetime) -> tuple:
+    """Exhaustively fetch the half-open window (cutoff, now]. Returns
+    (in_window_papers, fully_fetched). Paginate the submittedDate-descending
+    feed until the first entry whose submittedDate <= cutoff (window complete)
+    or the feed ends, bounded by MAX_FETCH_PAGES. A fixture is treated as the
+    complete feed (single page). Selection is STRICTLY newer than the cutoff."""
+    fixture = os.environ.get("KB_LEARNING_ARXIV_FIXTURE", "").strip()
+    if fixture:
+        entries = parse_atom(pathlib.Path(fixture).read_text(encoding="utf-8"))
+        in_window = [e for e in entries if paper_submitted(e) > cutoff]
+        return in_window, True
+    in_window = []
+    reached_cutoff = False
+    for page in range(MAX_FETCH_PAGES):
+        entries = parse_atom(fetch_atom_page(categories, page * FETCH_PAGE_SIZE))
+        if not entries:
+            reached_cutoff = True  # feed ended → window complete
+            break
+        for e in entries:
+            if paper_submitted(e) > cutoff:
+                in_window.append(e)
+            else:
+                reached_cutoff = True
+        if reached_cutoff or len(entries) < FETCH_PAGE_SIZE:
+            reached_cutoff = True
+            break
+    return in_window, reached_cutoff
 
 
 def parse_atom(xml_text: str) -> list:
@@ -464,6 +649,141 @@ def parse_atom(xml_text: str) -> list:
         except Exception as exc:
             log(f"skip entry parse error: {exc}")
     return out
+
+
+# --------------------------------------------------------------------------
+# Full-text PDF extraction for analysis input
+# --------------------------------------------------------------------------
+
+def fulltext_cache_dir() -> pathlib.Path:
+    return ORCH / "arxiv-fulltext-cache"
+
+
+def fulltext_cache_stem(arxiv_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", arxiv_id)
+
+
+def fulltext_fixture_path(arxiv_id: str):
+    raw = os.environ.get("KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR", "").strip()
+    if not raw:
+        return None
+    path = pathlib.Path(raw) / f"{fulltext_cache_stem(arxiv_id)}.txt"
+    return path if path.is_file() else None
+
+
+def clean_full_text(text: str) -> str:
+    text = (text or "").replace("\x0c", "\n\n")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def fulltext_max_chars() -> int:
+    raw = os.environ.get("KB_LEARNING_ARXIV_FULLTEXT_MAX_CHARS", "").strip()
+    if not raw:
+        return FULLTEXT_MAX_CHARS_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log(f"invalid KB_LEARNING_ARXIV_FULLTEXT_MAX_CHARS={raw!r}; using default")
+        return FULLTEXT_MAX_CHARS_DEFAULT
+
+
+def bounded_analysis_text(text: str) -> tuple:
+    limit = fulltext_max_chars()
+    if limit > 0 and len(text) > limit:
+        return text[:limit], True
+    return text, False
+
+
+def full_text_result(text: str) -> dict:
+    cleaned = clean_full_text(text)
+    if len(cleaned) < FULLTEXT_MIN_CHARS:
+        raise RuntimeError(f"full text too short ({len(cleaned)} chars)")
+    bounded, truncated = bounded_analysis_text(cleaned)
+    return {
+        "source": "full_text",
+        "text": bounded,
+        "chars": len(bounded),
+        "truncated": truncated,
+        "error": "",
+    }
+
+
+def load_full_text(paper: dict) -> dict:
+    """Return extracted analysis text for one paper, preferring deterministic
+    test fixtures, then cached text, then arXiv PDF download + pdftotext."""
+    arxiv_id = paper["id"]
+    fixture = fulltext_fixture_path(arxiv_id)
+    if fixture is not None:
+        return full_text_result(fixture.read_text(encoding="utf-8"))
+
+    cache_dir = fulltext_cache_dir()
+    stem = fulltext_cache_stem(arxiv_id)
+    txt_path = cache_dir / f"{stem}.txt"
+    pdf_path = cache_dir / f"{stem}.pdf"
+    if txt_path.is_file():
+        try:
+            return full_text_result(txt_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log(f"{arxiv_id}: cached full text unusable: {exc}")
+
+    if os.environ.get("KB_LEARNING_ARXIV_DISABLE_NETWORK", "").strip() in {"1", "true", "yes"}:
+        raise RuntimeError("full-text network disabled and no usable fixture/cache")
+
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        raise RuntimeError("pdftotext not found")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if not pdf_path.is_file():
+        url = f"https://arxiv.org/pdf/{arxiv_id}"
+        proc = subprocess.run(
+            ["curl", "-sSL", "--fail", "--max-time", str(FULLTEXT_HTTP_TIMEOUT),
+             "-A", USER_AGENT, "-o", str(pdf_path), url],
+            capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode != 0:
+            try:
+                pdf_path.unlink()
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"PDF download rc={proc.returncode}: {(proc.stderr or '').strip()[:200]}"
+            )
+
+    proc = subprocess.run(
+        [pdftotext, "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
+        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"pdftotext rc={proc.returncode}: {(proc.stderr or '').strip()[:200]}"
+        )
+    result = full_text_result(proc.stdout)
+    atomic_write(txt_path, result["text"])
+    return result
+
+
+def attach_analysis_text(papers: list) -> None:
+    for p in papers:
+        try:
+            result = load_full_text(p)
+            p["analysis_text"] = result["text"]
+            p["analysis_source"] = result["source"]
+            p["analysis_chars"] = result["chars"]
+            p["analysis_truncated"] = bool(result.get("truncated"))
+            p["analysis_error"] = ""
+        except Exception as exc:
+            abstract = p.get("abstract", "")
+            err = str(exc).strip()[:300] or "full-text unavailable"
+            p["analysis_text"] = abstract
+            p["analysis_source"] = "abstract_fallback"
+            p["analysis_chars"] = len(abstract)
+            p["analysis_truncated"] = False
+            p["analysis_error"] = err
+            log(f"{p.get('id', 'unknown')}: full-text unavailable; abstract fallback: {err}")
 
 
 # --------------------------------------------------------------------------
@@ -563,15 +883,17 @@ def select_papers(papers: list, max_papers: int) -> tuple:
 
 
 # --------------------------------------------------------------------------
-# Deterministic Russian summaries (bounded by title+abstract; no invention)
+# Deterministic fallback summaries (bounded by title+abstract; no invention)
 # --------------------------------------------------------------------------
 
 def split_sentences(text: str) -> list:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
 
 
-def truncate_sentence(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def truncate_sentence(text: str, max_chars) -> str:
+    # max_chars=None → render in FULL (D2: report shows each field whole, no
+    # display truncation; the Telegram digest still passes an integer budget).
+    if max_chars is None or len(text) <= max_chars:
         return text
     cut = text[:max_chars]
     last = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
@@ -680,11 +1002,98 @@ def grok_bin() -> str:
     return str(pathlib.Path.home() / ".grok" / "bin" / "grok")
 
 
-def codex_bin() -> str:
-    configured = os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_BIN", "").strip()
-    if configured:
-        return configured
-    return "/Applications/Codex.app/Contents/Resources/codex"
+# --------------------------------------------------------------------------
+# D1 — pluggable translate/analysis executor chain (ported from
+# kb-morning-digest's SYNTH_BACKENDS pattern). The prompt is ALWAYS delivered
+# by pointer file (today's prompt is hundreds of KB — it must never ride argv);
+# each backend's argv carries only a short instruction naming that file.
+# --------------------------------------------------------------------------
+
+def _resolve_agent_bin(name: str, candidates: list) -> str:
+    """KB_<NAME>_BIN env override → first existing absolute candidate → PATH.
+    Launchd's PATH omits ~/.local/bin, so absolute fallbacks are required."""
+    env = os.environ.get(f"KB_{name.upper()}_BIN", "").strip()
+    if env:
+        return env
+    for c in candidates:
+        c = os.path.expanduser(c)
+        if os.path.exists(c):
+            return c
+    return shutil.which(name) or name
+
+
+def _run_agent(argv: list, timeout: int, capture_file: pathlib.Path = None) -> tuple:
+    """Run a CLI agent headlessly with a hard wall-clock cap. stdin is ALWAYS
+    /dev/null (codex 0.138+ hangs on open stdin; a Bun/Node agent that inherits a
+    live stdin can stall too). Returns (text|None, rc, reason, err_tail): reason
+    is 'launch_error'/'timeout' for launch/timeout failures (caught per-agent,
+    never crashing the run), else '' (the chain does the semantic validation)."""
+    try:
+        proc = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, cwd=str(HUB), check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, -1, "timeout", "agent timeout"
+    except Exception as exc:  # noqa: BLE001 (OSError/FileNotFoundError etc.)
+        return None, -1, "launch_error", f"{type(exc).__name__}: {str(exc)[:200]}"
+    text = ""
+    if capture_file is not None:
+        try:
+            if capture_file.is_file():
+                text = capture_file.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    if not text.strip():
+        text = proc.stdout or ""
+    return text, proc.returncode, "", (proc.stderr or "")[-300:]
+
+
+def _pointer_instruction(prompt_file: pathlib.Path) -> str:
+    return (f"Read the full prompt file at {prompt_file} and return ONLY the "
+            "required JSON object. Do not edit files.")
+
+
+def _translate_codex(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> tuple:
+    out_file = ORCH / f"learning-arxiv-codex-out-{date_iso}.txt"
+    try:
+        out_file.unlink()
+    except OSError:
+        pass
+    try:
+        binary = codex_bin()
+    except CodexUnavailable as exc:
+        return None, -1, "launch_error", str(exc)[-300:]
+    argv = [binary, "exec", "-C", str(HUB), "--skip-git-repo-check",
+            "--sandbox", "read-only", "--output-last-message", str(out_file),
+            _pointer_instruction(prompt_file)]
+    return _run_agent(argv, timeout, capture_file=out_file)
+
+
+def _translate_claude(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> tuple:
+    bin_ = _resolve_agent_bin("claude", ["/opt/homebrew/bin/claude"])
+    argv = [bin_, "-p", _pointer_instruction(prompt_file),
+            "--output-format", "text", "--no-session-persistence"]
+    return _run_agent(argv, timeout)
+
+
+def _translate_agy(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> tuple:
+    bin_ = _resolve_agent_bin("agy", ["~/.local/bin/agy"])
+    argv = [bin_, "--add-dir", str(HUB), "--print", _pointer_instruction(prompt_file),
+            "--print-timeout", "5m"]
+    return _run_agent(argv, timeout)
+
+
+TRANSLATE_BACKENDS = {
+    "codex": _translate_codex,
+    "claude": _translate_claude,
+    "agy": _translate_agy,
+}
+
+
+def translate_agents() -> list:
+    raw = os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_AGENTS", TRANSLATE_AGENTS_DEFAULT)
+    return [a.strip() for a in raw.split(",") if a.strip()]
 
 
 def run_codex(date_iso: str, papers: list) -> tuple:
@@ -692,7 +1101,8 @@ def run_codex(date_iso: str, papers: list) -> tuple:
     stderr_tail). Never raises. `codex exec --sandbox read-only` (no edits)
     with `--output-last-message <file>` capturing ONLY the final agent message
     (clean; smoke-confirmed it writes under read-only). stdin=DEVNULL is
-    mandatory (codex 0.138+ hangs on open stdin). Prompt is a positional arg.
+    mandatory (codex 0.138+ hangs on open stdin). The large full-text prompt is
+    written to a file; argv carries only a short instruction pointing at it.
     Falls back to stdout if the capture file is empty — parse_loc tolerates
     banner noise via outermost-brace extraction."""
     prompt = codex_prompt(date_iso, papers)
@@ -704,13 +1114,18 @@ def run_codex(date_iso: str, papers: list) -> tuple:
     except OSError:
         pass
     timeout = int(os.environ.get("KB_LEARNING_ARXIV_CODEX_TIMEOUT", str(CODEX_TIMEOUT_DEFAULT)))
+    try:
+        binary = codex_bin()
+    except CodexUnavailable as exc:
+        return "", -1, str(exc)[-300:]
     cmd = [
-        codex_bin(), "exec",
+        binary, "exec",
         "-C", str(HUB),
         "--skip-git-repo-check",
         "--sandbox", "read-only",
         "--output-last-message", str(out_file),
-        prompt,
+        (f"Read the full prompt file at {prompt_file} and return ONLY the "
+         "required JSON object. Do not edit files."),
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
@@ -770,27 +1185,48 @@ invent a `not_found` for a search you could not run.
 
 def codex_prompt(date_iso: str, papers: list) -> str:
     """Offline translation/analysis prompt for Codex. Bounded strictly to the
-    given title+abstract — no web, no social, no invented numbers. Emits the
+    supplied per-paper `analysis_text` — full extracted paper text when
+    available, explicit abstract fallback otherwise. No web, no social, no
+    invented numbers. Emits the
     same `{{"papers": [...]}}` envelope Grok used so parse_loc()'s outermost-
     brace extraction works (a bare top-level array would break find/rfind)."""
     blocks = []
     for p in papers:
+        analysis_text = p.get("analysis_text") or p.get("abstract", "")
+        analysis_truncated = str(bool(p.get("analysis_truncated"))).lower()
         blocks.append(
             f"- id: {p['id']}\n  title: {p['title']}\n"
-            f"  abstract: {p['abstract'][:1200]}"
+            f"  analysis_source: {p.get('analysis_source', 'abstract_fallback')}\n"
+            f"  analysis_chars: {p.get('analysis_chars', len(analysis_text))}\n"
+            f"  analysis_truncated: {analysis_truncated}\n"
+            f"  analysis_text:\n"
+            f"<<<ANALYSIS_TEXT\n{analysis_text}\nANALYSIS_TEXT"
         )
     papers_block = "\n".join(blocks)
     return f"""# Translate + analyze today's arXiv papers ({date_iso})
 
 The user's language is: {UI_LANG_NAME}. For EACH paper below, summarize it in
-{UI_LANG_NAME}, STRICTLY from the given title+abstract — no outside claims, no
-invented numbers, no web search:
-- `title_loc`: short title translation in {UI_LANG_NAME} (<= 120 chars)
-- `abstract_loc`: 2-4 sentences in {UI_LANG_NAME} translating/compressing the abstract only, with every acronym and technical term expanded inline on first mention per paper (<= 800 chars)
-- `studied_loc`: 1-2 sentences in {UI_LANG_NAME} — what exactly they studied (<= 280 chars)
-- `method_loc`: 1-2 sentences in {UI_LANG_NAME} — how they studied it and on what exact data/benchmark/experiment/model/setup, if stated in the abstract; if not stated, say that the abstract does not specify this (<= 280 chars)
-- `found_loc`: 1-2 sentences in {UI_LANG_NAME} — what they found/claim, with numbers from the abstract when present (<= 280 chars)
-- `why_loc`: one practical sentence in {UI_LANG_NAME} — why THIS paper matters to a user building a local AI orchestrator with agents, memory/KB and tool-use (derived from the abstract, <= 160 chars)
+{UI_LANG_NAME}, STRICTLY from the supplied `analysis_text` — no outside claims,
+no invented numbers, no web search:
+- `analysis_source: full_text` means `analysis_text` is extracted from the full
+  arXiv PDF. Use the whole supplied text, including method/evaluation sections.
+- `analysis_source: abstract_fallback` means full text was unavailable; analyze
+  only the supplied abstract and do not pretend to have read the full paper.
+Explain these papers PROPERLY — a real summary, terms defined, method and
+numbers. The lengths below are TARGET DEPTHS telling you how thorough to be
+(content-quality guidance), NOT hard caps — a genuinely richer paper may run a
+bit longer and that is fine; only a runaway dump of the whole paper is wrong:
+- `title_loc`: short title translation in {UI_LANG_NAME}
+- `abstract_loc`: a full 5-8 sentence plain-language summary in {UI_LANG_NAME}
+  (target ~{TARGET_ABSTRACT} chars), every acronym and technical term expanded
+  inline on first mention per paper
+- `studied_loc`: what exactly they studied in {UI_LANG_NAME} (target ~{TARGET_STUDIED} chars)
+- `method_loc`: how they studied it and on what exact data/benchmark/experiment/model/setup, if stated in `analysis_text`; if not stated, say the supplied text does not specify this (target ~{TARGET_METHOD} chars)
+- `found_loc`: what they found/claim in {UI_LANG_NAME}, with concrete numbers from `analysis_text` mandatory when present (target ~{TARGET_FOUND} chars)
+- `why_loc`: one practical sentence in {UI_LANG_NAME} — why THIS paper matters to a user building a local AI orchestrator with agents, memory/KB and tool-use (derived from `analysis_text`, target ~{TARGET_WHY} chars)
+- `terms`: {TERMS_MIN}-{TERMS_MAX} glossary entries per paper, each a plain-language
+  definition of a key acronym/technical term used in the summary — the glossary
+  the user asked for. Each entry {{"term": "<name>", "def": "<plain-language definition in {UI_LANG_NAME}, target ~{TARGET_TERM_DEF} chars>"}}
 
 Papers:
 {papers_block}
@@ -798,19 +1234,20 @@ Papers:
 Return ONLY one JSON object, no prose before or after, exactly this shape:
 {{"papers": [{{"id": "<arxiv id>",
 "title_loc": "<title in {UI_LANG_NAME}>",
-"abstract_loc": "<translated/compressed abstract in {UI_LANG_NAME}, terms expanded inline>",
+"abstract_loc": "<full plain-language summary in {UI_LANG_NAME}, terms expanded inline>",
 "studied_loc": "<sentences in {UI_LANG_NAME}>",
-"method_loc": "<how it was researched, and on what data/benchmark/experiment/setup; or 'not specified in the abstract' in {UI_LANG_NAME}>",
-"found_loc": "<sentences in {UI_LANG_NAME}>",
-"why_loc": "<practical sentence in {UI_LANG_NAME}>"}}]}}
+"method_loc": "<how it was researched, and on what data/benchmark/experiment/setup; or 'not specified in the supplied text' in {UI_LANG_NAME}>",
+"found_loc": "<sentences in {UI_LANG_NAME}, numbers when present>",
+"why_loc": "<practical sentence in {UI_LANG_NAME}>",
+"terms": [{{"term": "<name>", "def": "<plain-language definition in {UI_LANG_NAME}>"}}]}}]}}
 
 Rules: `studied_loc`/`method_loc`/`found_loc`/`abstract_loc` are
-translations/compressions of the provided abstract only — never add facts the
-abstract does not state. For `method_loc`, prefer concrete nouns from the
-abstract such as dataset, benchmark, experiment, user study, simulation, proof,
-corpus, model family, evaluation setup, or deployment setup. If the abstract
-does not say how/on what the work was evaluated, explicitly say that this is
-not specified in the abstract.
+translations/compressions of the provided `analysis_text` only — never add
+facts the supplied text does not state. For `method_loc`, prefer concrete nouns
+from the supplied text such as dataset, benchmark, experiment, user study,
+simulation, proof, corpus, model family, evaluation setup, or deployment setup.
+If the supplied text does not say how/on what the work was evaluated,
+explicitly say that this is not specified in the supplied text.
 `abstract_loc` is the user's main quick-understanding field. Expand acronyms
 and technical terms inline on first mention for each paper in the form
 `ACRONYM (English expansion, rendering in {UI_LANG_NAME})` — e.g.
@@ -818,7 +1255,7 @@ and technical terms inline on first mention for each paper in the form
 `MCP (Model Context Protocol, …)` — filling each `…` with the
 {UI_LANG_NAME} rendering (when the target IS English, the two parts coincide).
 Write the prose genuinely in {UI_LANG_NAME}: translate the phrasing, do not
-copy English sentences from the abstract; keep Latin script only for proper
+copy English sentences from the supplied text; keep Latin script only for proper
 nouns, model/dataset/benchmark names and established terms (MCP, RAG).
 """
 
@@ -883,56 +1320,225 @@ def accept_loc(text: str) -> bool:
     return True
 
 
-def translate_check(date_iso: str, papers: list) -> tuple:
-    """Codex offline translation/analysis. Mutates papers in place with the
-    *_loc fields + per-paper abstract_source (codex|unavailable) and
-    summary_source (codex|fallback_en). Returns (status, codex_rc,
-    stderr_tail, raw_message). INDEPENDENT of the Grok social call: a Codex
-    failure degrades only translation, never the social signal. status is
-    `degraded` (whole call failed), `partial` (some papers fell back to the
-    deterministic English extract), or `ok`."""
-    if not papers:
-        return "ok", None, "", ""
-    msg, rc, stderr_tail = run_codex(date_iso, papers)
-    by_id = parse_papers_json(msg) if rc == 0 and msg.strip() else {}
-    whole_call_failed = rc != 0 or not msg.strip() or not by_id
-    any_fallback = False
+def _oversized(text: str, target: int) -> bool:
+    """A field that parsed but ran pathologically over its D2 target depth
+    (>= OVERSIZE_FACTOR x target). A genuinely richer summary that merely
+    exceeds the target is fine — only a runaway (e.g. the whole paper dumped
+    into one field) is rejected. NEVER silently truncated (D2)."""
+    return bool(text) and len(text) >= OVERSIZE_FACTOR * target
+
+
+def _valid_terms(raw) -> list:
+    """Return the accepted glossary entries: {term, def} with a non-empty term,
+    a non-empty def that is accept_loc-valid and not oversized (D2)."""
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for e in raw:
+        if not isinstance(e, dict):
+            continue
+        term = str(e.get("term", "") or "").strip()
+        definition = str(e.get("def", "") or "").strip()
+        if not term or not definition:
+            continue
+        if _oversized(definition, TARGET_TERM_DEF) or not accept_loc(definition):
+            continue
+        out.append({"term": term, "def": definition})
+    return out
+
+
+# Core required localized fields (present + accept_loc + not oversized) — the
+# gate for a SEMANTIC-success attempt (D1). why_loc/title_loc/terms are
+# enrichment: their absence marks the run `partial`, never rejects the attempt.
+_CORE_LOC_FIELDS = (
+    ("abstract_loc", TARGET_ABSTRACT),
+    ("studied_loc", TARGET_STUDIED),
+    ("method_loc", TARGET_METHOD),
+    ("found_loc", TARGET_FOUND),
+)
+
+
+def _has_papers_envelope(text: str) -> bool:
+    """True when the outermost JSON object parses and is a dict carrying a
+    `papers` list — used to tell an empty {"papers": []} (incomplete) apart
+    from text with no JSON object at all (bad_json)."""
+    t = (text or "").strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start == -1 or end <= start:
+        return False
+    try:
+        data = json.loads(t[start:end + 1])
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("papers"), list)
+
+
+def _validate_translation(papers: list, by_id: dict) -> tuple:
+    """Pure acceptance gate for one executor attempt (no mutation, so a rejected
+    attempt never half-writes papers). Success requires a record for EVERY
+    selected id with every core field present, accept_loc-valid and not
+    oversized. Returns (accepted, reason ∈ {incomplete, language_rejected,
+    oversized, ok})."""
     for p in papers:
-        rec = by_id.get(p["id"], {})
-        # Codex's bounded translation of title+abstract. Missing/rejected →
-        # deterministic English-extract fallback, explicitly marked, so the
-        # digest is honest about its source.
-        abstract_loc = truncate_sentence(str(rec.get("abstract_loc", "") or "").strip(), 800)
-        if accept_loc(abstract_loc):
-            p["abstract_loc"] = abstract_loc
-            p["abstract_source"] = "codex"
-        else:
-            p["abstract_source"] = "unavailable"
-            any_fallback = True
-        studied_loc = truncate_sentence(str(rec.get("studied_loc", "") or "").strip(), 300)
-        method_loc = truncate_sentence(str(rec.get("method_loc", "") or "").strip(), 300)
-        found_loc = truncate_sentence(str(rec.get("found_loc", "") or "").strip(), 300)
-        if accept_loc(studied_loc) and accept_loc(method_loc) and accept_loc(found_loc):
-            p["studied_loc"] = studied_loc
-            p["method_loc"] = method_loc
-            p["found_loc"] = found_loc
-            p["summary_source"] = "codex"
-        else:
-            p["summary_source"] = "fallback_en"
-            any_fallback = True
-        title_loc = truncate_sentence(str(rec.get("title_loc", "") or "").strip(), 140)
-        if accept_loc(title_loc):
+        rec = by_id.get(p["id"])
+        if not isinstance(rec, dict):
+            return False, "incomplete"
+        for key, target in _CORE_LOC_FIELDS:
+            val = str(rec.get(key, "") or "").strip()
+            if not val:
+                return False, "incomplete"
+            if _oversized(val, target):
+                return False, "oversized"
+            if not accept_loc(val):
+                return False, "language_rejected"
+    return True, "ok"
+
+
+def _apply_translation(papers: list, by_id: dict, agent: str) -> bool:
+    """Commit an ACCEPTED attempt's fields (validated by _validate_translation).
+    Returns partial=True when any enrichment field (why_loc / terms glossary)
+    fell back for at least one paper."""
+    partial = False
+    for p in papers:
+        rec = by_id[p["id"]]
+        for key, _target in _CORE_LOC_FIELDS:
+            p[key] = str(rec.get(key, "") or "").strip()
+        p["abstract_source"] = agent
+        p["summary_source"] = agent
+        title_loc = str(rec.get("title_loc", "") or "").strip()
+        if title_loc and accept_loc(title_loc) and not _oversized(title_loc, 200):
             p["title_loc"] = title_loc
-        why_loc = truncate_sentence(str(rec.get("why_loc", "") or "").strip(), 180)
-        if accept_loc(why_loc):
+        why_loc = str(rec.get("why_loc", "") or "").strip()
+        if why_loc and accept_loc(why_loc) and not _oversized(why_loc, TARGET_WHY):
             p["why_loc"] = why_loc
-    if whole_call_failed:
+        else:
+            partial = True
+        terms = _valid_terms(rec.get("terms"))
+        if len(terms) >= TERMS_MIN:
+            p["terms"] = terms[:TERMS_MAX]
+        else:
+            partial = True
+    return partial
+
+
+def translate_check(date_iso: str, papers: list) -> tuple:
+    """D1 pluggable translate/analysis executor chain. Tries each configured
+    agent (KB_LEARNING_ARXIV_TRANSLATE_AGENTS, default codex,claude) in order;
+    the prompt is delivered by pointer FILE to every agent (never argv). SUCCESS
+    IS SEMANTIC: an attempt counts only when its output parses as the JSON
+    envelope, has a papers[] entry for every selected id, and every core field
+    is present, accept_loc-valid and not oversized. rc=0-but-bad = failure →
+    next agent. Launch errors / timeouts are caught per-agent, never crash the
+    run. Mutates papers in place with the *_loc fields + abstract_source /
+    summary_source (= the accepted agent name, else unavailable / fallback_en).
+    Returns (status ∈ {ok, partial, degraded}, translate_agent|None,
+    translate_attempts, raw_message). Independent of the Grok social call."""
+    if not papers:
+        return "ok", None, [], ""
+    prompt = codex_prompt(date_iso, papers)
+    prompt_file = ORCH / f"learning-arxiv-codex-prompt-{date_iso}.md"
+    atomic_write(prompt_file, prompt)
+    attempts = []
+    deadline = time.monotonic() + TRANSLATE_CHAIN_TIMEOUT
+    accepted_agent = None
+    partial = False
+    last_raw = ""
+    for name in translate_agents():
+        fn = TRANSLATE_BACKENDS.get(name)
+        if fn is None:
+            log(f"{date_iso}: unknown translate agent {name!r}; skipping")
+            continue
+        remaining = int(deadline - time.monotonic())
+        if remaining < 30:
+            log(f"{date_iso}: translate chain budget exhausted before {name}")
+            break
+        t0 = time.monotonic()
+        raw, rc, launch_reason, err_tail = fn(prompt_file, date_iso,
+                                              min(TRANSLATE_TIMEOUT, remaining))
+        secs = round(time.monotonic() - t0, 1)
+        if raw:
+            last_raw = raw
+        if launch_reason in ("launch_error", "timeout"):
+            attempts.append({"agent": name, "rc": rc, "secs": secs,
+                             "reason": launch_reason, "err_tail": err_tail})
+            log(f"{date_iso}: translate {name} {launch_reason}: {err_tail}")
+            continue
+        by_id = parse_papers_json(raw or "")
+        if not by_id:
+            # A well-formed {"papers": []} envelope (parsed but no records) is
+            # `incomplete`; text with no JSON object at all is `bad_json`.
+            reason = "incomplete" if _has_papers_envelope(raw or "") else "bad_json"
+            attempts.append({"agent": name, "rc": rc, "secs": secs,
+                             "reason": reason, "err_tail": (err_tail or "")[:200]})
+            log(f"{date_iso}: translate {name} {reason} (rc={rc})")
+            continue
+        ok_attempt, reason = _validate_translation(papers, by_id)
+        if ok_attempt:
+            partial = _apply_translation(papers, by_id, name)
+            attempts.append({"agent": name, "rc": rc, "secs": secs,
+                             "reason": "ok", "err_tail": ""})
+            accepted_agent = name
+            log(f"{date_iso}: translate via {name}: accepted "
+                f"({'partial' if partial else 'ok'})")
+            break
+        attempts.append({"agent": name, "rc": rc, "secs": secs,
+                         "reason": reason, "err_tail": ""})
+        log(f"{date_iso}: translate {name} rejected: {reason}; trying next")
+    if accepted_agent is None:
+        # All executors failed → every paper falls back to the deterministic
+        # English extract, explicitly marked so the digest is honest (D5).
+        for p in papers:
+            p["abstract_source"] = "unavailable"
+            p["summary_source"] = "fallback_en"
         status = "degraded"
-    elif any_fallback:
+    elif partial:
         status = "partial"
     else:
         status = "ok"
-    return status, rc, stderr_tail, msg
+    return status, accepted_agent, attempts, last_raw
+
+
+# D5 — degradation becomes visible. Exact owner-facing wording (spec); the
+# report is voiced by the morning digest in the owner's language (ru).
+TRANSLATE_WARNINGS = {
+    "degraded": "⚠️ перевод недоступен — ниже английские выдержки",
+    "partial": "⚠️ перевод получился не для всех статей — часть на английском",
+}
+
+
+def translate_warning(status: str) -> str:
+    return TRANSLATE_WARNINGS.get(status, "")
+
+
+def _translate_chain_reasons(attempts: list) -> str:
+    return ", ".join(f"{a.get('agent', '?')}:{a.get('reason', '?')}" for a in attempts) or "no attempts"
+
+
+def emit_translate_degradation(date_iso: str, status: str, attempts: list) -> None:
+    """On translate_check != ok, append ONE grep-canonical line to
+    ~/knowledge/log.md, deduped to one line per (date, state): forced or
+    repeated runs on the same date with the same state do not re-append (D5).
+    The runner never writes incidents.md."""
+    if status == "ok":
+        return
+    voiced = "fallback_en" if status == "degraded" else "mixed"
+    line = (f'## [{date_iso}] learning-arxiv | hub | "translate {status}: '
+            f'chain {_translate_chain_reasons(attempts)} ; digest voiced {voiced}"')
+    log_file = HUB / "log.md"
+    marker = f'## [{date_iso}] learning-arxiv | hub | "translate {status}:'
+    try:
+        if log_file.is_file():
+            for existing in log_file.read_text(encoding="utf-8").splitlines():
+                if existing.startswith(marker):
+                    return  # already recorded this (date, state)
+    except OSError as exc:
+        log(f"{date_iso}: could not read log.md for dedup: {exc}")
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as exc:
+        log(f"{date_iso}: could not append translate degradation to log.md: {exc}")
 
 
 def social_check(date_iso: str, papers: list) -> tuple:
@@ -1042,8 +1648,10 @@ def render_snapshot(date_iso: str, papers: list, runner_ups: list, fetched: int,
             f"  {p['abstract'][:600]}\n"
         )
     if runner_ups:
+        # Audit trail only: keep the top-10 ranked runner-ups here (the report
+        # the digest reads no longer carries this list — spec D3).
         lines.append("## Runner-ups\n")
-        for r in runner_ups:
+        for r in runner_ups[:10]:
             lines.append(f"- {r['id']} **{r['title']}** — {r['reason_rejected']} (final={r['scores']['final']})")
     return "\n".join(lines) + "\n"
 
@@ -1077,49 +1685,71 @@ def render_social_source(date_iso: str, papers: list, status: str, rc, stderr_ta
     return "\n".join(lines) + "\n"
 
 
-def render_translation_source(date_iso: str, papers: list, status: str, rc, stderr_tail: str, raw: str) -> str:
+def render_translation_source(date_iso: str, papers: list, status: str,
+                              agent, attempts: list, raw: str) -> str:
     lines = [
         "---",
         "type: source",
         "kind: arxiv-learning-translation-codex",
         f"date: {date_iso}",
         f"translate_check: {status}",
-        f"codex_rc: {rc if rc is not None else 'null'}",
+        f"translate_agent: {agent if agent is not None else 'null'}",
         "generator: kb-learning-arxiv v1",
         "---",
         "",
-        f"# Codex translation/analysis — {date_iso}",
+        f"# Translation/analysis — {date_iso}",
+        "",
+        "## Executor chain attempts",
         "",
     ]
+    for a in attempts:
+        tail = f" — {a.get('err_tail')}" if a.get("err_tail") else ""
+        lines.append(f"- {a.get('agent')}: reason={a.get('reason')} "
+                     f"rc={a.get('rc')} secs={a.get('secs')}{tail}")
+    lines.append("")
     for p in papers:
-        lines.append(
-            f"## {p['id']} {p['title']}\n"
-            f"- abstract_source: {p.get('abstract_source', 'unavailable')}\n"
-            f"- summary_source: {p.get('summary_source', 'fallback_en')}\n"
-            f"- title_loc: {p.get('title_loc', '') or '—'}\n"
-            f"- abstract_loc: {p.get('abstract_loc', '') or '—'}\n"
-            f"- method_loc: {p.get('method_loc', '') or '—'}\n"
-        )
-    if stderr_tail:
-        lines.append(f"## Codex stderr tail\n\n```\n{stderr_tail}\n```\n")
+        block = [
+            f"## {p['id']} {p['title']}",
+            f"- analysis_source: {p.get('analysis_source', 'abstract_fallback')}",
+            f"- analysis_chars: {p.get('analysis_chars', 0)}",
+            f"- analysis_truncated: {str(bool(p.get('analysis_truncated'))).lower()}",
+        ]
+        if p.get("analysis_error"):
+            block.append(f"- analysis_error: {p.get('analysis_error')}")
+        block.extend([
+            f"- abstract_source: {p.get('abstract_source', 'unavailable')}",
+            f"- summary_source: {p.get('summary_source', 'fallback_en')}",
+            f"- title_loc: {p.get('title_loc', '') or '—'}",
+            f"- abstract_loc: {p.get('abstract_loc', '') or '—'}",
+            f"- method_loc: {p.get('method_loc', '') or '—'}",
+            f"- terms: {len(p.get('terms', []))} entries",
+            "",
+        ])
+        lines.append("\n".join(block))
     lines.append("## Raw message\n\n```\n" + (raw or "")[:4000] + "\n```")
     return "\n".join(lines) + "\n"
 
 
 def render_report(date_iso: str, papers: list, runner_ups: list, social_status: str,
-                  relevant: int, fetched: int = 0) -> str:
+                  relevant: int, fetched: int = 0, translate_status: str = "ok") -> str:
     lines = [
         f"# {L('report_title').format(date=date_iso)}",
         "",
         L("report_stats").format(
-            fetched=fetched, relevant=relevant, n=len(papers),
-            social=L("social_check").get(social_status, social_status)),
+            fetched=fetched, relevant=relevant, n=len(papers)),
         "",
     ]
+    # D5: visible "Translation status" line in the report header on !=ok.
+    warning = translate_warning(translate_status)
+    if warning:
+        lines.append(f"**{L('report_translate_status')}:** {warning}")
+        lines.append("")
+    render_social = should_render_social(social_status)
     for i, p in enumerate(papers, 1):
         s = p.get("social", {})
-        lines.extend([
-            f"## {i}. {title_display(p, 200)}",
+        # D2: each field rendered in FULL (limit=None) — no display truncation.
+        block = [
+            f"## {i}. {title_display(p, None)}",
             "",
             f"- {L('report_original')}: {p['title']}",
             f"- {L('report_authors')}: {render_authors(p['authors'])}",
@@ -1128,35 +1758,55 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
             f"- {L('reason')}: {reason_text(p)}",
             f"- {L('report_scores')}: `{json.dumps(p['scores'])}`",
             "",
-            f"**{L('studied')}:** {studied_display(p, 500)}",
+            f"**{L('studied')}:** {studied_display(p, None)}",
             "",
-            f"**{L('method')}:** {method_display(p, 500)}",
+            f"**{L('method')}:** {method_display(p, None)}",
             "",
-            f"**{L('found')}:** {found_display(p, 500)}",
+            f"**{L('found')}:** {found_display(p, None)}",
             "",
-            f"**X:** {render_status(s.get('x_status', 'degraded'))} · "
-            f"**Reddit:** {render_status(s.get('reddit_status', 'degraded'))}",
-            f"**{L('report_prior')}:** {s.get('prior_context', '') or '—'}",
-            f"**{L('report_evidence')}:** {s.get('evidence', '') or '—'}",
-            "",
+        ]
+        if render_social:
+            block.extend([
+                f"**X:** {render_status(s.get('x_status', 'degraded'))} · "
+                f"**Reddit:** {render_status(s.get('reddit_status', 'degraded'))}",
+                f"**{L('report_prior')}:** {s.get('prior_context', '') or '—'}",
+                f"**{L('report_evidence')}:** {s.get('evidence', '') or '—'}",
+                "",
+            ])
+        block.extend([
             f"**{L('why')}:** {why_text(p)}",
             "",
-            f"**{L('report_abstract')}:** {abstract_display(p, 800)}",
+            f"**{L('report_abstract')}:** {abstract_display(p, None)}",
             "",
         ])
-    if runner_ups:
-        lines.append(f"## {L('report_runner_ups')}")
-        lines.append("")
-        for r in runner_ups:
-            lines.append(f"- `{r['id']}` {r['title']} — {r['reason_rejected']} (final={r['scores']['final']})")
-        lines.append("")
-    lines.append(f"{L('report_sources')}: [[arxiv-learning-snapshot-{date_iso}]], [[arxiv-learning-translation-codex-{date_iso}]], [[arxiv-learning-social-grok-{date_iso}]]")
+        terms = p.get("terms") or []
+        if terms:
+            block.append(f"**{L('report_terms')}:**")
+            block.extend(f"- {t.get('term')}: {t.get('def')}" for t in terms)
+            block.append("")
+        lines.extend(block)
+    # D3/spec: runner-ups list is UNNEEDED data in the report the digest reads —
+    # it is removed entirely (the ranked top-10 stays in the sources/ snapshot).
+    sources = [
+        f"[[arxiv-learning-snapshot-{date_iso}]]",
+        f"[[arxiv-learning-translation-codex-{date_iso}]]",
+    ]
+    if render_social:
+        sources.append(f"[[arxiv-learning-social-grok-{date_iso}]]")
+    lines.append(f"{L('report_sources')}: {', '.join(sources)}")
     return "\n".join(lines) + "\n"
 
 
 def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
-                  fetched: int = 0) -> str:
+                  fetched: int = 0, social_status: str = "skipped",
+                  translate_status: str = "ok") -> str:
     header = [f"🧪 arXiv learning — {date_iso}", ""]
+    # D5: visible degradation warning as the FIRST body line — never a silent
+    # fallback_en again.
+    warning = translate_warning(translate_status)
+    if warning:
+        header.append(warning)
+        header.append("")
     scanned = (
         L("scanned").format(fetched=fetched, relevant=relevant)
         if fetched else
@@ -1174,27 +1824,31 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
         header.append(f"{scanned} {L('picked').format(n=len(papers))}")
     header.append("")
 
+    render_social = should_render_social(social_status)
+
     def paper_block(p: dict, idx: int, text_limit: int) -> str:
         s = p.get("social", {})
         line_limit = max(70, min(220, text_limit))
-        social_line = (
-            f"X: {render_status(s.get('x_status', 'degraded'))} / "
-            f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
-        )
-        prior = s.get("prior_context", "")
-        if prior:
-            social_line += f" — {prior}"
-        return (
+        lines = [
             f"{idx}. {title_display(p)} — {render_authors(p['authors'])}\n"
             f"   arXiv: {p['link']}\n"
             f"   {L('reason')}: {reason_text(p)}\n"
             f"   {L('abstract')}: {abstract_display(p, text_limit)}\n"
             f"   {L('studied')}: {studied_display(p, line_limit)}\n"
             f"   {L('method')}: {method_display(p, line_limit)}\n"
-            f"   {L('found')}: {found_display(p, line_limit)}\n"
-            f"   {social_line}\n"
-            f"   {L('why')}: {why_text(p)}"
-        )
+            f"   {L('found')}: {found_display(p, line_limit)}"
+        ]
+        if render_social:
+            social_line = (
+                f"X: {render_status(s.get('x_status', 'degraded'))} / "
+                f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
+            )
+            prior = s.get("prior_context", "")
+            if prior:
+                social_line += f" — {prior}"
+            lines.append(f"   {social_line}")
+        lines.append(f"   {L('why')}: {why_text(p)}")
+        return "\n".join(lines)
 
     footer = ["", L("footer").format(path=report_rel)]
     text_limit = 320
@@ -1270,6 +1924,38 @@ def _delivery_failed(date_iso: str, manifest: dict, error: str) -> int:
     return 1
 
 
+def _deliver_no_new_papers(date_iso: str, manifest: dict) -> int:
+    """D4 empty window: deliver ONE short honest message; watermark UNCHANGED
+    (owner OQ-2 — short message, never silence)."""
+    manifest["no_new_papers"] = True
+    manifest["selected_papers"] = []
+    manifest["runner_ups"] = []
+    manifest["arxiv_relevant"] = 0
+    manifest["error"] = None
+    digest = f"🧪 arXiv learning — {date_iso}\n\n{L('no_new_papers')}"
+    log(f"{date_iso}: empty window — no papers newer than the watermark")
+    return deliver_digest(date_iso, digest, manifest)
+
+
+def _advance_watermark_on_delivery(date_iso: str, manifest: dict) -> None:
+    """Forward-only CAS advance to the window's newest submittedDate, only after
+    a digest with papers was delivered from a fully fetched window (D4). Empty
+    windows have no window_max_submitted and never advance."""
+    raw = manifest.get("window_max_submitted")
+    if not raw or not manifest.get("selected_papers"):
+        return
+    try:
+        new_wm = parse_utc(raw)
+    except Exception as exc:
+        log(f"{date_iso}: window_max_submitted unparseable, watermark not advanced: {exc}")
+        return
+    try:
+        advance_watermark(new_wm)
+        log(f"{date_iso}: watermark advanced to {new_wm.isoformat()}")
+    except Exception as exc:
+        log(f"{date_iso}: watermark advance failed: {exc}")
+
+
 def maybe_suggest_incident(date_iso: str, manifest: dict) -> None:
     if int(manifest.get("attempts") or 0) >= INCIDENT_ATTEMPTS and not manifest.get("incident_suggested"):
         manifest["incident_suggested"] = True
@@ -1284,8 +1970,9 @@ def maybe_suggest_incident(date_iso: str, manifest: dict) -> None:
 def run(date_iso: str, force: bool, dry_run: bool) -> int:
     cfg = load_config()
     if dry_run:
+        social_note = "run Grok social check" if social_enabled(cfg) else "skip Grok social check"
         print(f"[dry] would fetch arXiv Atom ({cfg['arxiv_categories']}), select up to "
-              f"{cfg['max_papers']} papers, run grok social check, deliver the "
+              f"{cfg['max_papers']} papers, {social_note}, deliver the "
               f"telegram digest in {UI_LANG_NAME}, write {rel(report_path(date_iso))}")
         return 0
 
@@ -1297,9 +1984,22 @@ def run(date_iso: str, force: bool, dry_run: bool) -> int:
             return 0
         log(f"{date_iso}: another run holds the lock and no delivered digest; rc=1")
         return 1
+    # D4: the watermark is global but the per-date run lock is not, so a manual
+    # forced run could race the scheduled one. Guard read→select→deliver→write
+    # of the watermark with a dedicated GLOBAL flock; a contender skips cleanly.
+    wm_lock = acquire_watermark_lock()
+    if wm_lock is None:
+        delivered = bool(manifest.get("digest_delivered"))
+        log(f"{date_iso}: watermark lock held by another run; skipping cleanly "
+            f"(delivered={delivered})")
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_fh.close()
+        return 0 if delivered else 1
     try:
         return _run_locked(date_iso, cfg, manifest, force)
     finally:
+        fcntl.flock(wm_lock.fileno(), fcntl.LOCK_UN)
+        wm_lock.close()
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
         lock_fh.close()
 
@@ -1335,7 +2035,8 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         log(f"{date_iso}: language switch {cached_language} -> {UI_LANG}; dropping cached selection")
         for stale_key in ("selected_papers", "runner_ups", "social_check",
                           "grok_rc", "grok_stderr_tail", "translate_check",
-                          "codex_rc", "codex_stderr_tail", "digest"):
+                          "translate_agent", "translate_attempts",
+                          "window_max_submitted", "no_new_papers", "digest"):
             manifest.pop(stale_key, None)
     manifest.update({
         "date": date_iso,
@@ -1366,6 +2067,8 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     # method_loc. Neither may satisfy the stage cache for the current output
     # contract. Require translate_check present AND
     # manifest_version >= MANIFEST_VERSION (both read from the PRE-update snapshot).
+    current_social_enabled = social_enabled(cfg)
+    cached_social_enabled = social_manifest_enabled(manifest)
     cached = (
         not force
         and manifest.get("selected_papers") is not None
@@ -1373,6 +2076,7 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         and cached_has_translate
         and cached_version >= MANIFEST_VERSION
         and cached_language == UI_LANG
+        and cached_social_enabled == current_social_enabled
     )
     if cached:
         log(f"{date_iso}: reusing cached selection+translation+social from manifest (stage cache)")
@@ -1380,14 +2084,29 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         digest = render_digest(
             date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)),
             max_papers, fetched=int(manifest.get("arxiv_fetched") or 0),
+            social_status=str(manifest.get("social_check") or "skipped"),
+            translate_status=str(manifest.get("translate_check") or "ok"),
         )
-        return deliver_digest(date_iso, digest, manifest)
+        rc = deliver_digest(date_iso, digest, manifest)
+        if rc == 0:
+            _advance_watermark_on_delivery(date_iso, manifest)
+        return rc
 
+    # D4: since-last-seen watermark. Read → windowed EXHAUSTIVE fetch → select
+    # papers with submittedDate STRICTLY newer than the watermark (half-open).
     try:
-        xml_text = fetch_atom(cfg["arxiv_categories"])
-        candidates = parse_atom(xml_text)
-        if not candidates:
-            raise RuntimeError("arXiv feed parsed to zero entries")
+        watermark = read_watermark()  # None on first run; malformed → fail closed
+    except Exception as exc:
+        manifest["status"] = "failed"
+        manifest["error"] = f"watermark unreadable (fail closed): {exc}"
+        maybe_suggest_incident(date_iso, manifest)
+        save_manifest(date_iso, manifest)
+        log(f"{date_iso}: watermark unreadable, fail closed: {exc}")
+        return 1
+    now = now_utc()
+    cutoff = effective_cutoff(watermark, now)
+    try:
+        candidates, fully_fetched = fetch_window(cfg["arxiv_categories"], cutoff)
     except Exception as exc:
         manifest["status"] = "failed"
         manifest["error"] = f"arxiv fetch failed: {exc}"
@@ -1396,7 +2115,31 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         log(f"{date_iso}: arxiv fetch failed: {exc}")
         return 1
 
+    if not fully_fetched:
+        # CAP-HIT = ABORT (D4): a single-timestamp watermark cannot be both
+        # duplicate-free AND a resumable partial-traversal cursor, so we refuse
+        # the impossible middle — no delivery, watermark UNCHANGED, visible
+        # volume-cap degradation warning; the next run retries the same window.
+        manifest["status"] = "failed"
+        manifest["error"] = ("volume cap hit — window not fully fetched within "
+                             f"MAX_FETCH_PAGES={MAX_FETCH_PAGES}; not delivered")
+        manifest["fetch_cap_hit"] = True
+        maybe_suggest_incident(date_iso, manifest)
+        save_manifest(date_iso, manifest)
+        log(f"{date_iso}: ⚠️ {manifest['error']} — watermark left unchanged, will retry")
+        return 1
+
+    if not candidates:
+        # EMPTY WINDOW (D4): nothing newer than the watermark — the natural,
+        # honest weekend/quiet signal. One short Telegram message; watermark
+        # UNCHANGED so a late-appearing batch is picked up by the next run.
+        return _deliver_no_new_papers(date_iso, manifest)
+
+    window_max = max(paper_submitted(p) for p in candidates)
+    manifest["window_max_submitted"] = window_max.isoformat()
+
     selected, runner_ups, relevant = select_papers(candidates, max_papers)
+    attach_analysis_text(selected)
     for p in selected:
         p["summary_loc"] = build_summary(p)
     manifest.update({
@@ -1406,7 +2149,9 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         "selected_papers": [
             {k: p[k] for k in ("id", "title", "authors", "link", "abstract",
                                "published", "primary_category", "scores",
-                               "reason", "summary_loc", "_groups")}
+                               "reason", "summary_loc", "_groups",
+                               "analysis_source", "analysis_chars",
+                               "analysis_truncated", "analysis_error")}
             for p in selected
         ],
         "runner_ups": runner_ups,
@@ -1416,26 +2161,33 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     atomic_write(snapshot_path(date_iso),
                  render_snapshot(date_iso, selected, runner_ups, len(candidates), relevant))
 
-    # Codex translation/analysis (offline) — independent of the Grok social
-    # call below; a Codex failure degrades only translation (fallback_en /
-    # unavailable), never the social signal.
-    t_status, codex_rc, codex_stderr, codex_raw = translate_check(date_iso, selected)
+    # D1 pluggable translate/analysis executor chain (offline) — independent of
+    # the Grok social call below; a translate failure degrades only translation
+    # (fallback_en / unavailable), never the social signal.
+    t_status, t_agent, t_attempts, t_raw = translate_check(date_iso, selected)
     manifest["translate_check"] = t_status
-    manifest["codex_rc"] = codex_rc
-    manifest["codex_stderr_tail"] = codex_stderr
+    manifest["translate_agent"] = t_agent
+    manifest["translate_attempts"] = t_attempts
+    # D5: on != ok, one deduped grep-canonical line to ~/knowledge/log.md.
+    emit_translate_degradation(date_iso, t_status, t_attempts)
 
-    # Grok X/Reddit social — independent of the translation above; a Grok
-    # failure degrades only the social lines (this is the 2026-06-17 fix).
-    status, grok_rc, stderr_tail, raw = social_check(date_iso, selected)
+    # Optional Grok X/Reddit social — independent of the translation above.
+    # Default scheduled runs skip it because the current machine has no Grok
+    # subscription/credits; explicit `social_check: grok` keeps the old path.
+    if current_social_enabled:
+        status, grok_rc, stderr_tail, raw = social_check(date_iso, selected)
+    else:
+        status, grok_rc, stderr_tail, raw = "skipped", None, "", ""
     manifest["social_check"] = status
     manifest["grok_rc"] = grok_rc
     manifest["grok_stderr_tail"] = stderr_tail
 
     for m_p, p in zip(manifest["selected_papers"], selected):
-        m_p["social"] = p.get("social", {})
+        if should_render_social(status):
+            m_p["social"] = p.get("social", {})
         for k in ("title_loc", "abstract_loc", "abstract_source",
                   "studied_loc", "method_loc", "found_loc", "why_loc",
-                  "summary_source"):
+                  "summary_source", "terms"):
             if k in p:
                 m_p[k] = p[k]
         # Rebuild now that the localized translation (or its absence) is known.
@@ -1443,24 +2195,31 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         m_p["summary_loc"] = p["summary_loc"]
     save_manifest(date_iso, manifest)
     atomic_write(translation_path(date_iso),
-                 render_translation_source(date_iso, selected, t_status, codex_rc, codex_stderr, codex_raw))
-    atomic_write(social_path(date_iso),
-                 render_social_source(date_iso, selected, status, grok_rc, stderr_tail, raw))
+                 render_translation_source(date_iso, selected, t_status, t_agent, t_attempts, t_raw))
+    if should_render_social(status):
+        atomic_write(social_path(date_iso),
+                     render_social_source(date_iso, selected, status, grok_rc, stderr_tail, raw))
 
     atomic_write(report_path(date_iso),
                  render_report(date_iso, selected, runner_ups, status, relevant,
-                               fetched=len(candidates)))
+                               fetched=len(candidates), translate_status=t_status))
     manifest["status"] = "report_written"
     save_manifest(date_iso, manifest)
 
     digest = render_digest(date_iso, selected, relevant, max_papers,
-                           fetched=len(candidates))
-    return deliver_digest(date_iso, digest, manifest)
+                           fetched=len(candidates), social_status=status,
+                           translate_status=t_status)
+    rc = deliver_digest(date_iso, digest, manifest)
+    if rc == 0:
+        # D4: advance the watermark ONLY on a delivered digest from a fully
+        # fetched window, to the newest submittedDate in it (forward-only CAS).
+        _advance_watermark_on_delivery(date_iso, manifest)
+    return rc
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="arXiv-only scheduled learning digest (3 papers, user-language, Grok social check)."
+        description="arXiv-only scheduled learning digest (3 papers, user-language, optional Grok social check)."
     )
     parser.add_argument("--date", default=today_iso(), help="Date in YYYY-MM-DD.")
     parser.add_argument("--text-only", action="store_true",

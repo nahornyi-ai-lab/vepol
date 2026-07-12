@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """_kb_processes — reader/validator for personal/processes.yaml.
 
-Every background process is declared with exactly five fields:
+Every background process is declared with five required fields plus an
+OPTIONAL sixth `timeout` field:
 
     - id: daily
       enabled: true
       when: "07:30"
       run: kb-brief
       outputs: [telegram, file]
+      timeout: 3600        # optional; per-process kb-tick cap in seconds
+
+`timeout` (optional): a positive bounded integer in seconds
+(TIMEOUT_MIN..TIMEOUT_MAX). When present, kb-tick uses it as this process's
+subprocess cap; when absent, kb-tick applies its uniform PROCESS_TIMEOUT
+default (no behavior change). An out-of-range or non-integer value FAILS
+CLOSED (config rejected) — it is never silently ignored.
 
 `when` semantics (release contract):
   - "HH:MM"            eligible once per day at/after that wall-clock time
@@ -32,7 +40,8 @@ Fail-closed: any unrecognized structure, field, value, or invariant
 violation raises ProcessConfigError; kb-tick then runs no processes for
 that tick and logs why.
 
-Contract: processes release 2026-06-09 (five-field processes.yaml).
+Contract: processes release 2026-06-09 (five required fields) + optional
+per-process `timeout` (D12, morning-digest-inputs-rebalance-spec-2026-07-11).
 
 CLI: python3 _kb_processes.py <path>   → exit 0 valid / 1 invalid
 """
@@ -45,6 +54,14 @@ import sys
 import tempfile
 
 REQUIRED_FIELDS = ("id", "enabled", "when", "run", "outputs")
+# Optional per-process fields (D12): `timeout` is the per-process kb-tick
+# subprocess cap in seconds; absent → kb-tick's uniform default applies.
+OPTIONAL_FIELDS = ("timeout",)
+ALLOWED_FIELDS = REQUIRED_FIELDS + OPTIONAL_FIELDS
+# `timeout` bounds: generous headroom for heavy LLM work, but still a real
+# outer ceiling so a hung process is reaped. Values outside fail closed.
+TIMEOUT_MIN = 60
+TIMEOUT_MAX = 7200
 ALLOWED_OUTPUTS = (
     "telegram", "people", "calendar", "file", "notebooklm_audio", "telegram_audio",
 )
@@ -80,7 +97,9 @@ _FIELD_RE = re.compile(r"^  ([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$")
 
 DEFAULT_PROCESSES_YAML = """\
 # Vepol background processes — the single switchboard read by kb-tick.
-# Exactly five fields per process: id, enabled, when, run, outputs.
+# Five required fields per process: id, enabled, when, run, outputs.
+# Optional sixth field `timeout: <seconds>` (60..7200) overrides kb-tick's
+# per-process cap for heavy processes; absent → the uniform default applies.
 # when: "HH:MM" | after:<process_id> | on-demand (never scheduled).
 # An invalid file fails closed: kb-tick runs nothing and logs why.
 
@@ -226,11 +245,12 @@ def parse_processes_text(text: str) -> list[dict]:
     seen_ids: set[str] = set()
     for p in procs:
         pid_raw = p.get("id", "")
-        extra = sorted(set(p) - set(REQUIRED_FIELDS))
+        extra = sorted(set(p) - set(ALLOWED_FIELDS))
         if extra:
             raise ProcessConfigError(
-                f"process {pid_raw!r}: unknown field(s) {extra} — "
-                f"exactly five fields are allowed: {list(REQUIRED_FIELDS)}"
+                f"process {pid_raw!r}: unknown field(s) {extra} — allowed "
+                f"fields are the five required {list(REQUIRED_FIELDS)} plus "
+                f"optional {list(OPTIONAL_FIELDS)}"
             )
         missing = [f for f in REQUIRED_FIELDS if f not in p]
         if missing:
@@ -282,6 +302,24 @@ def parse_processes_text(text: str) -> list[dict]:
         if len(set(items)) != len(items):
             raise ProcessConfigError(f"process {pid!r}: duplicate outputs")
         p["outputs"] = items
+
+        # Optional per-process timeout (D12). Absent → leave unset so kb-tick
+        # applies its uniform default. Present → must be a positive bounded
+        # integer; anything else fails closed (never silently ignored).
+        if "timeout" in p:
+            raw_timeout = _strip_quotes(p["timeout"])
+            if not re.fullmatch(r"[0-9]+", raw_timeout):
+                raise ProcessConfigError(
+                    f"process {pid!r}: timeout must be a positive integer "
+                    f"({TIMEOUT_MIN}..{TIMEOUT_MAX} seconds), got {p['timeout']!r}"
+                )
+            timeout = int(raw_timeout)
+            if not (TIMEOUT_MIN <= timeout <= TIMEOUT_MAX):
+                raise ProcessConfigError(
+                    f"process {pid!r}: timeout must be within "
+                    f"{TIMEOUT_MIN}..{TIMEOUT_MAX} seconds, got {timeout}"
+                )
+            p["timeout"] = timeout
 
         p["when"] = _strip_quotes(p["when"])
 
