@@ -207,11 +207,11 @@ def _good_envelope_exists(hub: Path, day: str) -> bool:
     return ts.validate_envelope(env) and env.get("available") is True
 
 
-def _merge_senders(old: list, new: list) -> tuple[list, bool]:
-    """Union two sender lists by user_id. Prefer non-empty identity
-    fields, keep the max count (windows may overlap — counts are
-    display-only), widen the ts span. Returns (merged, overflowed) where
-    overflowed is True when the union was capped at _MAX_SENDERS."""
+def _merge_senders(old: list, new: list) -> list:
+    """Union two sender lists by user_id (UNCAPPED). Prefer non-empty
+    identity fields, keep the max count (windows may overlap — counts
+    are display-only), widen the ts span. The caller partitions the
+    union to the envelope cap."""
     by_id = {s["user_id"]: dict(s) for s in old}
     for s in new:
         cur = by_id.get(s["user_id"])
@@ -224,26 +224,69 @@ def _merge_senders(old: list, new: list) -> tuple[list, bool]:
         cur["count"] = max(cur.get("count", 1), s.get("count", 1))
         cur["first_ts"] = min(cur.get("first_ts", ""), s.get("first_ts", "")) or s.get("first_ts", "")
         cur["last_ts"] = max(cur.get("last_ts", ""), s.get("last_ts", ""))
-    merged = sorted(by_id.values(), key=lambda s: (-s["count"], s["user_id"]))
-    overflowed = len(merged) > _MAX_SENDERS
-    return merged[:_MAX_SENDERS], overflowed
+    return list(by_id.values())
 
 
-def finalize_run(hub: Path, env: dict,
-                 next_watermark: datetime | None) -> Path | None:
-    """Persist a collection result: merge with an existing UNPROCESSED
-    same-day envelope (a same-day retry must never overwrite identities
-    the extractor has not consumed yet), write atomically, and advance
-    the watermark ONLY on a clean run.
+def _by_count(senders: list) -> list:
+    return sorted(senders, key=lambda s: (-s["count"], s["user_id"]))
 
-    `next_watermark` is a datetime for a complete window (advance to it)
-    or None for a truncated one (HOLD the cursor — the whole window is
-    re-covered next run, so nothing is skipped). A merge that overflows
-    the sender cap also forces a hold: the dropped identities beyond the
-    cap must not fall behind an advanced cursor."""
-    day = env["date"]
+
+def _partition_by_time(senders: list, cap: int) -> tuple[list, datetime | None]:
+    """When more senders than fit the envelope cap are covered in ONE
+    complete window, keep the OLDEST `cap` by activity and DEFER the
+    newest to the next run — never drop them. Returns
+    (kept_display_order, boundary) where `boundary` is the newest
+    activity among the kept set: advancing the watermark to it re-covers
+    every deferred (strictly-newer) sender next run, so nobody is lost.
+
+    Returns (senders_by_count[:cap], None) in the pathological case where
+    more than `cap` senders share the single newest kept second — then a
+    time split can't make progress, so the caller holds the cursor and
+    re-covers.
+    """
+    s = sorted(senders, key=lambda x: (x["last_ts"], x["user_id"]))
+    split_ts = s[cap - 1]["last_ts"]   # newest of the first `cap`
+    next_ts = s[cap]["last_ts"]        # oldest deferred (len > cap guaranteed)
+    if split_ts < next_ts:
+        # Clean split between distinct seconds — keep exactly `cap`; the
+        # watermark sits at the newest kept and every deferred sender is
+        # strictly newer, so all re-cover next run.
+        kept = s[:cap]
+        boundary_str = split_ts
+    else:
+        # The cap boundary falls inside a same-second group; keeping only
+        # part of it would strand the rest behind an equal watermark. Defer
+        # the WHOLE tied second: keep everyone strictly older.
+        kept = [x for x in s if x["last_ts"] < split_ts]
+        if not kept:
+            return _by_count(senders)[:cap], None  # all share one second
+        boundary_str = kept[-1]["last_ts"]
+    boundary = datetime.strptime(boundary_str, _TS_FMT).replace(
+        tzinfo=timezone.utc)
+    return _by_count(kept), boundary
+
+
+def finalize_run(hub: Path, day: str, senders: list, complete: bool,
+                 now: datetime) -> Path | None:
+    """Persist a collection result and move the watermark — the single
+    place that owns merge, cap, and cursor so they can never disagree.
+
+    - Merge with an existing UNPROCESSED same-day envelope first (a
+      same-day retry must never overwrite identities the extractor has
+      not consumed yet). The union is uncapped here.
+    - If the traversal was INCOMPLETE (`complete=False`: a FloodWait or a
+      runaway guard): write a best-effort bounded envelope and HOLD the
+      cursor — the whole window is re-covered next run, so nothing is
+      lost.
+    - If the union exceeds the envelope cap on a COMPLETE window: keep the
+      OLDEST `cap` by activity and advance the cursor to their newest
+      timestamp; the deferred (newer) senders are re-covered next run.
+      This drains the backlog without ever dropping a person (the old
+      "keep top-N by count, hold" path permanently lost the marginal
+      one-off contacts under a stuck watermark).
+    - Otherwise advance to `now - 1s`.
+    """
     path = ts.envelopes_dir(hub) / f"{day}-daily.json"
-    merge_overflow = False
     try:
         prev = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -253,21 +296,40 @@ def finalize_run(hub: Path, env: dict,
         consumed = (ts.read_processed(hub).get("processed", {})
                     .get(ts.envelope_key(prev)) == ts.file_sha256(path))
         if not consumed:
-            env = dict(env)
-            env["senders"], merge_overflow = _merge_senders(
-                prev["senders"], env["senders"])
-            env["truncated"] = bool(
-                env["truncated"] or prev.get("truncated") or merge_overflow)
+            senders = _merge_senders(prev["senders"], senders)
+            complete = complete and not prev.get("truncated")
+
+    advance: datetime | None
+    if not complete:
+        write_senders = _by_count(senders)[:_MAX_SENDERS]
+        truncated, advance = True, None
+    elif len(senders) > _MAX_SENDERS:
+        write_senders, boundary = _partition_by_time(senders, _MAX_SENDERS)
+        truncated = True
+        advance = boundary  # None only in the all-same-second pathological case
+    else:
+        write_senders = _by_count(senders)
+        truncated, advance = False, now - timedelta(seconds=_WATERMARK_BACK_S)
+
+    env = {
+        "schema": ts.SCHEMA, "date": day, "period": "daily",
+        "generated_at": now.strftime(_TS_FMT),
+        "available": True, "truncated": bool(truncated),
+        "senders": write_senders,
+    }
     if not ts.validate_envelope(env):
         _warn("built an envelope that fails its own validator — "
               "refusing to write senders")
         return None
     out = _write_envelope(hub, env)
-    if next_watermark is None or merge_overflow or env.get("truncated"):
-        _warn("window truncated/overflowed — watermark HELD; the next run "
-              "re-covers the whole window")
+    if advance is None:
+        _warn("window incomplete — watermark HELD; the next run re-covers "
+              "the whole window")
     else:
-        advance_watermark(hub, next_watermark)
+        advance_watermark(hub, advance)
+        if truncated:
+            _warn("window over the sender cap — kept the oldest, advanced "
+                  "the cursor to their boundary; the newest resume next run")
     return out
 
 
@@ -317,9 +379,12 @@ _WATERMARK_BACK_S = 1
 
 def collect(client, me_id: int, since: datetime, now: datetime, *,
             include_groups: bool, scan_max: int, msg_guard: int,
-            quiet: bool) -> tuple[list[dict], bool, datetime | None]:
+            quiet: bool) -> tuple[list[dict], bool]:
     """Aggregate human senders since `since`. Returns
-    (senders, truncated, next_watermark_or_None).
+    (senders, complete) — the FULL uncapped sender set for the covered
+    window, and whether the traversal was complete (True) or cut short
+    by a FloodWait / runaway guard (False). The cap, merge, and cursor
+    are owned by `finalize_run`.
 
     Completeness by construction, not by a cursor trick: `iter_dialogs`
     yields PINNED dialogs first, then the rest strictly newest-first. A
@@ -432,16 +497,10 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
         for r in agg.values()
     ]
     senders.sort(key=lambda s: (-s["count"], s["user_id"]))
-    if len(senders) > _MAX_SENDERS:
-        senders = senders[:_MAX_SENDERS]
-        truncated = True
-
-    next_watermark = None if truncated else (
-        now - timedelta(seconds=_WATERMARK_BACK_S))
-    wm_txt = "HOLD" if next_watermark is None else next_watermark.strftime(_TS_FMT)
+    complete = not truncated
     _say(f"eligible={len(eligible)} senders={len(senders)} "
-         f"truncated={truncated} watermark→{wm_txt}", quiet)
-    return senders, truncated, next_watermark
+         f"complete={complete}", quiet)
+    return senders, complete
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +574,7 @@ def main() -> int:
                              "collector session is not authorized; run "
                              "`kb-telegram-people --login` once")
             me = client.get_me()
-            senders, truncated, next_watermark = collect(
+            senders, complete = collect(
                 client, int(me.id), since, now,
                 include_groups=args.include_groups,
                 scan_max=args.scan_max,
@@ -524,13 +583,7 @@ def main() -> int:
     except Exception as e:
         return _fail(hub, day, now, f"telegram collection failed: {e}")
 
-    env = {
-        "schema": ts.SCHEMA, "date": day, "period": "daily",
-        "generated_at": now.strftime(_TS_FMT),
-        "available": True, "truncated": bool(truncated),
-        "senders": senders,
-    }
-    path = finalize_run(hub, env, next_watermark)
+    path = finalize_run(hub, day, senders, complete, now)
     if path is None:
         return _fail(hub, day, now,
                      "envelope failed validation — nothing written")

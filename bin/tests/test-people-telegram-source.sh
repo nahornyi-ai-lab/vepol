@@ -340,10 +340,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T10: watermark contract in finalize_run — a COMPLETE run advances to the
-# collector's boundary; a TRUNCATED run (next_watermark=None, OR the env
-# already flagged truncated, OR a merge overflow) HOLDS the cursor so the
-# whole window is re-covered; never regresses.
+# T10: watermark contract in finalize_run(hub, day, senders, complete, now) —
+# a COMPLETE small run advances to now-1s; an INCOMPLETE run HOLDS the cursor;
+# never regresses.
 # ---------------------------------------------------------------------------
 HUB10="$TMPDIR_TEST/hub-t10"; make_hub "$HUB10"
 $PY - "$HUB10" <<'PYEOF'
@@ -354,34 +353,80 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 _l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
 ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 hub = Path(sys.argv[1])
 now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
-
-def env(truncated, senders=None):
-    return {"schema": ktp.ts.SCHEMA, "date": "2026-07-12", "period": "daily",
-            "generated_at": "2026-07-12T21:00:00Z", "available": True,
-            "truncated": truncated, "senders": senders or []}
-
 def wm():
     p = ktp.watermark_path(hub)
     return json.loads(p.read_text())["last_run_utc"] if p.exists() else None
 
-# Truncated (next_watermark=None) → HOLD: no watermark written.
-ktp.finalize_run(hub, env(True), None)
-assert wm() is None, f"truncated run must hold the cursor, got {wm()}"
-# Complete → advance to the boundary the collector passed.
-ktp.finalize_run(hub, env(False), now)
-assert wm() == "2026-07-12T21:00:00Z", wm()
-# A later env-truncated run must NOT regress or move the cursor.
-ktp.finalize_run(hub, env(True), datetime(2026, 7, 12, 5, 0, tzinfo=timezone.utc))
-assert wm() == "2026-07-12T21:00:00Z", f"cursor moved on truncation: {wm()}"
+# Incomplete (complete=False) → HOLD: no watermark written.
+ktp.finalize_run(hub, "2026-07-12", [], False, now)
+assert wm() is None, f"incomplete run must hold the cursor, got {wm()}"
+# Complete → advance to now-1s.
+ktp.finalize_run(hub, "2026-07-12", [], True, now)
+assert wm() == "2026-07-12T20:59:59Z", wm()
+# A later incomplete run must NOT move the cursor.
+ktp.finalize_run(hub, "2026-07-12", [], False, datetime(2026,7,12,5,0,tzinfo=timezone.utc))
+assert wm() == "2026-07-12T20:59:59Z", f"cursor moved on hold: {wm()}"
 # Monotonic: an out-of-order older complete run never regresses.
-ktp.finalize_run(hub, env(False), datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc))
-assert wm() == "2026-07-12T21:00:00Z", f"watermark regressed: {wm()}"
+ktp.finalize_run(hub, "2026-07-12", [], True, datetime(2026,7,12,10,0,tzinfo=timezone.utc))
+assert wm() == "2026-07-12T20:59:59Z", f"watermark regressed: {wm()}"
 print("T10_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T10: complete run advances; truncated/overflow HOLDS; cursor never regresses" || fail "T10: watermark contract"
+[[ $? -eq 0 ]] && ok "T10: complete run advances (now-1s); incomplete HOLDS; cursor never regresses" || fail "T10: watermark contract"
+
+# ---------------------------------------------------------------------------
+# T14: a COMPLETE window with more senders than the envelope cap must NOT drop
+# anyone — keep the OLDEST cap, advance the cursor to their newest activity,
+# and re-cover the deferred (newer) senders on the next run. (The old
+# top-N-by-count + hold path permanently lost the marginal one-off contacts.)
+# ---------------------------------------------------------------------------
+HUB14="$TMPDIR_TEST/hub-t14"; make_hub "$HUB14"
+$PY - "$HUB14" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+ts = ktp.ts
+from datetime import datetime, timezone
+hub = Path(sys.argv[1])
+now = datetime(2026, 7, 12, 23, 0, tzinfo=timezone.utc)
+ktp._MAX_SENDERS = 3   # shrink the cap so the test is small; module-global
+ts._MAX_SENDERS = 3    # envelope validator cap must match
+
+def s(uid, hour, count=1):
+    t = f"2026-07-12T{hour:02d}:00:00Z"
+    return {"name": f"P{uid}", "username": "", "user_id": uid, "phone": "",
+            "chat_type": "private", "first_ts": t, "last_ts": t, "count": count}
+
+# 5 senders active at 10,12,14,16,18 — cap 3. Oldest three (10,12,14) kept;
+# 16 & 18 deferred. Watermark → 14:00 (newest kept).
+senders = [s(5,18), s(4,16), s(3,14), s(2,12), s(1,10)]
+ktp.finalize_run(hub, "2026-07-12", senders, True, now)
+env = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+kept_ids = sorted(x["user_id"] for x in env["senders"])
+assert kept_ids == [1, 2, 3], f"kept oldest 3: {kept_ids}"
+assert env["truncated"] is True, "partitioned envelope is flagged truncated"
+wm = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+assert wm == "2026-07-12T14:00:00Z", f"watermark = newest kept (14:00): {wm}"
+# The deferred senders (16, 18) have activity > watermark → re-covered next run.
+for did, dh in [(4,16),(5,18)]:
+    assert datetime.strptime(f"2026-07-12T{dh:02d}:00:00Z","%Y-%m-%dT%H:%M:%SZ") \
+        > datetime.strptime(wm,"%Y-%m-%dT%H:%M:%SZ"), f"deferred {did} not re-coverable"
+# Consume this envelope, then a next run covering only the deferred completes.
+key = ts.envelope_key(env); sha = ts.file_sha256(ts.envelopes_dir(hub)/"2026-07-12-daily.json")
+ts.mark_processed(hub, key, sha)
+ktp.finalize_run(hub, "2026-07-12", [s(4,16), s(5,18)], True, now)
+env2 = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+assert sorted(x["user_id"] for x in env2["senders"]) == [4,5], f"deferred covered next run: {env2['senders']}"
+assert env2["truncated"] is False, "the remainder fits — clean run"
+print("T14_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T14: over-cap complete window keeps oldest, defers newest, loses nobody (bounded drain)" || fail "T14: sender-cap permanent loss"
 
 # ---------------------------------------------------------------------------
 # T10b: the collector (via a fake Telethon client) is COMPLETE by construction
@@ -451,18 +496,17 @@ msgs = {8: [_Msg(uPfresh, dt(16))], 9: [_Msg(uPstale, dt(3))],
         1: [_Msg(uA, dt(14))], 2: [_Msg(uB, dt(10))], 3: [_Msg(uOld, dt(6))],
         4: [_Msg(_User(4, "NeverSeen"), dt(5))]}
 client = FakeClient(dialogs, msgs)
-senders, truncated, nwm = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+senders, complete = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
     include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
 ids = sorted(s["user_id"] for s in senders)
-assert truncated is False, "clean run"
+assert complete is True, "clean run is complete"
 assert ids == [1, 2, 8], f"covers fresh-pinned + non-pinned A,B; skips stale-pinned + stops before Old/NeverSeen: {ids}"
-assert nwm == dt(21) - timedelta(seconds=1), f"clean → now-1s: {nwm}"
 
-# FloodWait mid-scan → HOLD (next_watermark None).
+# FloodWait mid-scan → incomplete (finalize will HOLD).
 client2 = FakeClient(dialogs, msgs, flood_after=1)
-_s, trunc2, nwm2 = ktp.collect(client2, me_id=999, since=dt(8), now=dt(21),
+_s, complete2 = ktp.collect(client2, me_id=999, since=dt(8), now=dt(21),
     include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
-assert trunc2 is True and nwm2 is None, f"flood-wait must hold: {trunc2} {nwm2}"
+assert complete2 is False, f"flood-wait must mark incomplete: {complete2}"
 print("T10B_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T10b: collector complete-by-construction (skip pinned, stop at since); flood-wait holds cursor" || fail "T10b: collector completeness"
@@ -512,13 +556,13 @@ msgs = {1: [_Msg(me, dt(14), out=True), _Msg(me, dt(13, 30), out=True),
             _Msg(person, dt(13))]}
 client = FakeClient([dlg], msgs)
 # Tiny guard=2: the person's message (3rd) is beyond the guard.
-s, trunc, nwm = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+s, complete = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
     include_groups=False, scan_max=5000, msg_guard=2, quiet=True)
-assert trunc is True and nwm is None, f"guard hit must hold cursor, not advance: {trunc} {nwm}"
+assert complete is False, f"guard hit must mark incomplete (finalize holds): {complete}"
 # With an adequate guard the person is recovered.
-s2, trunc2, nwm2 = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
+s2, complete2 = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
     include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
-assert [x["user_id"] for x in s2] == [1] and trunc2 is False, f"person recovered: {s2}"
+assert [x["user_id"] for x in s2] == [1] and complete2 is True, f"person recovered: {s2}"
 print("T10C_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T10c: sender behind an outgoing burst — guard holds cursor, never false-covers" || fail "T10c: msg-guard false-cover"
@@ -544,19 +588,15 @@ hub = Path(sys.argv[1])
 now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
 
 def sender(uid, name, count=1, username=""):
+    t = "2026-07-12T12:00:00Z"
     return {"name": name, "username": username, "user_id": uid, "phone": "",
-            "chat_type": "private", "first_ts": "t1", "last_ts": "t2",
+            "chat_type": "private", "first_ts": t, "last_ts": t,
             "count": count}
 
-def env(senders):
-    return {"schema": ts.SCHEMA, "date": "2026-07-12", "period": "daily",
-            "generated_at": "2026-07-12T21:00:00Z", "available": True,
-            "truncated": False, "senders": senders}
-
 # Run 1: sender A. NOT consumed by extract.
-ktp.finalize_run(hub, env([sender(1, "Alice A", count=2)]), now)
+ktp.finalize_run(hub, "2026-07-12", [sender(1, "Alice A", count=2)], True, now)
 # Run 2 same day: sender B only (window moved on) → must carry A too.
-ktp.finalize_run(hub, env([sender(2, "Bob B")]), now)
+ktp.finalize_run(hub, "2026-07-12", [sender(2, "Bob B")], True, now)
 data = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
 ids = sorted(s["user_id"] for s in data["senders"])
 assert ids == [1, 2], f"unprocessed identities lost on same-day rewrite: {ids}"
@@ -566,7 +606,7 @@ assert ts.validate_envelope(data), "merged envelope must stay valid"
 key = ts.envelope_key(data)
 sha = ts.file_sha256(ts.envelopes_dir(hub) / "2026-07-12-daily.json")
 ts.mark_processed(hub, key, sha)
-ktp.finalize_run(hub, env([sender(3, "Cara C")]), now)
+ktp.finalize_run(hub, "2026-07-12", [sender(3, "Cara C")], True, now)
 data2 = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
 ids2 = sorted(s["user_id"] for s in data2["senders"])
 assert ids2 == [3], f"consumed rows must not be re-merged: {ids2}"
@@ -575,9 +615,9 @@ PYEOF
 [[ $? -eq 0 ]] && ok "T11: same-day re-collection merges unprocessed identities, replaces consumed ones" || fail "T11: same-day envelope overwrite loses identities"
 
 # ---------------------------------------------------------------------------
-# T11b: a same-day merge whose union exceeds the sender cap must set
-# truncated AND hold the watermark — the dropped identities beyond the cap
-# would otherwise be lost behind an advanced cursor.
+# T11b: a same-day MERGE whose union exceeds the sender cap must not drop
+# anyone either — it time-partitions like a single over-cap window: keep the
+# oldest cap, advance the cursor to their boundary, re-cover the deferred.
 # ---------------------------------------------------------------------------
 HUB11B="$TMPDIR_TEST/hub-t11b"; make_hub "$HUB11B"
 $PY - "$HUB11B" <<'PYEOF'
@@ -591,31 +631,31 @@ ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)
 ts = ktp.ts
 from datetime import datetime, timezone
 hub = Path(sys.argv[1])
-now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
+ktp._MAX_SENDERS = 3; ts._MAX_SENDERS = 3
 
-def sender(uid):
+def sender(uid, hour):
+    t = f"2026-07-12T{hour:02d}:00:00Z"
     return {"name": f"P{uid}", "username": "", "user_id": uid, "phone": "",
-            "chat_type": "private", "first_ts": "t", "last_ts": "t", "count": 1}
-def env(senders):
-    return {"schema": ts.SCHEMA, "date": "2026-07-12", "period": "daily",
-            "generated_at": "2026-07-12T21:00:00Z", "available": True,
-            "truncated": False, "senders": senders}
+            "chat_type": "private", "first_ts": t, "last_ts": t, "count": 1}
 
-# Run 1: 400 unprocessed identities, complete → watermark = now.
-ktp.finalize_run(hub, env([sender(i) for i in range(1, 401)]), now)
-wm1 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
-assert wm1 == "2026-07-12T21:00:00Z", wm1
-# Run 2 same day: 200 more NEW ids → union 600 > cap 500 → overflow.
-later = datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
-ktp.finalize_run(hub, env([sender(i) for i in range(401, 601)]), later)
+# Run 1 completes EARLY (now1=11:30) → advances the cursor to 11:29:59, writes
+# [1@10, 2@11] (unprocessed). Realistic serial flow: run 2's senders are NEWER
+# than run 1's cursor.
+now1 = datetime(2026, 7, 12, 11, 30, tzinfo=timezone.utc)
+ktp.finalize_run(hub, "2026-07-12", [sender(1,10), sender(2,11)], True, now1)
+# Run 2 same day (13:30): 2 more NEW at 12, 13. Union of 4 > cap 3 → partition:
+# keep oldest 3 (10,11,12), defer 13, advance cursor to 12:00 (> run1 cursor).
+now2 = datetime(2026, 7, 12, 13, 30, tzinfo=timezone.utc)
+ktp.finalize_run(hub, "2026-07-12", [sender(3,12), sender(4,13)], True, now2)
 data = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
-assert len(data["senders"]) == 500, len(data["senders"])
-assert data["truncated"] is True, "overflowed merge must flag truncated"
-wm2 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
-assert wm2 == "2026-07-12T21:00:00Z", f"overflow merge must HOLD watermark, got {wm2}"
+kept = sorted(s["user_id"] for s in data["senders"])
+assert kept == [1, 2, 3], f"kept oldest 3 of the union: {kept}"
+assert data["truncated"] is True
+wm = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+assert wm == "2026-07-12T12:00:00Z", f"cursor at newest kept (12:00), deferred #4@13:00 re-covers: {wm}"
 print("T11B_PASS")
 PYEOF
-[[ $? -eq 0 ]] && ok "T11b: merge past the sender cap flags truncated and holds the watermark" || fail "T11b: silent merge overflow"
+[[ $? -eq 0 ]] && ok "T11b: over-cap same-day merge partitions by time (keeps oldest, defers newest), loses nobody" || fail "T11b: merge overflow drops people"
 
 # ---------------------------------------------------------------------------
 # T12: a sender WITHOUT a username still has a stable identity — the reader
