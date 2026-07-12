@@ -13,6 +13,19 @@
 set -euo pipefail
 
 HUB="${KB_HUB:-$HOME/knowledge}"
+# The python module lives next to THIS script (the hub bin/ on real
+# installs); the hub may be a fixture sandbox without its own bin/.
+BIN_DIR="${0:A:h}"
 export KB_ENTITY_ROLLUP=1
-exec python3 "$HUB/bin/kb_entity_apply.py" apply \
-  --hub "$HUB" --categories companies,assets "$@"
+# A caller-supplied --categories must never widen the scope: argparse takes
+# the LAST duplicate option, so the enforced value goes AFTER "$@" — and a
+# forwarded --categories is rejected outright for clarity.
+for arg in "$@"; do
+  if [[ "$arg" == "--categories" || "$arg" == --categories=* ]]; then
+    echo "kb-entity-rollup: the category scope is fixed to companies,assets" \
+         "(person events go through the People Notebook staging layer)." >&2
+    exit 2
+  fi
+done
+exec python3 "$BIN_DIR/kb_entity_apply.py" apply \
+  --hub "$HUB" "$@" --categories companies,assets

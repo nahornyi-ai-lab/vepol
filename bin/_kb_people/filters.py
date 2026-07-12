@@ -78,9 +78,10 @@ _ROLE_LOCAL_PART_RE = re.compile(
 
 
 def is_reserved_example_email(email: str) -> bool:
-    """True when the address lives on an RFC-reserved example domain
-    (example.com/org/net incl. subdomains) or a reserved TLD
-    (.test/.example/.invalid/.localhost)."""
+    """True when the address lives on an RFC-reserved documentation
+    domain (example.com/org/net incl. subdomains) or a filtered
+    reserved TLD (.invalid/.localhost). The .test/.example TLDs are
+    deliberately NOT filtered — see the comment above."""
     addr = (email or "").strip().lower()
     if "@" not in addr:
         return False

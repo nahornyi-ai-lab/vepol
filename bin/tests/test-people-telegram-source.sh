@@ -193,7 +193,7 @@ names = [k["name"] for k in kept]
 assert names == ["Jane Doe", "NoHandle Person"], names
 assert dropped == 4, f"expected 4 dropped, got {dropped}"
 assert kept[0]["telegram"] == "@janedoe" and kept[0]["phone"] == "+34600111222"
-assert kept[1]["telegram"] == ""
+assert kept[1]["telegram"] == "id:6", kept[1]  # stable no-username locator
 print("T3_PASS")
 PYEOF
 [[ $? -eq 0 ]] && ok "T3: filters drop bots + system/personal blocklists, keep + normalize people" || fail "T3: sender filters"
@@ -338,6 +338,133 @@ if ! ls "$HUB9/people/"*.staged.md >/dev/null 2>&1; then
 else
   fail "T9b: unavailable envelope produced staging"
 fi
+
+# ---------------------------------------------------------------------------
+# T10: a TRUNCATED collection must NOT advance the watermark — dialogs or
+# messages beyond the caps (or cut off by a flood-wait) would otherwise be
+# lost forever behind a watermark that claims they were covered.
+# ---------------------------------------------------------------------------
+HUB10="$TMPDIR_TEST/hub-t10"; make_hub "$HUB10"
+$PY - "$HUB10" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+from datetime import datetime, timezone
+hub = Path(sys.argv[1])
+now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
+
+def env(truncated, senders=None):
+    return {"schema": ktp.ts.SCHEMA, "date": "2026-07-12", "period": "daily",
+            "generated_at": "2026-07-12T21:00:00Z", "available": True,
+            "truncated": truncated, "senders": senders or []}
+
+ktp.finalize_run(hub, env(True), now)
+assert not ktp.watermark_path(hub).exists(), "truncated run advanced the watermark"
+ktp.finalize_run(hub, env(False), now)
+wm = json.loads(ktp.watermark_path(hub).read_text())
+assert wm["last_run_utc"] == "2026-07-12T21:00:00Z", wm
+print("T10_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T10: truncated collection never advances the watermark; complete one does" || fail "T10: truncated watermark advance"
+
+# ---------------------------------------------------------------------------
+# T11: a same-day re-collection must MERGE with an existing UNPROCESSED
+# envelope (collector succeeded, extract didn't run yet, retry would
+# otherwise overwrite sender A with sender B); an already-consumed envelope
+# is replaced with the fresh window.
+# ---------------------------------------------------------------------------
+HUB11="$TMPDIR_TEST/hub-t11"; make_hub "$HUB11"
+$PY - "$HUB11" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+ts = ktp.ts
+from datetime import datetime, timezone
+hub = Path(sys.argv[1])
+now = datetime(2026, 7, 12, 21, 0, tzinfo=timezone.utc)
+
+def sender(uid, name, count=1, username=""):
+    return {"name": name, "username": username, "user_id": uid, "phone": "",
+            "chat_type": "private", "first_ts": "t1", "last_ts": "t2",
+            "count": count}
+
+def env(senders):
+    return {"schema": ts.SCHEMA, "date": "2026-07-12", "period": "daily",
+            "generated_at": "2026-07-12T21:00:00Z", "available": True,
+            "truncated": False, "senders": senders}
+
+# Run 1: sender A. NOT consumed by extract.
+ktp.finalize_run(hub, env([sender(1, "Alice A", count=2)]), now)
+# Run 2 same day: sender B only (window moved on) → must carry A too.
+ktp.finalize_run(hub, env([sender(2, "Bob B")]), now)
+data = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+ids = sorted(s["user_id"] for s in data["senders"])
+assert ids == [1, 2], f"unprocessed identities lost on same-day rewrite: {ids}"
+assert ts.validate_envelope(data), "merged envelope must stay valid"
+
+# Consume it, then a fresh same-day run replaces (no merge with consumed rows).
+key = ts.envelope_key(data)
+sha = ts.file_sha256(ts.envelopes_dir(hub) / "2026-07-12-daily.json")
+ts.mark_processed(hub, key, sha)
+ktp.finalize_run(hub, env([sender(3, "Cara C")]), now)
+data2 = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+ids2 = sorted(s["user_id"] for s in data2["senders"])
+assert ids2 == [3], f"consumed rows must not be re-merged: {ids2}"
+print("T11_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T11: same-day re-collection merges unprocessed identities, replaces consumed ones" || fail "T11: same-day envelope overwrite loses identities"
+
+# ---------------------------------------------------------------------------
+# T12: a sender WITHOUT a username still has a stable identity — the reader
+# derives an `id:<user_id>` locator so the same person never mints a second
+# suffixed staged card on the next envelope.
+# ---------------------------------------------------------------------------
+HUB12="$TMPDIR_TEST/hub-t12"; make_hub "$HUB12"
+NO_HANDLE='{"name": "No Handle", "username": "", "user_id": 777, "phone": "",
+  "chat_type": "private", "first_ts": "t", "last_ts": "t", "count": 1}'
+write_envelope "$HUB12" 2026-07-11 "[$NO_HANDLE]"
+run_extract "$HUB12"
+write_envelope "$HUB12" 2026-07-12 "[$NO_HANDLE]"
+run_extract "$HUB12"
+N12=$(ls "$HUB12/people/"no-handle*.staged.md 2>/dev/null | wc -l | tr -d ' ')
+LOC12=$(grep -h "^telegram:" "$HUB12/people/"no-handle*.staged.md 2>/dev/null | head -1)
+if [[ "$N12" == "1" && "$LOC12" == *"id:777"* ]]; then
+  ok "T12: name-only telegram sender stays ONE staged card across envelopes (id:<user_id> locator)"
+else
+  fail "T12: name-only sender duplicated or locator missing (cards=$N12 loc=$LOC12)"
+fi
+
+# ---------------------------------------------------------------------------
+# T13: the collector session file and its directory are secured BEFORE any
+# client work — 0700 dir, 0600 session — so a fresh --login can never leave
+# the Telegram auth key world-readable under a permissive umask.
+# ---------------------------------------------------------------------------
+HUB13="$TMPDIR_TEST/hub-t13"; make_hub "$HUB13"
+PERMS=$(umask 022; $PY - "$HUB13" <<'PYEOF'
+import os, sys, stat
+from pathlib import Path
+sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+hub = Path(sys.argv[1])
+sess = ktp.session_path(hub)
+ktp._ensure_session_security(sess)
+d = stat.S_IMODE(os.stat(sess.parent).st_mode)
+f = stat.S_IMODE(os.stat(sess).st_mode)
+print(f"{oct(d)}/{oct(f)}")
+PYEOF
+)
+[[ "$PERMS" == "0o700/0o600" ]] && ok "T13: session dir 0700 + session file 0600 pre-created before login" || fail "T13: session perms $PERMS"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

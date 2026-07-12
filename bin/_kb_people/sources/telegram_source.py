@@ -231,9 +231,16 @@ class TelegramSource(ContactSource):
                              or username in personal):
                 dropped += 1
                 continue
+            # A sender without a username still has a STABLE identity —
+            # the numeric Telegram user_id. Derive an `id:<user_id>`
+            # locator (real handles cannot contain ":") so the same
+            # person matches their own staged card / live locator on
+            # every future envelope instead of minting suffixed
+            # duplicates.
             kept.append({
                 "name": name,
-                "telegram": f"@{username}" if username else "",
+                "telegram": (f"@{username}" if username
+                             else f"id:{s['user_id']}"),
                 "user_id": s["user_id"],
                 "phone": (s.get("phone") or "").strip(),
                 "chat_type": s.get("chat_type", "private"),

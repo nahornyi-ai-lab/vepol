@@ -95,6 +95,21 @@ def session_path(hub: Path) -> Path:
     return hub / "personal" / "telegram" / ".people-collector.session"
 
 
+def _ensure_session_security(sess: Path) -> None:
+    """Secure the session file and its directory BEFORE any client work.
+
+    Telethon/SQLite creates a missing session file under the process
+    umask (typically 0644) — that would expose the Telegram auth key to
+    other local users after a fresh --login. Pre-create the file 0600
+    and pin the directory to 0700; SQLite happily initializes an empty
+    pre-created file."""
+    sess.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(sess.parent, 0o700)
+    if not sess.exists():
+        sess.touch()
+    os.chmod(sess, 0o600)
+
+
 def _bootstrap_session(dest: Path, quiet: bool) -> bool:
     """Snapshot-clone the authorized legacy session into `dest`.
 
@@ -181,6 +196,60 @@ def _good_envelope_exists(hub: Path, day: str) -> bool:
     except Exception:
         return False
     return ts.validate_envelope(env) and env.get("available") is True
+
+
+def _merge_senders(old: list, new: list) -> list:
+    """Union two sender lists by user_id. Prefer non-empty identity
+    fields, keep the max count (windows may overlap — counts are
+    display-only), widen the ts span."""
+    by_id = {s["user_id"]: dict(s) for s in old}
+    for s in new:
+        cur = by_id.get(s["user_id"])
+        if cur is None:
+            by_id[s["user_id"]] = dict(s)
+            continue
+        for k in ("name", "username", "phone"):
+            if not cur.get(k) and s.get(k):
+                cur[k] = s[k]
+        cur["count"] = max(cur.get("count", 1), s.get("count", 1))
+        cur["first_ts"] = min(cur.get("first_ts", ""), s.get("first_ts", "")) or s.get("first_ts", "")
+        cur["last_ts"] = max(cur.get("last_ts", ""), s.get("last_ts", ""))
+    merged = sorted(by_id.values(), key=lambda s: (-s["count"], s["user_id"]))
+    return merged[:500]
+
+
+def finalize_run(hub: Path, env: dict, now: datetime) -> Path | None:
+    """Persist a collection result: merge with an existing UNPROCESSED
+    same-day envelope (a same-day retry must never overwrite identities
+    the extractor has not consumed yet), write atomically, and advance
+    the watermark ONLY for a complete (non-truncated) window — dialogs
+    or messages beyond the caps would otherwise be lost forever behind
+    a watermark that claims they were covered."""
+    day = env["date"]
+    path = ts.envelopes_dir(hub) / f"{day}-daily.json"
+    try:
+        prev = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        prev = None
+    if (prev is not None and ts.validate_envelope(prev)
+            and prev.get("senders")):
+        consumed = (ts.read_processed(hub).get("processed", {})
+                    .get(ts.envelope_key(prev)) == ts.file_sha256(path))
+        if not consumed:
+            env = dict(env)
+            env["senders"] = _merge_senders(prev["senders"], env["senders"])
+            env["truncated"] = bool(env["truncated"] or prev.get("truncated"))
+    if not ts.validate_envelope(env):
+        _warn("built an envelope that fails its own validator — "
+              "refusing to write senders")
+        return None
+    out = _write_envelope(hub, env)
+    if env.get("truncated"):
+        _warn("window truncated — watermark NOT advanced; the next run "
+              "re-covers the remainder")
+    else:
+        advance_watermark(hub, now)
+    return out
 
 
 def _fail(hub: Path, day: str, now: datetime, reason: str) -> int:
@@ -340,7 +409,10 @@ def main() -> int:
     api_id, api_hash = creds
 
     sess = session_path(hub)
-    if not sess.exists() and not args.login:
+    # A 0-byte file is a pre-created security placeholder from an aborted
+    # --login, not an authorized session — still eligible for bootstrap.
+    sess_missing = (not sess.exists()) or sess.stat().st_size == 0
+    if sess_missing and not args.login:
         if not _bootstrap_session(sess, args.quiet):
             return _fail(hub, day, now,
                          "no collector session and no bootstrap source; "
@@ -357,7 +429,7 @@ def main() -> int:
     _say(f"window since {since.strftime(_TS_FMT)}", args.quiet)
 
     try:
-        sess.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_session_security(sess)
         with TelegramClient(str(sess), api_id, api_hash,
                             receive_updates=False) as client:
             if args.login:
@@ -382,12 +454,10 @@ def main() -> int:
         "available": True, "truncated": bool(truncated),
         "senders": senders,
     }
-    if not ts.validate_envelope(env):
+    path = finalize_run(hub, env, now)
+    if path is None:
         return _fail(hub, day, now,
-                     "built an envelope that fails its own validator — "
-                     "refusing to write senders")
-    path = _write_envelope(hub, env)
-    advance_watermark(hub, now)
+                     "envelope failed validation — nothing written")
     _say(f"envelope written: {path}", args.quiet)
     return 0
 
