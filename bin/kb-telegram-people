@@ -354,11 +354,20 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
                 _warn(f"dialog scan exceeded {scan_max} — holding cursor")
                 truncated = True
                 break
-            if getattr(dialog, "pinned", False):
-                continue  # pinned float to the top regardless of age
+            pinned = getattr(dialog, "pinned", False)
             act = dialog.date.astimezone(timezone.utc) if dialog.date else None
             if act is None or act <= since:
-                break  # non-pinned are newest-first → the rest are older
+                # No in-window activity. A pinned dialog floats to the top
+                # regardless of age, so an old pinned one is NOT the end of
+                # the window — skip it but keep scanning. A non-pinned old
+                # dialog IS the boundary: the rest are older → stop.
+                if pinned:
+                    continue
+                break
+            # act > since: this dialog HAS in-window activity — cover it,
+            # pinned or not (dialog.date is the last-message time, so a
+            # pinned dialog with a fresh incoming message has act > since
+            # and must be walked, not dropped).
             entity = dialog.entity
             if isinstance(entity, User):
                 if entity.bot or entity.is_self or entity.deleted:

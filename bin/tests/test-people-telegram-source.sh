@@ -433,25 +433,29 @@ class FakeClient:
     def iter_messages(self, entity):
         return iter(self._msgs.get(entity.id, []))
 
-uP, uA, uB = _User(9, "Pinned Old"), _User(1, "A"), _User(2, "B")
-# Stream: a PINNED old dialog first (must be covered, not treated as end),
-# then newest-first non-pinned A@14, B@10, then an OLD non-pinned @6 (stop).
-uOld = _User(3, "Old")
+uPfresh, uPstale = _User(8, "Pinned Fresh"), _User(9, "Pinned Stale")
+uA, uB, uOld = _User(1, "A"), _User(2, "B"), _User(3, "Old")
+# Stream (Telethon order): pinned dialogs first (ANY age), then non-pinned
+# newest-first. A pinned dialog with a FRESH in-window message must be
+# covered; a pinned dialog with only OLD activity is skipped without
+# stopping the scan; the scan stops at the first OLD non-pinned dialog.
 dialogs = [
-    _Dialog(uP, dt(2), pinned=True),   # old but pinned → skip, don't stop
+    _Dialog(uPfresh, dt(16), pinned=True),  # fresh pinned → COVER
+    _Dialog(uPstale, dt(3), pinned=True),   # stale pinned → skip, don't stop
     _Dialog(uA, dt(14)),
     _Dialog(uB, dt(10)),
-    _Dialog(uOld, dt(6)),              # older than since(8) → STOP here
+    _Dialog(uOld, dt(6)),                   # old non-pinned → STOP here
     _Dialog(_User(4, "NeverSeen"), dt(5)),
 ]
-msgs = {1: [_Msg(uA, dt(14))], 2: [_Msg(uB, dt(10))], 3: [_Msg(uOld, dt(6))],
+msgs = {8: [_Msg(uPfresh, dt(16))], 9: [_Msg(uPstale, dt(3))],
+        1: [_Msg(uA, dt(14))], 2: [_Msg(uB, dt(10))], 3: [_Msg(uOld, dt(6))],
         4: [_Msg(_User(4, "NeverSeen"), dt(5))]}
 client = FakeClient(dialogs, msgs)
 senders, truncated, nwm = ktp.collect(client, me_id=999, since=dt(8), now=dt(21),
     include_groups=False, scan_max=5000, msg_guard=5000, quiet=True)
 ids = sorted(s["user_id"] for s in senders)
 assert truncated is False, "clean run"
-assert ids == [1, 2], f"covers non-pinned A,B in window; stops before Old/NeverSeen: {ids}"
+assert ids == [1, 2, 8], f"covers fresh-pinned + non-pinned A,B; skips stale-pinned + stops before Old/NeverSeen: {ids}"
 assert nwm == dt(21) - timedelta(seconds=1), f"clean → now-1s: {nwm}"
 
 # FloodWait mid-scan → HOLD (next_watermark None).
