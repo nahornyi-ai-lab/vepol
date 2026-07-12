@@ -658,6 +658,58 @@ PYEOF
 [[ $? -eq 0 ]] && ok "T11b: over-cap same-day merge partitions by time (keeps oldest, defers newest), loses nobody" || fail "T11b: merge overflow drops people"
 
 # ---------------------------------------------------------------------------
+# T15 (R6 counterexample): an INCOMPLETE run-2 that merges an unprocessed
+# run-1 envelope must NEVER evict run-1 senders from the write — they sit
+# at/behind the advanced cursor, so the envelope is the ONLY place they
+# exist; a count-based eviction loses them permanently even under HOLD.
+# Run-2's own senders may be squeezed out: they are after the held cursor
+# and re-cover next run.
+# ---------------------------------------------------------------------------
+HUB15="$TMPDIR_TEST/hub-t15"; make_hub "$HUB15"
+$PY - "$HUB15" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import os; sys.path.insert(0, os.environ.get("SRC_BIN") or str(Path.home() / "knowledge" / "bin"))
+import importlib.util
+from importlib.machinery import SourceFileLoader
+_l = SourceFileLoader("ktp", (os.environ.get("SRC_BIN") or str(Path.home()/"knowledge"/"bin")) + "/kb-telegram-people")
+ktp = importlib.util.module_from_spec(importlib.util.spec_from_loader("ktp", _l)); _l.exec_module(ktp)
+ts = ktp.ts
+from datetime import datetime, timezone
+hub = Path(sys.argv[1])
+ktp._MAX_SENDERS = 3; ts._MAX_SENDERS = 3
+
+def sender(uid, hour, count=1):
+    t = f"2026-07-12T{hour:02d}:00:00Z"
+    return {"name": f"P{uid}", "username": "", "user_id": uid, "phone": "",
+            "chat_type": "private", "first_ts": t, "last_ts": t, "count": count}
+
+# Run 1 COMPLETE: 3 senders @10,11,12 (count=1 each) → cursor 12:29:59,
+# envelope [1,2,3] left UNPROCESSED (extract never ran).
+now1 = datetime(2026, 7, 12, 12, 30, tzinfo=timezone.utc)
+ktp.finalize_run(hub, "2026-07-12", [sender(1,10), sender(2,11), sender(3,12)], True, now1)
+wm1 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+# Run 2 INCOMPLETE (FloodWait): 3 NEW high-count senders @13,14,15 — a
+# count-based write would evict the low-count run-1 rows behind the cursor.
+now2 = datetime(2026, 7, 12, 15, 30, tzinfo=timezone.utc)
+ktp.finalize_run(hub, "2026-07-12",
+                 [sender(4,13,9), sender(5,14,9), sender(6,15,9)], False, now2)
+env = json.loads((ts.envelopes_dir(hub) / "2026-07-12-daily.json").read_text())
+kept = sorted(s["user_id"] for s in env["senders"])
+assert 1 in kept and 2 in kept and 3 in kept, \
+    f"run-1 senders behind the cursor evicted (permanent loss): {kept}"
+assert env["truncated"] is True
+wm2 = json.loads(ktp.watermark_path(hub).read_text())["last_run_utc"]
+assert wm2 == wm1, f"incomplete run must hold the cursor: {wm2} != {wm1}"
+# The squeezed-out run-2 senders are all newer than the held cursor → re-coverable.
+for uid, h in [(4,13),(5,14),(6,15)]:
+    if uid not in kept:
+        assert f"2026-07-12T{h:02d}:00:00Z" > wm2, f"evicted #{uid} not re-coverable"
+print("T15_PASS")
+PYEOF
+[[ $? -eq 0 ]] && ok "T15: incomplete merge never evicts behind-cursor senders (prev is sacred; new re-covers)" || fail "T15: R6 eviction counterexample"
+
+# ---------------------------------------------------------------------------
 # T12: a sender WITHOUT a username still has a stable identity — the reader
 # derives an `id:<user_id>` locator so the same person never mints a second
 # suffixed staged card on the next envelope.

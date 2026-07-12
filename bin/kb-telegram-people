@@ -287,6 +287,7 @@ def finalize_run(hub: Path, day: str, senders: list, complete: bool,
     - Otherwise advance to `now - 1s`.
     """
     path = ts.envelopes_dir(hub) / f"{day}-daily.json"
+    prev_rows: list = []
     try:
         prev = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -296,12 +297,24 @@ def finalize_run(hub: Path, day: str, senders: list, complete: bool,
         consumed = (ts.read_processed(hub).get("processed", {})
                     .get(ts.envelope_key(prev)) == ts.file_sha256(path))
         if not consumed:
-            senders = _merge_senders(prev["senders"], senders)
+            prev_rows = prev["senders"]
+            senders = _merge_senders(prev_rows, senders)
             complete = complete and not prev.get("truncated")
 
     advance: datetime | None
     if not complete:
-        write_senders = _by_count(senders)[:_MAX_SENDERS]
+        # Behind-cursor rows are SACRED here: merged-in prev senders may
+        # sit at/behind the already-advanced cursor, so this envelope is
+        # the only place they exist — a count-based eviction would lose
+        # them permanently even under HOLD (R6 counterexample). prev fits
+        # the cap by validator construction; fill the remainder with this
+        # run's senders by count — any squeezed out are after the held
+        # cursor and re-cover next run.
+        prev_ids = {s["user_id"] for s in prev_rows}
+        protected = [s for s in senders if s["user_id"] in prev_ids]
+        fresh = _by_count([s for s in senders if s["user_id"] not in prev_ids])
+        room = max(0, _MAX_SENDERS - len(protected))
+        write_senders = _by_count(protected + fresh[:room])
         truncated, advance = True, None
     elif len(senders) > _MAX_SENDERS:
         write_senders, boundary = _partition_by_time(senders, _MAX_SENDERS)
