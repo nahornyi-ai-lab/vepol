@@ -322,13 +322,15 @@ def collect(client, me_id: int, since: datetime, now: datetime, *,
     (senders, truncated, next_watermark_or_None).
 
     Completeness by construction, not by a cursor trick: `iter_dialogs`
-    yields PINNED dialogs first, then the rest strictly newest-first, so
-    we skip pinned dialogs (their date is unreliable as an end marker)
-    and STOP at the first non-pinned dialog older than `since` — every
-    dialog with activity in the window is therefore visited, with no
-    fixed dialog cap to silently exclude the tail. Each eligible dialog's
-    messages are walked newest-first and stopped at `since`, with no
-    message cap in the normal path.
+    yields PINNED dialogs first, then the rest strictly newest-first. A
+    pinned dialog with in-window activity (date > since) is COVERED like
+    any other; a stale pinned dialog is skipped WITHOUT ending the scan
+    (its top-of-list position is not an age signal); the scan STOPS at
+    the first non-pinned dialog older than `since`. Every dialog with
+    activity in the window is therefore visited, with no fixed dialog cap
+    to silently exclude the tail. Each eligible dialog's messages are
+    walked newest-first and stopped at `since`, with no message cap in
+    the normal path.
 
     Truncation is a LOUD, rare signal (a FloodWait, or a runaway guard
     hit), NOT a silent partial cover: on truncation we return
