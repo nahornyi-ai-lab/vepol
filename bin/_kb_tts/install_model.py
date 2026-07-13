@@ -9,10 +9,10 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
-MODEL_REVISION = "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"
+MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
+MODEL_REVISION = "7d3824abff87e49756bb0f83fb5411de75d160c4"
 EXPECTED = {
-    "model.safetensors": "1a84179d87c972353ccdd9b48f3c4422509b3d1b11030d32358312fb0f3800d7",
+    "model.safetensors": "96ae28bec2205ec0b5e0c750bea2b8a5deac4f14d33a8a25a5f753299486b70e",
     "speech_tokenizer/model.safetensors": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
 }
 

@@ -15,8 +15,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
-MODEL_REVISION = "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"
+MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
+MODEL_REVISION = "7d3824abff87e49756bb0f83fb5411de75d160c4"
 PYTHON_VERSION = "3.12.9"
 MLX_AUDIO_VERSION = "0.4.5"
 DEFAULT_INSTRUCT = (

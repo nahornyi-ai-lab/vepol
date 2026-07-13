@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Acceptance tests for decisions/on-demand-qwen3-tts-2026-07-10.md
-# Contract: spec:sha256:23803651a7a6d8926df78c72b2a65ff998b2b3aadc3fb7db864abc798330d48d
+# Acceptance tests for the approved BF16 migration addendum.
+# Contract: spec-contract:sha256:9a2a772620f31df501c3e5b3fd0e8b487d91a3fb12b1a21ab7c89323e7e6da4a
 
 set -uo pipefail
 
@@ -38,8 +38,8 @@ cat >"$HOME_DIR/install.json" <<EOF
   "schema": 1,
   "python_version": "3.12.9",
   "mlx_audio_version": "0.4.5",
-  "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
-  "model_revision": "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee",
+  "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+  "model_revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
   "model_path": "$MODEL_DIR"
 }
 EOF
@@ -121,9 +121,149 @@ if [[ -x "$INSTALL" ]]; then
   DRY=$(KB_TTS_HOME="$TMP/install-dry" "$INSTALL" --dry-run 2>&1 || true)
   [[ "$DRY" == *"CPython 3.12.9"* ]] && ok "installer pins CPython 3.12.9" || bad "installer dry-run misses CPython pin"
   [[ "$DRY" == *"mlx-audio==0.4.5"* ]] && ok "installer pins mlx-audio 0.4.5" || bad "installer dry-run misses mlx-audio pin"
-  [[ "$DRY" == *"f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"* ]] && ok "installer pins model revision" || bad "installer dry-run misses model revision"
-  [[ "$DRY" == *"1a84179d87c972353ccdd9b48f3c4422509b3d1b11030d32358312fb0f3800d7"* ]] && ok "installer records main weight hash" || bad "installer misses main weight hash"
+  [[ "$DRY" == *"mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"* ]] && ok "installer pins BF16 model ID" || bad "installer dry-run misses BF16 model ID"
+  [[ "$DRY" == *"7d3824abff87e49756bb0f83fb5411de75d160c4"* ]] && ok "installer pins model revision" || bad "installer dry-run misses model revision"
+  [[ "$DRY" == *"96ae28bec2205ec0b5e0c750bea2b8a5deac4f14d33a8a25a5f753299486b70e"* ]] && ok "installer records main weight hash" || bad "installer misses main weight hash"
   [[ "$DRY" == *"836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"* ]] && ok "installer records tokenizer weight hash" || bad "installer misses tokenizer weight hash"
+  [[ "$DRY" == *"immutable verified release"* && "$DRY" == *"atomic install.json"* ]] && ok "installer declares immutable atomic promotion" || bad "installer dry-run misses immutable atomic promotion"
+
+  if python3 - "$INSTALL" "$TMP/transaction" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+ns = runpy.run_path(sys.argv[1], run_name="kb_tts_install_test")
+promote = ns["promote_verified_release"]
+lock = ns["installation_lock"]
+root = Path(sys.argv[2])
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+main = b"fake-bf16-main"
+tokenizer = b"fake-tokenizer"
+expected = {
+    "model.safetensors": digest(main),
+    "speech_tokenizer/model.safetensors": digest(tokenizer),
+}
+
+def stage(home, name=".stage-test"):
+    path = home / "models" / name
+    (path / "speech_tokenizer").mkdir(parents=True)
+    (path / "model.safetensors").write_bytes(main)
+    (path / "speech_tokenizer/model.safetensors").write_bytes(tokenizer)
+    return path
+
+def payload():
+    return {
+        "schema": 1,
+        "python_version": "3.12.9",
+        "mlx_audio_version": "0.4.5",
+        "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        "model_revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
+    }
+
+# Fresh success.
+home = root / "fresh"
+final = promote(home, stage(home), "bf16-test", payload(), expected=expected)
+assert final.is_dir()
+assert json.loads((home / "install.json").read_text())["model_path"] == str(final.resolve())
+
+# Upgrade success preserves the old model directory.
+home = root / "upgrade"
+old = home / "model"
+old.mkdir(parents=True)
+(old / "sentinel").write_text("old-8bit")
+old_marker = b'{"model_id":"old-8bit","model_path":"old"}\n'
+(home / "install.json").write_bytes(old_marker)
+final = promote(home, stage(home), "bf16-test", payload(), expected=expected)
+assert (old / "sentinel").read_text() == "old-8bit"
+assert json.loads((home / "install.json").read_text())["model_path"] == str(final.resolve())
+assert (home / "rollback" / "install-before-bf16-test.json").read_bytes() == old_marker
+
+# Missing/invalid staged files and an invalid final collision preserve marker bytes.
+for case in ("missing-main", "bad-main", "bad-tokenizer"):
+    home = root / case
+    home.mkdir(parents=True)
+    marker = home / "install.json"
+    marker.write_bytes(b"old-marker\n")
+    before = marker.read_bytes()
+    candidate = stage(home)
+    if case == "missing-main":
+        (candidate / "model.safetensors").unlink()
+    elif case == "bad-main":
+        (candidate / "model.safetensors").write_bytes(b"wrong")
+    else:
+        (candidate / "speech_tokenizer/model.safetensors").write_bytes(b"wrong")
+    try:
+        promote(home, candidate, "bf16-test", payload(), expected=expected)
+    except (RuntimeError, SystemExit):
+        pass
+    else:
+        raise AssertionError(case)
+    assert marker.read_bytes() == before
+
+home = root / "collision"
+home.mkdir(parents=True)
+marker = home / "install.json"
+marker.write_bytes(b"old-marker\n")
+before = marker.read_bytes()
+bad_final = home / "models" / "bf16-test"
+bad_final.mkdir(parents=True)
+(bad_final / "model.safetensors").write_bytes(b"wrong")
+try:
+    promote(home, stage(home), "bf16-test", payload(), expected=expected)
+except (RuntimeError, SystemExit):
+    pass
+else:
+    raise AssertionError("invalid final collision")
+assert marker.read_bytes() == before
+
+# Marker-write failure leaves the prior marker byte-identical; retry reuses the verified release.
+home = root / "marker-failure"
+home.mkdir(parents=True)
+marker = home / "install.json"
+marker.write_bytes(b"old-marker\n")
+before = marker.read_bytes()
+real_replace = os.replace
+def fail_marker(src, dst):
+    if Path(dst).name == "install.json":
+        raise OSError("simulated marker failure")
+    return real_replace(src, dst)
+try:
+    promote(home, stage(home), "bf16-test", payload(), expected=expected, replace_fn=fail_marker)
+except OSError:
+    pass
+else:
+    raise AssertionError("marker failure")
+assert marker.read_bytes() == before
+final = promote(home, None, "bf16-test", payload(), expected=expected)
+assert json.loads(marker.read_text())["model_path"] == str(final.resolve())
+
+# A second non-blocking lock acquisition is rejected without marker mutation.
+home = root / "lock"
+home.mkdir(parents=True)
+marker = home / "install.json"
+marker.write_bytes(b"old-marker\n")
+with lock(home / "install.lock"):
+    try:
+        with lock(home / "install.lock"):
+            pass
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("concurrent lock accepted")
+assert marker.read_bytes() == b"old-marker\n"
+PY
+  then
+    ok "immutable release transaction preserves rollback across failures and lock contention"
+  else
+    bad "immutable release transaction contract failed"
+  fi
 else
   bad "installer dry-run contract unavailable"
 fi
@@ -133,6 +273,22 @@ if [[ -x "$RENDER" ]]; then
   expect_fail "renderer rejects both inputs" run_render --text x --file "$TMP/x.txt" --out "$TMP/both.wav"
   expect_fail "renderer rejects empty text" run_render --text "" --out "$TMP/empty.wav"
   expect_fail "renderer rejects unsupported extension" run_render --text x --out "$TMP/audio.ogg"
+
+  cp "$HOME_DIR/install.json" "$TMP/install-bf16.json"
+  OLD_MODEL_ID="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-"$'8bit'
+  OLD_MODEL_REVISION="f90d617701d9f7f4ca499291e0b57f2b3c2"$'fd2ee'
+  cat >"$HOME_DIR/install.json" <<EOF
+{
+  "schema": 1,
+  "python_version": "3.12.9",
+  "mlx_audio_version": "0.4.5",
+  "model_id": "$OLD_MODEL_ID",
+  "model_revision": "$OLD_MODEL_REVISION",
+  "model_path": "$MODEL_DIR"
+}
+EOF
+  expect_fail "renderer rejects superseded 8-bit marker before worker" run_render --text x --out "$TMP/old-marker.wav"
+  mv "$TMP/install-bf16.json" "$HOME_DIR/install.json"
 
   TEXT='Сегодня 10 июля. Qwen должен прочитать этот текст буквально: Gmail, MLX и 3 500 рублей.'
   CAPTURE="$TMP/capture.json"
@@ -144,8 +300,8 @@ import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["text"] == sys.argv[2]
 assert d["language"] == "Russian"
-assert d["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
-assert d["model_revision"] == "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"
+assert d["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
+assert d["model_revision"] == "7d3824abff87e49756bb0f83fb5411de75d160c4"
 assert d["offline_env"] == {
     "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
 PY
