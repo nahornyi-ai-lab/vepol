@@ -14,7 +14,28 @@ upgrading.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-14
+
+### Added
+- **People Notebook — review-gated relationship memory.** Vepol proposes contact
+  cards from four sources it already sees — project logs, the mail people-
+  envelope, private Telegram dialogs (read-only, on your own account), and
+  calendar attendees. Every genuinely new person waits in a Telegram review
+  queue for one-tap keep/skip; nothing about a new person is written without
+  your approval. A known contact gets only a content-free sighting, never new
+  prose. The Telegram collector never sends, edits, or joins, and carries no
+  message text into the notebook by schema; API keys and session state stay in
+  local secrets, not the repository. Optional enrichment runs through your
+  configured Codex CLI. Company/asset roll-up from sightings is scoped and stays
+  disabled until the orchestration cycle is re-enabled.
+
 ### Changed
+- **Local Qwen TTS moves to the BF16 model snapshot.** The on-demand renderer
+  re-pins from the 8-bit build to the BF16 Qwen3-TTS VoiceDesign snapshot for
+  cleaner speech. The installer gains a non-blocking install lock, verified
+  immutable release directories, atomic `install.json` promotion, and byte-exact
+  preservation of any prior install marker. No weights or credentials ship in
+  the repository; the model loads for one render and exits.
 - **Daily and retro audio now use local Qwen TTS and Telegram MP3 files.**
   `kb-morning-digest` keeps its existing morning synthesis and trusted evening
   Retro source, converts only the finalized body to speech text, renders it
