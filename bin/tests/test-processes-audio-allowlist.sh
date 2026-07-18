@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scheduler audio allowlist + runtime guard (selectable digest audio delivery):
+# Scheduler audio flags + runtime guard:
 # scheduled `telegram_audio` or `notebooklm_audio` passes ONLY for the digest processes with their
 # EXACT run commands (id+command binding — same ids with a different run are
 # rejected; any other id stays fail-closed), DEFAULT_PROCESSES_YAML wires both
@@ -105,9 +105,38 @@ EOF
   enabled: true
   when: after:learning
   run: kb-morning-digest
-  outputs: [file, notebooklm_audio, telegram_audio]
+  outputs: {file: true, telegram_audio: true, notebooklm_audio: true}
 EOF
-} | check_yaml invalid "managed digest cannot select both audio routes"
+} | check_yaml valid "managed digest accepts independent true channel flags"
+
+python3 - "$SRC_BIN" <<'PY' && ok "AC4: boolean output map keeps only true channels" \
+                            || fail "AC4: boolean output map parsing failed"
+import sys
+sys.path.insert(0, sys.argv[1])
+from _kb_processes import parse_processes_text
+
+base = """\
+- id: morning-digest
+  enabled: true
+  when: on-demand
+  run: kb-morning-digest
+  outputs: {file: true, telegram_audio: %s, notebooklm_audio: %s}
+"""
+assert parse_processes_text(base % ("true", "false"))[0]["outputs"] == ["file", "telegram_audio"]
+assert parse_processes_text(base % ("false", "true"))[0]["outputs"] == ["file", "notebooklm_audio"]
+assert parse_processes_text(base % ("true", "true"))[0]["outputs"] == ["file", "telegram_audio", "notebooklm_audio"]
+assert parse_processes_text(base % ("false", "false"))[0]["outputs"] == ["file"]
+PY
+
+{ base_procs; cat <<'EOF'
+
+- id: morning-digest
+  enabled: true
+  when: after:learning
+  run: kb-morning-digest
+  outputs: {file: true, telegram_audo: false, notebooklm_audio: true}
+EOF
+} | check_yaml invalid "unknown false channel is rejected"
 
 { base_procs; cat <<'EOF'
 
@@ -335,9 +364,10 @@ mk_hub() { # $1 = dir
   : > "$1/personal/.secrets"
   printf '{"fixture":true}\n' >"$1/tts/install.json"
   printf '## Retro (20:45)\n\nguard-fixture retro.\n' > "$1/briefs/$DAY.md"
-  cat >"$1/bin/kb-tts-render" <<'SH'
+cat >"$1/bin/kb-tts-render" <<'SH'
 #!/usr/bin/env bash
 echo "render $*" >>"$AUDIOLOG"
+[[ "${FAIL_TTS:-0}" == "1" ]] && exit 1
 out=''; while [[ $# -gt 0 ]]; do case "$1" in --out) out="$2"; shift 2;; *) shift;; esac; done
 printf 'ID3-guard-audio' >"$out"
 SH
@@ -353,6 +383,7 @@ AUDIOLOG="$TMP/guard-audio.log"; : > "$AUDIOLOG"
 cat > "$TMP/fake-notebooklm" <<FAKE
 #!/usr/bin/env bash
 echo "\$*" >> "$NBLOG"
+if [[ "\${FAIL_NLM:-0}" == "1" && "\$1 \${2:-}" == "generate audio" ]]; then exit 1; fi
 case "\$1 \${2:-}" in
   "list --json"*|"list "*) echo '{"notebooks": []}' ;;
   "create "*)              echo '{"id": "nb-fake-1"}' ;;
@@ -422,12 +453,68 @@ guard_run "$H" "evening-digest" "file,notebooklm_audio" --period evening; RC=$?
   && ok "AC4: legitimate background evening-digest -> NotebookLM only" \
   || fail "AC4: NotebookLM route did not stay isolated (rc=$RC)"
 
-# 7. Manual run (no background vars) unaffected -> local render + send happens.
+# 7. Both flags call both existing handlers with the same frozen speech path.
 H="$TMP/g7"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
+guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC=$?
+TTS_TEXT=$(sed -n 's/^render .*--file \([^ ]*\).*/\1/p' "$AUDIOLOG" | head -1)
+NLM_TEXT=$(sed -n 's/^source add \([^ ]*\).*/\1/p' "$NBLOG" | head -1)
+[[ $RC -eq 0 && $(grep -c '^render ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^send ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^generate audio' "$NBLOG") -eq 1 \
+   && -n "$TTS_TEXT" && "$TTS_TEXT" == "$NLM_TEXT" ]] \
+  && ok "AC4: both true -> both handlers receive one frozen speech path" \
+  || fail "AC4: both-channel fan-out failed (rc=$RC, tts=$TTS_TEXT, nlm=$NLM_TEXT)"
+
+# 8. A first-handler failure does not suppress the second handler.
+H="$TMP/g8"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
+FAIL_TTS=1 guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC=$?
+[[ $RC -ne 0 && $(grep -c '^render ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^send ' "$AUDIOLOG") -eq 0 \
+   && $(grep -c '^generate audio' "$NBLOG") -eq 1 ]] \
+  && ok "AC4: local failure still dispatches NotebookLM and returns retry" \
+  || fail "AC4: first-handler failure suppressed NotebookLM (rc=$RC)"
+
+# 9. Manual run (no background vars) unaffected -> local render + send happens.
+H="$TMP/g9"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
 guard_run "$H" "-" "-" --period evening; RC=$?
 [[ $RC -eq 0 && $(grep -c '^render ' "$AUDIOLOG") -eq 1 && $(grep -c '^send ' "$AUDIOLOG") -eq 1 && ! -s "$NBLOG" ]] \
   && ok "AC4: fully manual run unaffected by the guard" \
   || fail "AC4: manual run was wrongly blocked (rc=$RC)"
+
+# 10. Channel toggles never change the manifest owned by a successful handler.
+H="$TMP/g10"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
+guard_run "$H" "evening-digest" "file,notebooklm_audio" --period evening; RC1=$?
+guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC2=$?
+guard_run "$H" "evening-digest" "file,notebooklm_audio" --period evening; RC3=$?
+[[ $RC1 -eq 0 && $RC2 -eq 0 && $RC3 -eq 0 \
+   && $(grep -c '^generate audio' "$NBLOG") -eq 1 \
+   && $(grep -c '^render ' "$AUDIOLOG") -eq 1 \
+   && -f "$H/.orchestrator/evening-digest-$DAY.json" \
+   && -f "$H/.orchestrator/evening-digest-$DAY-notebooklm.json" ]] \
+  && ok "AC4: single/both toggles keep stable per-channel manifests" \
+  || fail "AC4: channel toggle repeated a completed handler"
+
+# 11. Telegram success + NotebookLM retry only retries NotebookLM.
+H="$TMP/g11"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
+FAIL_NLM=1 guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC1=$?
+guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC2=$?
+[[ $RC1 -ne 0 && $RC2 -eq 0 \
+   && $(grep -c '^render ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^send ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^generate audio' "$NBLOG") -eq 2 ]] \
+  && ok "AC4: retry invokes only failed NotebookLM handler" \
+  || fail "AC4: NotebookLM retry repeated Telegram"
+
+# 12. NotebookLM success + Telegram retry only retries Telegram.
+H="$TMP/g12"; mk_hub "$H"; : > "$NBLOG"; : > "$AUDIOLOG"
+FAIL_TTS=1 guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC1=$?
+guard_run "$H" "evening-digest" "file,telegram_audio,notebooklm_audio" --period evening; RC2=$?
+[[ $RC1 -ne 0 && $RC2 -eq 0 \
+   && $(grep -c '^render ' "$AUDIOLOG") -eq 2 \
+   && $(grep -c '^send ' "$AUDIOLOG") -eq 1 \
+   && $(grep -c '^generate audio' "$NBLOG") -eq 1 ]] \
+  && ok "AC4: retry invokes only failed Telegram handler" \
+  || fail "AC4: Telegram retry repeated NotebookLM"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

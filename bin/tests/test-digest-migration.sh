@@ -3,7 +3,7 @@
 # (after:retro) and morning-digest anchored to the LAST enabled SCHEDULED
 # morning process (money-radar > learning > daily), re-anchors ONLY its own
 # managed morning-digest block when a better anchor appears, preserves the
-# selected backend unless `--audio-backend` explicitly changes it, leaves customized
+# independent output flags, leaves customized
 # blocks byte-identical, preserves every other process/edge, is idempotent,
 # fails closed on malformed input, and --revert round-trips.
 #
@@ -176,14 +176,42 @@ CP="$TMP/d.before"; cp "$F" "$CP"
 "$MIG" --file "$F" >/dev/null 2>&1
 cmp -s "$F" "$CP" && ok "d: second run after re-anchor is a no-op" || fail "d: re-anchor not idempotent"
 
+# A boolean-map block remains managed regardless of which channel flags are on.
+F2="$TMP/d-flags.yaml"
+{ fixture absent enabled; cat <<'EOF'
+
+- id: morning-digest
+  enabled: true
+  when: after:learning
+  run: kb-morning-digest
+  outputs: {file: true, telegram_audio: true, notebooklm_audio: true}
+
+- id: evening-digest
+  enabled: true
+  when: after:retro
+  run: kb-morning-digest --period evening
+  outputs: {file: true, telegram_audio: true, notebooklm_audio: false}
+
+- id: money-radar
+  enabled: true
+  when: after:learning
+  run: kb-money-radar --text-only
+  outputs: [telegram, file]
+EOF
+} > "$F2"
+MORNING_FLAGS_BEFORE=$(awk '/^- id: morning-digest$/{f=1} f && /^  outputs:/{print; exit}' "$F2")
+"$MIG" --file "$F2" >/dev/null 2>&1; RC=$?
+MORNING_FLAGS_AFTER=$(awk '/^- id: morning-digest$/{f=1} f && /^  outputs:/{print; exit}' "$F2")
+[[ $RC -eq 0 && "$(anchor_of "$F2")" == "after:money-radar" \
+   && "$MORNING_FLAGS_BEFORE" == "$MORNING_FLAGS_AFTER" ]] \
+  && ok "d: channel flags stay managed and re-anchor without rewriting outputs" \
+  || fail "d: channel flags were treated as a hardcoded/custom combination"
+
+CP="$TMP/d.no-selector"; cp "$F" "$CP"
 "$MIG" --file "$F" --audio-backend local_qwen >/dev/null 2>&1; RC=$?
-[[ $RC -eq 0 && $(grep -c '^  outputs: \[file, telegram_audio\]$' "$F") -eq 2 ]] \
-  && ok "d: explicit local_qwen selects Telegram audio" \
-  || fail "d: explicit local_qwen did not switch managed outputs"
-"$MIG" --file "$F" --audio-backend notebooklm >/dev/null 2>&1; RC=$?
-[[ $RC -eq 0 && $(grep -c '^  outputs: \[file, notebooklm_audio\]$' "$F") -eq 2 ]] \
-  && ok "d: explicit notebooklm selects NotebookLM audio" \
-  || fail "d: explicit notebooklm did not restore managed outputs"
+[[ $RC -eq 2 && $(cmp -s "$F" "$CP"; echo $?) -eq 0 ]] \
+  && ok "d: legacy audio-backend selector is removed; outputs stay untouched" \
+  || fail "d: second delivery setting still exists or changed outputs"
 
 # ── (e) customized morning-digest block stays byte-identical ─────────────────
 F="$TMP/e.yaml"
@@ -196,7 +224,7 @@ F="$TMP/e.yaml"
   outputs: [file]
 EOF
 } > "$F"
-"$MIG" --file "$F" --audio-backend local_qwen >/dev/null 2>&1; RC=$?
+"$MIG" --file "$F" >/dev/null 2>&1; RC=$?
 [[ $RC -eq 0 ]] && ok "e: migrate with customized block exits 0" || fail "e: rc=$RC"
 [[ "$(anchor_of "$F")" == '"05:00"' ]] \
   && ok "e: customized morning-digest left untouched (when unchanged)" \
