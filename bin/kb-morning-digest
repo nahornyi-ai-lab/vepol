@@ -1263,9 +1263,9 @@ def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             return {}
-        # A local-Qwen manifest owns a different counter/state schema. An
-        # explicit route switch starts a fresh NotebookLM adapter state instead
-        # of coercing its attempts dict or treating its completed send as ours.
+        # A local-Qwen manifest owns a different counter/state schema. Ignore it
+        # instead of coercing its attempts dict or treating its completed send
+        # as NotebookLM state.
         if value.get("delivery") == DELIVERY_TAG or isinstance(value.get("attempts"), dict):
             return {}
         return value
