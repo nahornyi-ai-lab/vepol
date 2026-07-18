@@ -67,29 +67,24 @@ else
 fi
 
 if [[ ! -f "$PUBLIC/install.sh" ]]; then
-  ok "audio-backend installer setting not applicable to this standalone root"
-elif grep -q -- '--audio-backend' "$PUBLIC/install.sh" \
-  && grep -q 'local_qwen' "$PUBLIC/install.sh" \
-  && grep -q 'notebooklm' "$PUBLIC/install.sh"; then
-  ok "installer exposes NotebookLM/local-Qwen audio backend selection"
+  ok "installer channel-setting check not applicable to this standalone root"
 else
-  bad "installer has no explicit dual-backend setting"
-fi
-
-if [[ -f "$PUBLIC/install.sh" ]]; then
+  if grep -q -- '--audio-backend' "$PUBLIC/install.sh"; then
+    bad "installer still exposes a second audio-backend setting"
+  else
+    ok "outputs map is the only installer delivery setting"
+  fi
   CAPS=$("$PUBLIC/install.sh" --capabilities --json 2>/dev/null); RC=$?
-  [[ $RC -eq 0 && "$CAPS" == *'"audio_backends": ["notebooklm", "local_qwen"]'* ]] \
-    && ok "installer capabilities advertise both backend values" \
-    || bad "installer capabilities omit the backend values"
-  "$PUBLIC/install.sh" --capabilities --audio-backend invalid >/dev/null 2>&1; RC=$?
+  [[ $RC -eq 0 && "$CAPS" != *'"audio_backends"'* ]] \
+    && ok "installer capabilities have no backend selector" \
+    || bad "installer capabilities still advertise backend selector"
+  "$PUBLIC/install.sh" --capabilities --audio-backend local_qwen >/dev/null 2>&1; RC=$?
   [[ $RC -eq 2 ]] \
-    && ok "installer rejects an invalid backend before mutation" \
-    || bad "installer accepted an invalid backend (rc=$RC)"
+    && ok "legacy audio-backend option is rejected" \
+    || bad "legacy audio-backend option is still accepted (rc=$RC)"
 fi
 
-# Behavioral installer matrix in an isolated HOME against the exact staged
-# release artifact. Fake Qwen install records the route it observed, proving
-# model smoke happens before the managed outputs switch.
+# Fresh install writes one boolean output map; upgrades preserve user flags.
 if [[ -n "$ARTIFACT_TMP" ]]; then
   CASE="$ARTIFACT_TMP/install-case"; HOME_CASE="$CASE/home"; FAKEBIN="$CASE/fakebin"
   mkdir -p "$HOME_CASE" "$FAKEBIN"
@@ -100,77 +95,27 @@ if [[ -n "$ARTIFACT_TMP" ]]; then
   printf '#!/bin/sh\necho 1.1.0\n' >"$FAKEBIN/bun"; chmod +x "$FAKEBIN/bun"
   INSTALL_ENV=(HOME="$HOME_CASE" PATH="$FAKEBIN:$PATH" VEPOL_NONINTERACTIVE=1)
 
-  env "${INSTALL_ENV[@]}" "$PUBLIC/install.sh" --apply \
-    >/dev/null 2>&1; RC=$?
+  env "${INSTALL_ENV[@]}" "$PUBLIC/install.sh" --apply >/dev/null 2>&1; RC=$?
   CONFIG="$HOME_CASE/knowledge/personal/processes.yaml"
-  [[ $RC -eq 0 && $(grep -c '^  outputs: \[file, notebooklm_audio\]$' "$CONFIG") -eq 2 ]] \
-    && ok "fresh installer default writes NotebookLM route" \
-    || bad "fresh installer default did not write NotebookLM route (rc=$RC)"
-
-  cat >"$PUBLIC/bin/kb-tts-install" <<'SH'
-#!/usr/bin/env bash
-set -u
-config="$HOME/knowledge/personal/processes.yaml"
-if grep -q '^  outputs: \[file, notebooklm_audio\]$' "$config"; then
-  echo observed_notebooklm >>"$HOME/tts-install-order.log"
-else
-  echo observed_other >>"$HOME/tts-install-order.log"
-fi
-[[ "${KB_FAKE_TTS_INSTALL_MODE:-success}" == success ]]
-SH
-  chmod +x "$PUBLIC/bin/kb-tts-install"
-  env "${INSTALL_ENV[@]}" KB_FAKE_TTS_INSTALL_MODE=success \
-    "$PUBLIC/install.sh" --apply --audio-backend local_qwen >/dev/null 2>&1; RC=$?
-  [[ $RC -eq 0 && $(grep -c '^observed_notebooklm$' "$HOME_CASE/tts-install-order.log") -eq 1 \
-     && $(grep -c '^  outputs: \[file, telegram_audio\]$' "$CONFIG") -eq 2 ]] \
-    && ok "Qwen install succeeds before managed outputs switch" \
-    || bad "Qwen installer ordering/selection is wrong (rc=$RC)"
+  [[ $RC -eq 0 && $(grep -c '^  outputs: {file: true, telegram_audio: false, notebooklm_audio: true}$' "$CONFIG") -eq 2 ]] \
+    && ok "fresh installer writes one boolean output map" \
+    || bad "fresh installer output map is wrong (rc=$RC)"
 
   cp "$CONFIG" "$CASE/preserve.before"
   env "${INSTALL_ENV[@]}" "$PUBLIC/install.sh" --apply >/dev/null 2>&1; RC=$?
   [[ $RC -eq 0 ]] && cmp -s "$CONFIG" "$CASE/preserve.before" \
-    && ok "upgrade without selection preserves managed config byte-identical" \
-    || bad "upgrade without selection changed managed config"
-
-  env "${INSTALL_ENV[@]}" "$PUBLIC/install.sh" --apply --audio-backend notebooklm \
-    >/dev/null 2>&1
-  cp "$CONFIG" "$CASE/failure.before"
-  env "${INSTALL_ENV[@]}" KB_FAKE_TTS_INSTALL_MODE=failure \
-    "$PUBLIC/install.sh" --apply --audio-backend local_qwen >/dev/null 2>&1; RC=$?
-  [[ $RC -ne 0 ]] && cmp -s "$CONFIG" "$CASE/failure.before" \
-    && ok "failed Qwen install leaves prior route byte-identical" \
-    || bad "failed Qwen install changed the prior route"
-
-  python3 - "$CONFIG" <<'PY'
-import pathlib, sys
-path = pathlib.Path(sys.argv[1]); lines = path.read_text().splitlines()
-active = None
-for i, line in enumerate(lines):
-    if line == "- id: morning-digest": active = "morning"
-    elif line == "- id: evening-digest": active = "evening"
-    elif line.startswith("- id: "): active = None
-    elif active and line.startswith("  run:"):
-        lines[i] = "  run: kb-morning-digest --custom-operator-route"
-    elif active and line.startswith("  outputs:"):
-        lines[i] = "  outputs: [file]"
-path.write_text("\n".join(lines) + "\n")
-PY
-  cp "$CONFIG" "$CASE/custom.before"
-  env "${INSTALL_ENV[@]}" KB_FAKE_TTS_INSTALL_MODE=success \
-    "$PUBLIC/install.sh" --apply --audio-backend local_qwen >/dev/null 2>&1; RC=$?
-  [[ $RC -eq 0 ]] && cmp -s "$CONFIG" "$CASE/custom.before" \
-    && ok "installer leaves customized digest blocks byte-identical" \
-    || bad "installer rewrote customized digest blocks"
+    && ok "upgrade preserves output flags byte-identical" \
+    || bad "upgrade changed output flags"
 fi
 
 if [[ ! -f "$PUBLIC/README.md" || ! -f "$PUBLIC/CHANGELOG.md" ]]; then
   ok "public guidance check not applicable to this standalone root"
-elif grep -Fq 'kb-tts-install' "$PUBLIC/README.md" \
-   && grep -Fq 'NotebookLM' "$PUBLIC/README.md" \
-   && grep -Fq 'local Qwen' "$PUBLIC/CHANGELOG.md"; then
-  ok "public guidance documents both selectable audio routes"
+elif grep -Fq 'telegram_audio: true' "$PUBLIC/README.md" \
+   && grep -Fq 'notebooklm_audio: true' "$PUBLIC/README.md" \
+   && ! grep -q -- '--audio-backend' "$PUBLIC/README.md"; then
+  ok "public guidance documents the single boolean output map"
 else
-  bad "public guidance does not document both audio routes"
+  bad "public guidance does not document the boolean output map"
 fi
 
 SEED_INSTALL="${KB_TTS_SEED_INSTALL:-$(cd "$SEED/.." 2>/dev/null && pwd)/install.sh}"

@@ -713,7 +713,7 @@ run_scheduled_synth "$H" >/dev/null 2>&1; MAIL_RC=$?
   || bad "snapshot surface: mail rc=$MAIL_RC unexpectedly resent"
 unset KB_TEST_VEPOL_DEV
 
-# ── 9. Selector: same synthesized text, exactly one delivery adapter ─────────
+# ── 9. Independent channel flags: same synthesized text ─────────────────────
 HQ="$TMP/selector-qwen"; HN="$TMP/selector-notebooklm"; D=$(date +%F)
 make_hub "$HQ"; make_hub "$HN"
 printf '%s\n' 'SNAPSHOT_SELECTOR_SAME_TEXT' >"$HQ/.orchestrator/money-radar-$D-codex-out.txt"
@@ -725,14 +725,14 @@ run_scheduled_notebooklm_synth "$HN" >/dev/null 2>&1; NRC=$?
    && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HN/notebooklm.log") -eq 1 \
    && $(grep -c "NOTEBOOKLM_CALLED source add $HN/reports/morning-digest-$D.txt " \
         "$HN/notebooklm.log") -eq 1 ]] \
-  && ok "selector: each outputs choice invokes exactly one delivery adapter" \
-  || bad "selector: backend calls crossed or selected route failed"
+  && ok "channel flags: each true output invokes its handler" \
+  || bad "channel flags: handler calls crossed or failed"
 cmp -s "$HQ/reports/morning-digest-$D.txt" "$HN/reports/morning-digest-$D.txt" \
-  && ok "selector: ready digest text is identical before delivery" \
-  || bad "selector: route changed the synthesized digest text"
+  && ok "channel flags: ready digest text is identical before delivery" \
+  || bad "channel flags: channel changed the synthesized digest text"
 
-# Switching adapters with an existing foreign manifest must start only the
-# newly selected adapter, never crash on the other adapter's counter schema.
+# Toggling flags keeps one stable manifest per handler and never repeats a
+# handler that already completed for the date.
 HS="$TMP/selector-switch"; make_hub "$HS"
 printf '%s\n' 'SNAPSHOT_SELECTOR_SWITCH' >"$HS/.orchestrator/money-radar-$D-codex-out.txt"
 run_scheduled_synth "$HS" >/dev/null 2>&1; Q1=$?
@@ -740,10 +740,10 @@ run_scheduled_notebooklm_synth "$HS" >/dev/null 2>&1; N1=$?
 SENDS_AFTER_N=$(wc -l <"$HS/send.log")
 run_scheduled_synth "$HS" >/dev/null 2>&1; Q2=$?
 [[ $Q1 -eq 0 && $N1 -eq 0 && $Q2 -eq 0 && $SENDS_AFTER_N -eq 1 \
-   && $(wc -l <"$HS/send.log") -eq 2 \
+   && $(wc -l <"$HS/send.log") -eq 1 \
    && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HS/notebooklm.log") -eq 1 ]] \
-  && ok "selector: existing foreign manifest switches safely in both directions" \
-  || bad "selector: backend switch crashed or crossed delivery adapters"
+  && ok "channel flags: toggles preserve stable per-handler manifests" \
+  || bad "channel flags: toggle repeated or crossed handlers"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

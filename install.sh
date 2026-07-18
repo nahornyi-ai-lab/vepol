@@ -45,7 +45,7 @@ fi
 # agent can detect "this installer is too old for prompt-first install" instead
 # of silently running a full install. (spec: agent-self-install, blockers B1/B2/B3)
 # ─────────────────────────────────────────
-MODE=""; WANT_JSON=0; AUDIO_BACKEND=""
+MODE=""; WANT_JSON=0
 _set_mode() {  # reject conflicting mode flags (e.g. --probe --apply) — exit 2, empty stdout
   if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
     printf 'install.sh: conflicting mode flags (%s and %s)\n' "$MODE" "$1" >&2
@@ -62,10 +62,6 @@ while [[ $# -gt 0 ]]; do
     --capabilities) _set_mode capabilities ;;
     --apply)        _set_mode apply ;;
     --json)         WANT_JSON=1 ;;
-    --audio-backend)
-      [[ $# -ge 2 ]] || { printf 'install.sh: --audio-backend requires notebooklm or local_qwen\n' >&2; exit 2; }
-      AUDIO_BACKEND="$2"; shift ;;
-    --audio-backend=*) AUDIO_BACKEND="${arg#*=}" ;;
     -h|--help)      _set_mode help ;;
     *) printf 'install.sh: unknown option: %s\n' "$arg" >&2
        printf 'Run "./install.sh --capabilities --json" to see supported modes.\n' >&2
@@ -73,11 +69,6 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
-if [[ -n "$AUDIO_BACKEND" && "$AUDIO_BACKEND" != "notebooklm" \
-      && "$AUDIO_BACKEND" != "local_qwen" ]]; then
-  printf 'install.sh: invalid --audio-backend: %s (expected notebooklm or local_qwen)\n' "$AUDIO_BACKEND" >&2
-  exit 2
-fi
 [[ -z "$MODE" ]] && MODE="apply-interactive"
 
 _json_esc() {  # minimal JSON string escaping for shell-emitted JSON (backslash, quote)
@@ -94,7 +85,6 @@ _emit_capabilities() {
   "schema_version": 1,
   "modes": ["--probe", "--dry-run", "--apply", "--verify", "--capabilities", "--help"],
   "json_modes": ["--probe", "--dry-run", "--verify", "--capabilities"],
-  "audio_backends": ["notebooklm", "local_qwen"],
   "opt_in_env": ["VEPOL_ENABLE_LAUNCHD", "VEPOL_ENABLE_TELEGRAM", "VEPOL_ENABLE_MEMORY_COMPILER", "VEPOL_APPLY_C01"],
   "exit_codes": {"0": "ok", "2": "unknown-option", "10": "missing-required-prereq", "11": "partial-install", "12": "plan-conflict", "13": "verify-failed"}
 }
@@ -247,8 +237,6 @@ Usage:
   ./install.sh --dry-run --json      Plan only (no mutation).
   ./install.sh --verify --json       Check an existing install.
   ./install.sh --capabilities --json List supported modes.
-  ./install.sh --apply --audio-backend notebooklm|local_qwen
-                                      Select the managed digest audio route.
 
 Opt-in env for --apply (all default OFF):
   VEPOL_ENABLE_LAUNCHD=1   scheduled background tasks
@@ -316,17 +304,6 @@ ask() {
   read -r answer
   [[ "$answer" =~ ^[Yy]$ ]]
 }
-
-# A new interactive install offers one simple route choice. Existing installs
-# are never switched or prompted on upgrade unless --audio-backend is explicit.
-if [[ "$MODE" == "apply-interactive" && -z "$AUDIO_BACKEND" \
-      && ! -f "$HUB/personal/processes.yaml" ]]; then
-  if ask "Use local Qwen for digest audio and send MP3 to Telegram? (No keeps NotebookLM)"; then
-    AUDIO_BACKEND="local_qwen"
-  else
-    AUDIO_BACKEND="notebooklm"
-  fi
-fi
 
 # ─────────────────────────────────────────
 # Header
@@ -662,8 +639,7 @@ PROFEOF
   ok "  $HUB/personal/profile.yaml created (language: $_locale_lang — edit to change)"
 fi
 
-# Managed digest route. Creating the default config is safe and idempotent;
-# upgrades without an explicit selection preserve the existing outputs exactly.
+# Managed digest flags. The outputs map is the only delivery setting.
 PROCESSES_FILE="$HUB/personal/processes.yaml"
 if [[ ! -f "$PROCESSES_FILE" ]]; then
   python3 - "$HUB/bin" "$PROCESSES_FILE" <<'PY'
@@ -672,18 +648,10 @@ sys.path.insert(0, sys.argv[1])
 from _kb_processes import load_processes
 load_processes(pathlib.Path(sys.argv[2]), create_default=True)
 PY
-  ok "  $PROCESSES_FILE created (audio backend: notebooklm)"
+  ok "  $PROCESSES_FILE created"
 fi
-if [[ "$AUDIO_BACKEND" == "local_qwen" ]]; then
-  "$HUB/bin/kb-tts-install"
-  "$HUB/bin/kb-digest-migrate" --file "$PROCESSES_FILE" --audio-backend local_qwen
-  ok "  digest audio backend: local Qwen → Telegram"
-elif [[ "$AUDIO_BACKEND" == "notebooklm" ]]; then
-  "$HUB/bin/kb-digest-migrate" --file "$PROCESSES_FILE" --audio-backend notebooklm
-  ok "  digest audio backend: NotebookLM"
-else
-  ok "  existing digest audio backend preserved"
-fi
+"$HUB/bin/kb-digest-migrate" --file "$PROCESSES_FILE"
+ok "  digest output flags preserved"
 
 # ─────────────────────────────────────────
 # Step 3. Global ~/.claude/CLAUDE.md (include-pattern)

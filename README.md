@@ -117,11 +117,11 @@ unit tests. The list grows release by release; see
   process — `id`, `enabled`, `when`, `run`, `outputs` — and one file
   to read to see which routines run on your machine. Background runs
   are text-first by default. The two exact daily digest commands may send the
-  finalized text either to NotebookLM Audio Overview or to the on-demand Qwen
-  runtime followed by Telegram; other scheduled commands remain fail-closed.
-  Fresh installs default to NotebookLM, while local Qwen is an explicit choice
-  that runs `kb-tts-install`; the model exits after each render instead of
-  running as a service. A missing config self-heals with safe defaults.
+  finalized text to every enabled audio channel. One boolean `outputs` map is
+  the only delivery setting: each `true` channel runs independently. Telegram
+  uses the on-demand Qwen runtime; NotebookLM creates an Audio Overview. Other
+  scheduled commands remain fail-closed. A missing config self-heals with safe
+  defaults.
 
 - **Idea Intake** — an event-driven process for ideas you write or dictate:
   `kb-idea capture` creates canonical markdown cards under `personal/ideas/`,
@@ -290,25 +290,19 @@ kb-demo brief          # see what a synthesized brief looks like
 
 That's the value loop. Methodology comes after, when you want it.
 Daily research delivers text out of the box. Morning/evening digest text is
-generated the same way for both audio routes. Choose where that finished text
-goes:
+generated once, then sent to every channel whose flag is `true`:
 
-```bash
-# Audio Overview remains in NotebookLM; nothing is sent to Telegram.
-kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend notebooklm
-
-# Or render locally with Qwen and send the MP3 to Telegram.
-kb-tts-install
-kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend local_qwen
+```yaml
+outputs: {file: true, telegram_audio: true, notebooklm_audio: true}
 ```
 
-For Qwen, configure `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_TOKEN`) plus
+Set a channel to `false` to disable it. For Telegram, run `kb-tts-install` and
+configure `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_TOKEN`) plus
 `TELEGRAM_CHAT_ID` in `~/knowledge/personal/.secrets`. Nothing stays running:
 Qwen loads for one render, sends the MP3, and exits. For NotebookLM,
 authenticate with `notebooklm login && notebooklm status`; the Audio Overview
-stays there and is not downloaded. The installer exposes the same choice via
-`--audio-backend notebooklm|local_qwen`; upgrades without that option preserve
-the existing route. The default research topic is automatic; use
+stays there and is not downloaded. Upgrades preserve the existing output flags.
+The default research topic is automatic; use
 `kb-daily-research --set-topic "..."` only when you want to steer it.
 
 ## Status

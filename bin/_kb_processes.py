@@ -25,14 +25,14 @@ CLOSED (config rejected) — it is never silently ignored.
 
 `outputs` semantics: telegram/people/calendar are user-facing channels;
 `file` is internal agent memory and never counts as user delivery;
-`notebooklm_audio` and `telegram_audio` may be scheduled only for the explicit
-digest processes in SCHEDULED_TELEGRAM_AUDIO_ALLOWED, each bound to its EXACT
-run command and exactly one canonical `[file, <audio>]` pair. Any other
-scheduled audio declaration fails closed.
+`outputs` accepts the legacy list or a boolean map. In a map, every `true`
+channel is enabled independently and every `false` channel is omitted.
+Scheduled audio remains bound to the explicit digest process id + run command;
+there is no whitelist of channel combinations.
 
 The file is a strict, hand-parseable YAML subset: blank lines, full-line
 `#` comments, blocks starting with `- id: <id>`, fields indented exactly
-two spaces, inline `[a, b]` lists. Parsed with stdlib only — this module
+two spaces, inline `[a, b]` lists or `{channel: true}` maps. Parsed with stdlib only — this module
 sits on the launchd-critical path (kb-tick) and must not depend on
 PyYAML being importable by whatever python3 launchd resolves.
 
@@ -139,22 +139,21 @@ DEFAULT_PROCESSES_YAML = """\
   run: kb-learning-arxiv --text-only
   outputs: [telegram, file]
 
-# Selectable audio digests (morning recap + short evening retro recap).
-# Backward-compatible fresh-install default is NotebookLM; use
-# kb-digest-migrate --audio-backend local_qwen after kb-tts-install to switch.
+# Audio digests use one boolean map: every true channel is called independently.
+# Fresh-install defaults preserve the previous NotebookLM-only behavior.
 # If you later enable money-radar, re-run kb-digest-migrate to re-anchor the
 # morning digest behind it.
 - id: morning-digest
   enabled: true
   when: after:learning
   run: kb-morning-digest
-  outputs: [file, notebooklm_audio]
+  outputs: {file: true, telegram_audio: false, notebooklm_audio: true}
 
 - id: evening-digest
   enabled: true
   when: after:retro
   run: kb-morning-digest --period evening
-  outputs: [file, notebooklm_audio]
+  outputs: {file: true, telegram_audio: false, notebooklm_audio: true}
 
 # Telegram people collector (People Notebook): aggregates WHO wrote in
 # private dialogs into a daily identity envelope — names/usernames/counts
@@ -306,14 +305,42 @@ def parse_processes_text(text: str) -> list[dict]:
         p["run"] = run
 
         out_raw = p["outputs"].strip()
-        m = re.match(r"^\[(.*)\]$", out_raw)
-        if not m:
+        list_match = re.match(r"^\[(.*)\]$", out_raw)
+        map_match = re.match(r"^\{(.*)\}$", out_raw)
+        if list_match:
+            inner = list_match.group(1).strip()
+            items = [_strip_quotes(x) for x in inner.split(",")] if inner else []
+        elif map_match:
+            inner = map_match.group(1).strip()
+            items = []
+            seen: set[str] = set()
+            for entry in inner.split(",") if inner else []:
+                if ":" not in entry:
+                    raise ProcessConfigError(
+                        f"process {pid!r}: output flags must be key: true|false"
+                    )
+                key_raw, enabled_raw = entry.split(":", 1)
+                key = _strip_quotes(key_raw.strip())
+                enabled = _strip_quotes(enabled_raw.strip())
+                if key in seen:
+                    raise ProcessConfigError(f"process {pid!r}: duplicate output {key!r}")
+                seen.add(key)
+                if key not in ALLOWED_OUTPUTS:
+                    raise ProcessConfigError(
+                        f"process {pid!r}: unknown output {key!r} "
+                        f"(allowed: {list(ALLOWED_OUTPUTS)})"
+                    )
+                if enabled not in ("true", "false"):
+                    raise ProcessConfigError(
+                        f"process {pid!r}: output {key!r} must be true or false"
+                    )
+                if enabled == "true":
+                    items.append(key)
+        else:
             raise ProcessConfigError(
-                f"process {pid!r}: outputs must be an inline list like "
-                f"[telegram, file], got {out_raw!r}"
+                f"process {pid!r}: outputs must be an inline list or boolean map, "
+                f"got {out_raw!r}"
             )
-        inner = m.group(1).strip()
-        items = [_strip_quotes(x) for x in inner.split(",")] if inner else []
         if not items or any(not it for it in items):
             raise ProcessConfigError(
                 f"process {pid!r}: outputs must be a non-empty list"
@@ -383,14 +410,6 @@ def parse_processes_text(text: str) -> list[dict]:
                     f"allowed for the managed digest processes "
                     f"{sorted(SCHEDULED_TELEGRAM_AUDIO_ALLOWED)} with their exact "
                     f"run commands; others must be on-demand"
-                )
-            if p["outputs"] not in (
-                ["file", "notebooklm_audio"], ["file", "telegram_audio"]
-            ):
-                raise ProcessConfigError(
-                    f"process {p['id']!r}: managed scheduled digest outputs must "
-                    "be exactly [file, notebooklm_audio] or "
-                    "[file, telegram_audio]"
                 )
 
     # after:* chains must be acyclic, else dependents would deadlock silently.
