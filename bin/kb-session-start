@@ -134,6 +134,7 @@ if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
 fi
 
 python3 - "$PROJECT" "$HUB_MODE" "$ROSTER" "$KB_HUB_DIR" "$PRINT_MODE" <<'PY'
+from __future__ import annotations  # keep PEP 604 (Path | None) working on stock macOS python3 (3.9)
 import json
 import os
 import re

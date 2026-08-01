@@ -21,6 +21,7 @@ explicitly approves. (Spec: calendar-backed-followups-v1-2026-06-25.)
 Task block format is rendered by `kb-board append` under the `## Backlog`
 section unless callers promote it to `Ready`.
 """
+from __future__ import annotations  # keep PEP 604 (str | None) working on stock macOS python3 (3.9)
 import argparse
 import os
 import pathlib
