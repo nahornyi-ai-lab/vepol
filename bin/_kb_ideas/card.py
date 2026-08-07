@@ -127,19 +127,119 @@ def triage(
     return {"id": post["id"], "status": post["status"], "priority": post["priority"]}
 
 
+def _board_path_for_slug(root: Path, project_slug: str) -> Path:
+    """Resolve the kb-board backlog file for a promotion target.
+
+    "hub" targets the hub's own board; any other slug targets the project's
+    board through the hub's projects/<slug> link. No silent fallbacks: a
+    missing board is an error, not an invitation to create one in a guessed
+    location.
+    """
+    if project_slug in ("", "hub"):
+        board = root / "backlog.md"
+    else:
+        board = root / "projects" / project_slug / "backlog.md"
+    if not board.exists():
+        raise ValueError(
+            f"no kb-board backlog for project_slug={project_slug!r} at {board}"
+        )
+    return board
+
+
+def _create_board_task(
+    root: Path,
+    *,
+    project_slug: str,
+    idea_id: str,
+    title: str,
+    priority: str,
+    acceptance: str,
+    context: str,
+) -> str:
+    """Create a Ready kb-board task for a promoted idea; returns plan_item_id.
+
+    The idea id doubles as the plan_item_id: it is already unique, stable,
+    and greppable, and reusing it makes promotion idempotent — if the task
+    already exists the existing id is returned instead of minting a twin.
+    """
+    from _kb_board import check as check_mod, fmt as fmt_mod
+    from _kb_board.locks import acquire_file_lock
+    from _kb_board.model import TaskBlock
+    from _kb_board.mutation import _write_atomic
+    from _kb_board.parsing import parse_board
+
+    board_path = _board_path_for_slug(root, project_slug)
+    lock_path = board_path.with_name(board_path.name + ".lock")
+    with acquire_file_lock(lock_path, timeout_s=30.0):
+        board = parse_board(board_path.read_text(encoding="utf-8"))
+        for existing in board.tasks:
+            if existing.fields.get("plan_item_id") == idea_id:
+                return idea_id
+        today = datetime.now().astimezone().date().isoformat()
+        fields = {
+            "plan_item_id": idea_id,
+            "priority": priority,
+            "owner": "unassigned",
+            "created": today,
+            "updated": today,
+            "acceptance": acceptance,
+            "body": context.strip() or f"Promoted from idea {idea_id}.",
+            "idea_id": idea_id,
+        }
+        board.sections.setdefault("Ready", []).append(
+            TaskBlock(title=title, status="Ready", marker="[ ]", fields=fields)
+        )
+        candidate = fmt_mod.format_board(board)
+        result = check_mod.check_board_text(candidate)
+        if not result.ok:
+            raise ValueError(f"generated board task failed kb-board check: {result}")
+        _write_atomic(board_path, candidate)
+    return idea_id
+
+
 def promote(
     idea_id: str,
     *,
     project_slug: str,
     plan_item_id: str | None = None,
+    create_task: bool = False,
+    priority: str | None = None,
+    context: str = "",
     hub: str | Path | None = None,
 ) -> dict[str, str]:
-    """Promote a ready idea by storing a markdown kb-board task pointer."""
+    """Promote a ready idea into a markdown kb-board task.
+
+    Two modes: with an existing plan_item_id the card just records the
+    pointer; with create_task=True the task itself is created first (status
+    Ready, linked back via an idea_id field) and the minted id is recorded.
+    The board mutation and the card mutation take their locks sequentially,
+    never nested. Failure between the two leaves a visible board task without
+    a promoted card — recoverable by re-running — never a card that claims a
+    task which does not exist.
+    """
     root = hub_path(hub)
+    if create_task and not plan_item_id:
+        with ideas_lock(root):
+            _, post = _load_required_unlocked(root, idea_id)
+            task_title = str(post.get("title") or idea_id)
+            task_priority = priority or str(post.get("priority") or "P2")
+            task_acceptance = (
+                str(post.get("expected_evidence") or "").strip()
+                or "Task is complete when its requested outcome is delivered."
+            )
+        plan_item_id = _create_board_task(
+            root,
+            project_slug=project_slug,
+            idea_id=idea_id,
+            title=task_title,
+            priority=task_priority,
+            acceptance=task_acceptance,
+            context=context,
+        )
     with ideas_lock(root):
         path, post = _load_required_unlocked(root, idea_id)
         if not plan_item_id:
-            raise ValueError("promote requires --plan-item-id")
+            raise ValueError("promote requires --plan-item-id (or --create-task)")
         post["status"] = "promoted"
         post["promoted_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         post["project_slug"] = project_slug

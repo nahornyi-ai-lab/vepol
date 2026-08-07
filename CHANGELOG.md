@@ -14,6 +14,19 @@ upgrading.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-08-07
+
+### Fixed
+- **Idea-to-task promotion works end to end.** `kb-idea promote` crashed with
+  `TypeError` on every invocation: the `--create-task` flag shipped in the
+  CLI, docs, and acceptance test at v0.6.0, but the library behind it never
+  learned the keyword. `promote(create_task=True)` now creates a `Ready`
+  kb-board task (idea title, triaged priority, expected evidence as
+  acceptance, `idea_id` backlink, optional `--context` body) atomically under
+  the board lock, idempotently, and mirrors the `plan_item_id` back to the
+  card. The v0.6.0 acceptance test now passes as written.
+  ([v0.7.2](releases/v0.7.2.md))
+
 ## [0.7.1] — 2026-08-07
 
 ### Fixed
