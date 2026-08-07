@@ -12,6 +12,7 @@ $KB_HUB/bin). Lookup order:
 If none found, falls back to stdout with a clear `[channel:<type>]`
 prefix so callers in dev see what would have been sent.
 """
+from __future__ import annotations  # PEP 604 (X | None) safe on stock macOS python3 (3.9)
 
 import os
 import shutil

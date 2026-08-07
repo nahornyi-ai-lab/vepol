@@ -1,4 +1,5 @@
 """Dedup logic: email-first deterministic → Jaro-Winkler fuzzy → draft flag."""
+from __future__ import annotations  # PEP 604 (X | None) safe on stock macOS python3 (3.9)
 
 from . import index
 

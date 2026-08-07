@@ -12,6 +12,7 @@ Timing:
   brief time = min(sunrise + 5min, 07:00 local)
   retro time = sunset + 15min
 """
+from __future__ import annotations  # keep PEP 604 (tuple[...] | None) working on stock macOS python3 (3.9)
 import datetime
 import json
 import os
