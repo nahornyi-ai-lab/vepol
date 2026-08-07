@@ -14,6 +14,21 @@ upgrading.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-08-07
+
+### Fixed
+- **Startup on stock macOS Python.** Seven files (`kb-planner`,
+  `kb-session-start`, `kb-task`, and the four contact-notebook modules) used
+  `str | None` annotations that Python 3.9 — the interpreter macOS ships as
+  `/usr/bin/python3` — evaluates at load time, crashing with `TypeError`
+  before any code ran. Scheduled jobs run with a reduced `PATH` and hit
+  exactly that interpreter: the daily planner could not start from its
+  LaunchAgent, the session hook lost the whole startup context bundle, and
+  the People Notebook pipeline could not be imported. Each file gains one
+  `from __future__ import annotations` line; an AST sweep of all 106 Python
+  files, 39 Python executables and 124 embedded Python heredocs under `bin/`
+  confirms no other file has the same problem. ([v0.7.1](releases/v0.7.1.md))
+
 ## [0.7.0] — 2026-07-14
 
 ### Added
