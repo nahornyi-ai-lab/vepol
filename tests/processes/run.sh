@@ -97,9 +97,14 @@ EOF
 
 calls_has() { grep -q "$2" "$1/calls.log" 2>/dev/null; }
 
-# kb-extract-people is a live-hub runner, not part of the public seed yet. Run
-# its fixtures only when the local hub binary and its Python deps are present.
+# kb-extract-people is a live-hub runner, not part of the public seed yet.
+# This suite verifies the package it ships with, so fixtures that exercise a
+# NON-shipped hub binary are opt-in: they track the hub's moving design (e.g.
+# the staged-only people re-scope) and must not decide this package's health.
+# Set KB_PROCESSES_HUB_PEOPLE_TESTS=1 (with the hub binary + deps present) to
+# run them against the local hub.
 people_runner_ready() {
+  [[ "${KB_PROCESSES_HUB_PEOPLE_TESTS:-}" == "1" ]] || return 1
   [[ -x "$HUB_BIN/kb-extract-people" ]] || return 1
   "$PY" - <<'PY' >/dev/null 2>&1
 import frontmatter  # noqa: F401
