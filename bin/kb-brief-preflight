@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Deterministic freshness preflight for kb-brief.
+
+Reads the hub registry and active project KBs, then prints a compact JSON block
+for the morning brief prompt. This helper is intentionally read-only.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Iterable
+
+
+ACTIVE_STATUSES = {"live", "seeded"}
+DATE_RE = re.compile(r"^(?:##\s*)?\[(\d{4}-\d{2}-\d{2})(?:[^\]]*)\]|^##\s*\[(\d{4}-\d{2}-\d{2})|^(\d{4}-\d{2}-\d{2})\b")
+
+CHILD_EVIDENCE_TERMS = (
+    "signed",
+    "signing complete",
+    "move-in",
+    "moving",
+    "moved",
+    "ordered",
+    "installed",
+    "started moving",
+    "подпис",
+    "договор подпис",
+    "переез",
+    "заех",
+    "перевоз",
+    "заказ",
+    "старлинк",
+    "starlink",
+)
+
+BACKLOG_RENTAL_TERMS = (
+    "contract",
+    "lease",
+    "rental",
+    "rent",
+    "договор",
+    "аренд",
+    "закрепить",
+    "дожать",
+    "подписать",
+)
+
+SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".next",
+    "dist",
+    "build",
+}
+
+
+@dataclass(frozen=True)
+class Project:
+    slug: str
+    status: str
+    root: Path
+    description: str
+
+
+def iso_mtime(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+
+
+def max_mtime(paths: Iterable[Path]) -> float | None:
+    values = [p.stat().st_mtime for p in paths if p.exists()]
+    return max(values) if values else None
+
+
+def read_text(path: Path, limit: int = 120_000) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            return f.read(limit)
+    except OSError:
+        return ""
+
+
+def strip_cell(cell: str) -> str:
+    cell = cell.strip()
+    if cell.startswith("`") and cell.endswith("`"):
+        cell = cell[1:-1]
+    return cell.strip()
+
+
+def parse_registry(hub: Path) -> list[Project]:
+    registry = hub / "registry.md"
+    projects: list[Project] = []
+    home = Path.home()
+    # Registry layouts vary: the documented demo/template table is
+    # `slug | status | category | path | description` (5 columns), while a
+    # grown hub may insert extra columns (e.g. `parent`). Map the path and
+    # description columns from the header row instead of hardcoding indices.
+    path_idx: int | None = None
+    desc_idx: int | None = None
+    for raw in read_text(registry, 500_000).splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or "---" in line:
+            continue
+        cells = [strip_cell(part) for part in line.strip("|").split("|")]
+        if len(cells) < 5:
+            continue
+        if cells[0].lower() == "slug":
+            lowered = [c.lower() for c in cells]
+            path_idx = next(
+                (i for i, c in enumerate(lowered) if c in ("path", "путь")), None
+            )
+            desc_idx = next(
+                (i for i, c in enumerate(lowered) if c in ("description", "описание")),
+                None,
+            )
+            continue
+        slug, status = cells[0], cells[1].lower()
+        if status not in ACTIVE_STATUSES:
+            continue
+        p_idx = path_idx if path_idx is not None else (4 if len(cells) > 5 else 3)
+        if p_idx >= len(cells):
+            continue
+        path_cell = cells[p_idx]
+        if not path_cell:
+            continue
+        if path_cell.startswith("~/"):
+            root = home / path_cell[2:]
+        else:
+            root = Path(path_cell).expanduser()
+        d_idx = desc_idx if desc_idx is not None else p_idx + 1
+        desc = cells[d_idx] if 0 <= d_idx < len(cells) and cells[d_idx] else slug
+        projects.append(Project(slug=slug, status=status, root=root, description=desc))
+    return sorted(projects, key=lambda p: p.slug)
+
+
+def latest_log_entry(log_path: Path) -> tuple[str | None, str | None]:
+    latest_date: str | None = None
+    latest_line: str | None = None
+    for line in read_text(log_path, 200_000).splitlines():
+        match = DATE_RE.search(line.strip())
+        if not match:
+            continue
+        found = next((g for g in match.groups() if g), None)
+        if found and (latest_date is None or found >= latest_date):
+            latest_date = found
+            latest_line = line.strip()
+    return latest_date, latest_line
+
+
+def date_is_newer(child_date: str | None, canonical_date: str | None) -> bool | None:
+    if child_date and canonical_date:
+        if child_date > canonical_date:
+            return True
+        if child_date < canonical_date:
+            return False
+        return None
+    if child_date and not canonical_date:
+        return True
+    if canonical_date and not child_date:
+        return False
+    return None
+
+
+def find_child_knowledge_dirs(root: Path, canonical: Path) -> list[Path]:
+    if not root.exists() or not root.is_dir():
+        return []
+    canonical_resolved = canonical.resolve(strict=False)
+    children: list[Path] = []
+    max_depth = int(os.environ.get("KB_BRIEF_PREFLIGHT_MAX_DEPTH", "5"))
+    root_depth = len(root.resolve(strict=False).parts)
+
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.resolve(strict=False).parts) - root_depth
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        if depth >= max_depth:
+            dirs[:] = []
+        if current_path.name == "knowledge":
+            resolved = current_path.resolve(strict=False)
+            if resolved != canonical_resolved:
+                children.append(current_path)
+            dirs[:] = []
+    return sorted(children, key=lambda p: str(p))
+
+
+def open_backlog_lines(backlog_path: Path) -> list[str]:
+    lines: list[str] = []
+    for line in read_text(backlog_path, 200_000).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if re.search(r"\[[xX-]\]", stripped):
+            continue
+        if lower.startswith("- [") or lower.startswith("- ") or "plan_item_id" in lower:
+            lines.append(stripped)
+    return lines
+
+
+def contains_any(text: str, terms: Iterable[str]) -> bool:
+    lower = text.lower()
+    return any(term.lower() in lower for term in terms)
+
+
+def project_payload(project: Project, today: date) -> tuple[dict, list[dict], list[dict], list[str]]:
+    root = project.root
+    canonical = root / "knowledge" if root.name != "knowledge" else root
+    state = canonical / "state.md"
+    backlog = canonical / "backlog.md"
+    log = canonical / "log.md"
+    canonical_date, canonical_line = latest_log_entry(log)
+
+    child_dirs = find_child_knowledge_dirs(root, canonical)
+    newer_children: list[Path] = []
+    warnings: list[dict] = []
+    do_not_surface: list[dict] = []
+    changed: list[str] = []
+    open_lines = open_backlog_lines(backlog)
+    backlog_text = "\n".join(open_lines)
+    backlog_has_rental = contains_any(backlog_text, BACKLOG_RENTAL_TERMS)
+
+    if canonical_date:
+        try:
+            parsed = date.fromisoformat(canonical_date)
+            if parsed >= today - timedelta(days=1):
+                changed.append(f"{project.slug}: {canonical_line or canonical_date}")
+        except ValueError:
+            pass
+
+    canonical_mtime = max_mtime([state, log, backlog])
+    for child in child_dirs:
+        child_log = child / "log.md"
+        child_state = child / "state.md"
+        child_backlog = child / "backlog.md"
+        child_date, child_line = latest_log_entry(child_log)
+        newer_by_date = date_is_newer(child_date, canonical_date)
+        child_mtime = max_mtime([child_state, child_log, child_backlog])
+        newer_by_mtime = (
+            child_mtime is not None
+            and canonical_mtime is not None
+            and child_mtime > canonical_mtime
+        )
+        child_newer = newer_by_date if newer_by_date is not None else newer_by_mtime
+        if child_newer:
+            newer_children.append(child)
+
+        child_text = "\n".join(
+            [
+                read_text(child_state, 80_000),
+                read_text(child_log, 120_000),
+                read_text(child_backlog, 80_000),
+            ]
+        )
+        if child_newer and backlog_has_rental and contains_any(child_text, CHILD_EVIDENCE_TERMS):
+            match_line = next(
+                (line for line in open_lines if contains_any(line, BACKLOG_RENTAL_TERMS)),
+                "",
+            )
+            summary = (
+                "Child knowledge contains newer lease/move/order evidence while "
+                "canonical backlog still has an open rental-contract action."
+            )
+            warnings.append(
+                {
+                    "type": "child_split_brain_stale_backlog",
+                    "slug": project.slug,
+                    "summary": summary,
+                    "evidence": [
+                        f"child={child}",
+                        f"child_latest_log={child_date or 'unknown'}",
+                        f"canonical_latest_log={canonical_date or 'unknown'}",
+                        f"backlog_match={match_line}",
+                    ],
+                }
+            )
+            do_not_surface.append(
+                {
+                    "slug": project.slug,
+                    "reason": "newer child KB suggests the rental-contract task is stale",
+                    "match": match_line,
+                }
+            )
+            if child_date:
+                changed.append(f"{project.slug}: {child_line or child_date}")
+
+    project_info = {
+        "slug": project.slug,
+        "canonical_knowledge": str(canonical),
+        "state_mtime": iso_mtime(state),
+        "backlog_mtime": iso_mtime(backlog),
+        "latest_log_date": canonical_date,
+        "latest_log_line": canonical_line,
+        "child_knowledge_newer": bool(newer_children),
+        "child_knowledge_paths": [str(path) for path in newer_children],
+    }
+    return project_info, warnings, do_not_surface, changed
+
+
+def main() -> int:
+    hub = Path(os.environ.get("KB_HUB", str(Path.home() / "knowledge"))).expanduser()
+    today = date.today()
+    projects = parse_registry(hub)
+    project_rows: list[dict] = []
+    warnings: list[dict] = []
+    do_not_surface: list[dict] = []
+    changed: list[str] = []
+
+    for project in projects:
+        info, project_warnings, project_suppressed, project_changed = project_payload(project, today)
+        project_rows.append(info)
+        warnings.extend(project_warnings)
+        do_not_surface.extend(project_suppressed)
+        changed.extend(project_changed)
+
+    payload = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "projects": sorted(project_rows, key=lambda row: row["slug"]),
+        "warnings": sorted(warnings, key=lambda row: (row.get("slug", ""), row.get("type", ""))),
+        "changed_since_yesterday": sorted(dict.fromkeys(changed)),
+        "do_not_surface": sorted(
+            do_not_surface,
+            key=lambda row: (row.get("slug", ""), row.get("match", "")),
+        ),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

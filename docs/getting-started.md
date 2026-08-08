@@ -40,6 +40,13 @@ kb-idea capture "My first Vepol idea" --source chat
 kb-search "first Vepol"         # confirm retrieval finds it
 ```
 
+Morning audio is built from whole finalized same-day blocks: the morning brief,
+an eligible rich arXiv report, and the Money Radar digest. Vepol does not run a
+second synthesis or shortening pass over them. Local Qwen narrates the frozen
+source literally; NotebookLM receives the same source and may produce its own
+non-literal Audio Overview. When arXiv has no new papers, the learning process
+sends a short text notice and contributes no arXiv audio block.
+
 ## What's next
 
 - `~/knowledge/AGENTS.md` — the canonical hub contract (how the field is organized).

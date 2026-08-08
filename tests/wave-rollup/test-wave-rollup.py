@@ -38,7 +38,31 @@ import textwrap
 import uuid
 
 
-HUB_SRC = pathlib.Path.home() / "knowledge"
+def _cycle_src_bin() -> pathlib.Path:
+    """Source bin/ for the cycle CLI under test.
+
+    Defaults to this tree's own bin/ so the suite tests the code it ships
+    with; KB_CYCLE_SRC_BIN points the suite at another tree (e.g. an
+    installed hub copy).
+    """
+    override = os.environ.get("KB_CYCLE_SRC_BIN")
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path(__file__).resolve().parents[2] / "bin"
+
+
+def _install_cycle_cli(sb: pathlib.Path) -> None:
+    src_bin = _cycle_src_bin()
+    shutil.copy(src_bin / "kb-orchestrator-cycle", sb / "bin" / "kb-orchestrator-cycle")
+    shutil.copy(src_bin / "templates" / "cycle-retro.prompt.md",
+                sb / "bin" / "templates" / "cycle-retro.prompt.md")
+    # The CLI may import sibling _kb_*.py helpers (installed hub copies do);
+    # bring them along so the sandboxed binary runs in every topology.
+    for mod in sorted(src_bin.glob("_kb_*.py")):
+        shutil.copy(mod, sb / "bin" / mod.name)
+    for pkg in sorted(src_bin.glob("_kb_*")):
+        if pkg.is_dir():
+            shutil.copytree(pkg, sb / "bin" / pkg.name, dirs_exist_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -180,10 +204,7 @@ def setup_sandbox(*, escalation_count_for: dict[str, int] | None = None) -> path
     retro_stub.write_text("#!/usr/bin/env bash\necho 'stub kb-retro' >&2\n", encoding="utf-8")
     retro_stub.chmod(0o755)
 
-    shutil.copy(HUB_SRC / "bin" / "kb-orchestrator-cycle",
-                sb / "bin" / "kb-orchestrator-cycle")
-    shutil.copy(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md",
-                sb / "bin" / "templates" / "cycle-retro.prompt.md")
+    _install_cycle_cli(sb)
     return sb
 
 

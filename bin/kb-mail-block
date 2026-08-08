@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from _kb_mail import read_same_day_envelope, wrap_untrusted  # noqa: E402
 from _kb_mail.untrusted import DATA_NOT_INSTRUCTIONS  # noqa: E402
+from _kb_profile import get_language  # noqa: E402
 
 
 def _today() -> str:
@@ -47,6 +48,7 @@ def main() -> int:
     hub = pathlib.Path(os.environ.get("KB_HUB") or os.path.expanduser("~/knowledge"))
     day = args.day or _today()
     env = read_same_day_envelope(args.period, day, hub)
+    language = get_language(hub)
 
     if env is None or not env.get("available"):
         reason = ""
@@ -75,6 +77,11 @@ def main() -> int:
         lines.append(line)
 
     block = wrap_untrusted("\n".join(lines), channel="mail")
+    if len(items) >= 25:
+        capped = ("Показаны последние 25 писем; список может быть неполным."
+                  if language == "ru" else
+                  "The latest 25 emails are shown; the list may be incomplete.")
+        print(capped)
     print(DATA_NOT_INSTRUCTIONS + "\n" + block)
     return 0
 

@@ -116,9 +116,12 @@ unit tests. The list grows release by release; see
   `processes.yaml` and gated through `kb-tick`. Five fields per
   process — `id`, `enabled`, `when`, `run`, `outputs` — and one file
   to read to see which routines run on your machine. Background runs
-  are text-first by default. The two exact daily digest commands may send the
-  finalized text either to NotebookLM Audio Overview or to the on-demand Qwen
-  runtime followed by Telegram; other scheduled commands remain fail-closed.
+  are text-first by default. Morning audio uses the whole finalized same-day
+  brief, eligible arXiv report, and Money Radar digest in that order, without a
+  second synthesis or compression pass. The two exact daily digest commands may
+  send their finalized text either to NotebookLM Audio Overview or to the
+  on-demand Qwen runtime followed by Telegram; other scheduled commands remain
+  fail-closed.
   Fresh installs default to NotebookLM, while local Qwen is an explicit choice
   that runs `kb-tts-install`; the model exits after each render instead of
   running as a service. A missing config self-heals with safe defaults.
@@ -289,9 +292,11 @@ kb-demo brief          # see what a synthesized brief looks like
 ```
 
 That's the value loop. Methodology comes after, when you want it.
-Daily research delivers text out of the box. Morning/evening digest text is
-generated the same way for both audio routes. Choose where that finished text
-goes:
+Daily research delivers text out of the box. For morning audio, Vepol takes the
+whole finalized morning brief, the whole eligible same-day arXiv report, and the
+whole same-day Money Radar digest. It does not summarize those blocks again. The
+same frozen source goes to both audio routes: Qwen narrates it literally, while
+NotebookLM may turn it into its own non-literal Audio Overview. Choose the route:
 
 ```bash
 # Audio Overview remains in NotebookLM; nothing is sent to Telegram.

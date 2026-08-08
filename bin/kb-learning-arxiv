@@ -57,6 +57,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _kb_profile  # noqa: E402
+from _kb_claude_runner import run_command as run_unbounded_command  # noqa: E402
 from _kb_codex import CodexUnavailable, codex_bin  # noqa: E402
 
 # NOTE: no urllib here, deliberately. On macOS, a urllib fetch in this
@@ -80,9 +81,11 @@ ATOM_NS = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schema
 
 DEFAULT_CATEGORIES = ["cs.AI", "cs.LG", "cs.CL", "cs.CV", "stat.ML"]
 MAX_PAPERS_DEFAULT = 3
-# One Telegram message is 4096 chars; 3900 keeps the digest single-message
-# with headroom (owner 2026-06-12: slightly more detail per paper).
-DIGEST_BUDGET = 3900
+# Spec full-paper-messages-2026-07-29: delivery is 1 header + 1 message per
+# paper, each ≤ TELEGRAM_MAX by construction (greedy section packing +
+# fail-closed guard). The old single-message DIGEST_BUDGET shrink loop is gone.
+# Env override exists for tests only (forcing the fail-closed path).
+TELEGRAM_MAX = int(os.environ.get("KB_LEARNING_ARXIV_TELEGRAM_MAX", "4096"))
 INCIDENT_ATTEMPTS = 8
 # D12 (spec morning-digest-inputs-rebalance-2026-07-11): timeouts are generous
 # with headroom so real generation work is never killed mid-flight. Env-
@@ -92,9 +95,11 @@ JACCARD_LIMIT = 0.6
 # Manifest contract version. v2 moved translation out of Grok into Codex.
 # v3 adds first-class method/setup summaries (`method_loc`). v4 switches the
 # Codex analysis input from abstract snippets to extracted full paper text
-# when available. Older manifests must NOT satisfy the stage cache, or they
-# would keep delivering abstract-only paper explanations.
-MANIFEST_VERSION = 5
+# when available. v6 (spec full-paper-messages-2026-07-29) replaces the
+# one-line `why_loc` with the mandatory-two-clause `why_selected_loc` and adds
+# per-message delivery bookkeeping. Older manifests must NOT satisfy the stage
+# cache, or they would keep serving the retired short "why" line.
+MANIFEST_VERSION = 6
 # Grok now does X/Reddit social ONLY (translation moved to Codex), so its
 # default timeout drops 900→600s. Codex translation is offline text work,
 # fast; 300s is generous. Both overridable via env. Sequential worst case
@@ -107,9 +112,11 @@ FULLTEXT_MAX_CHARS_DEFAULT = 180000
 
 # D1 — pluggable translate/analysis executor chain (spec morning-digest-inputs-
 # rebalance-2026-07-11). Ported from kb-morning-digest's SYNTH_BACKENDS pattern.
-# codex,claude with claude the always-installed fallback (owner OQ-1). Prompt is
-# ALWAYS delivered by pointer file, never argv.
-TRANSLATE_AGENTS_DEFAULT = "codex,claude"
+# claude,codex — owner directive 2026-07-29 (chat): paper analysis/translation
+# runs on Claude; Codex stays as the fallback lane only. (Original order
+# codex,claude per owner OQ-1.) Prompt is ALWAYS delivered by pointer file,
+# never argv.
+TRANSLATE_AGENTS_DEFAULT = "claude,codex"
 # Per-agent 900s (deep multi-paper analysis of up to 180KB full text is real
 # generation work); whole-chain 1800s (room for two unhurried attempts).
 TRANSLATE_TIMEOUT = int(os.environ.get("KB_LEARNING_ARXIV_TRANSLATE_TIMEOUT", "900"))
@@ -125,8 +132,14 @@ TARGET_ABSTRACT = 1500
 TARGET_STUDIED = 500
 TARGET_METHOD = 700
 TARGET_FOUND = 700
-TARGET_WHY = 250
+# Spec full-paper-messages-2026-07-29 D3: 2-4 sentences, both clauses
+# mandatory (why selected + what to apply in the owner's projects).
+TARGET_WHY_SELECTED = 450
 TARGET_TERM_DEF = 160
+# Term NAME gate (spec D2): the definition was already gated, the name was
+# not — the one field that could have broken the "every section ≤ 4096"
+# guarantee of the greedy message packing.
+TARGET_TERM_NAME = 60
 OVERSIZE_FACTOR = 3
 TERMS_MIN = 3
 TERMS_MAX = 6
@@ -252,7 +265,7 @@ LABELS = {
         "report_runner_ups": "Не вошли (runner-ups)",
         "report_terms": "Термины",
         "report_translate_status": "Статус перевода",
-        "no_new_papers": "Новых статей arXiv по AI-agent темам нет — все свежее уже разбирали.",
+        "no_new_papers": "Сегодня новых статей arXiv нет.",
         "report_sources": "Источники",
     },
     "en": {
@@ -306,7 +319,7 @@ LABELS = {
         "report_runner_ups": "Runner-ups (not selected)",
         "report_terms": "Terms",
         "report_translate_status": "Translation status",
-        "no_new_papers": "No new arXiv AI-agent papers — everything fresh has already been covered.",
+        "no_new_papers": "There are no new arXiv papers today.",
         "report_sources": "Sources",
     },
 }
@@ -388,7 +401,8 @@ def load_config() -> dict:
                 cats = [c.strip().strip("'\"") for c in m.group(1).split(",") if c.strip()]
                 if cats:
                     cfg["arxiv_categories"] = cats
-        elif key in ("learning_topic", "social_check", "focus_project"):
+        elif key in ("learning_topic", "social_check", "focus_project",
+                     "focus_context"):
             if val:
                 cfg[key] = val
     if legacy_present:
@@ -930,10 +944,11 @@ def method_text(paper: dict, limit: int = 240) -> str:
     return L("method_unavailable")
 
 
-def why_text(paper: dict) -> str:
-    """Per-paper practical sentence: Grok's specific one when available,
-    else the topic-group template (degraded mode)."""
-    loc = _loc_field(paper, "why")
+def why_selected_text(paper: dict) -> str:
+    """«Почему выбрана» prose (spec full-paper-messages D3): the LLM's
+    two-clause why_selected_loc when available, else the topic-group template
+    (documented degraded mode — never the scoring kitchen)."""
+    loc = _loc_field(paper, "why_selected")
     if loc:
         return loc
     templates = L("why_templates")
@@ -944,27 +959,30 @@ def why_text(paper: dict) -> str:
 
 
 def studied_display(paper: dict, limit: int = 240) -> str:
-    """Localized summary (Codex bounded translation) when available; otherwise
-    the deterministic English abstract extract — an honest degraded mode,
-    marked in the manifest as summary_source=fallback_en."""
+    """Localized summary (LLM, oversize-gated) when available; otherwise the
+    deterministic English abstract extract — an honest degraded mode, marked
+    in the manifest as summary_source=fallback_en. limit=None renders the
+    VALIDATED loc field whole; the ungated fallback keeps its own bound
+    (spec full-paper-messages D2: raw-feed input must not be able to reach
+    the fail-closed size guard)."""
     loc = _loc_field(paper, "studied")
     if loc:
         return truncate_sentence(loc, limit)
-    return studied_text(paper, limit)
+    return studied_text(paper, 240 if limit is None else limit)
 
 
 def found_display(paper: dict, limit: int = 240) -> str:
     loc = _loc_field(paper, "found")
     if loc:
         return truncate_sentence(loc, limit)
-    return found_text(paper, limit)
+    return found_text(paper, 240 if limit is None else limit)
 
 
 def method_display(paper: dict, limit: int = 240) -> str:
     loc = _loc_field(paper, "method")
     if loc:
         return truncate_sentence(loc, limit)
-    return method_text(paper, limit)
+    return method_text(paper, 240 if limit is None else limit)
 
 
 def abstract_display(paper: dict, limit: int = 700) -> str:
@@ -979,7 +997,7 @@ def build_summary(paper: dict) -> str:
         f"{L('studied')}: {studied_display(paper)} "
         f"{L('method')}: {method_display(paper)} "
         f"{L('found')}: {found_display(paper)} "
-        f"{L('why')}: {why_text(paper)}"
+        f"{L('reason')}: {why_selected_text(paper)}"
     )
 
 
@@ -1022,17 +1040,34 @@ def _resolve_agent_bin(name: str, candidates: list) -> str:
     return shutil.which(name) or name
 
 
-def _run_agent(argv: list, timeout: int, capture_file: pathlib.Path = None) -> tuple:
-    """Run a CLI agent headlessly with a hard wall-clock cap. stdin is ALWAYS
+def _run_agent(
+    argv: list,
+    timeout: int,
+    capture_file: pathlib.Path = None,
+    *,
+    unbounded: bool = False,
+) -> tuple:
+    """Run a CLI agent headlessly. Claude uses the durable unbounded runner.
+
+    Other providers retain their wall-clock cap. stdin is ALWAYS
     /dev/null (codex 0.138+ hangs on open stdin; a Bun/Node agent that inherits a
     live stdin can stall too). Returns (text|None, rc, reason, err_tail): reason
     is 'launch_error'/'timeout' for launch/timeout failures (caught per-agent,
     never crashing the run), else '' (the chain does the semantic validation)."""
     try:
-        proc = subprocess.run(
-            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=timeout, cwd=str(HUB), check=False,
-        )
+        if unbounded:
+            proc = run_unbounded_command(
+                argv,
+                cwd=HUB,
+                output_mode="text",
+                kind="claude",
+                metadata={"caller": "kb-learning-arxiv"},
+            )
+        else:
+            proc = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=timeout, cwd=str(HUB), check=False,
+            )
     except subprocess.TimeoutExpired:
         return None, -1, "timeout", "agent timeout"
     except Exception as exc:  # noqa: BLE001 (OSError/FileNotFoundError etc.)
@@ -1074,7 +1109,7 @@ def _translate_claude(prompt_file: pathlib.Path, date_iso: str, timeout: int) ->
     bin_ = _resolve_agent_bin("claude", ["/opt/homebrew/bin/claude"])
     argv = [bin_, "-p", _pointer_instruction(prompt_file),
             "--output-format", "text", "--no-session-persistence"]
-    return _run_agent(argv, timeout)
+    return _run_agent(argv, timeout, unbounded=True)
 
 
 def _translate_agy(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> tuple:
@@ -1203,6 +1238,17 @@ def codex_prompt(date_iso: str, papers: list) -> str:
             f"<<<ANALYSIS_TEXT\n{analysis_text}\nANALYSIS_TEXT"
         )
     papers_block = "\n".join(blocks)
+    # Spec D3: the owner's project focus grounds why_selected_loc. focus_project
+    # is the project slug; focus_context is an optional owner-curated line about
+    # what is being built right now (anti-formulaic grounding).
+    cfg = load_config()
+    focus_lines = ["The user's project context: a local AI orchestrator with "
+                   "agents, memory/KB in markdown and tool-use (Vepol)."]
+    if cfg.get("focus_project"):
+        focus_lines.append(f"Focus project: {cfg['focus_project']}.")
+    if cfg.get("focus_context"):
+        focus_lines.append(f"Current focus: {cfg['focus_context']}.")
+    FOCUS_BLOCK = " ".join(focus_lines)
     return f"""# Translate + analyze today's arXiv papers ({date_iso})
 
 The user's language is: {UI_LANG_NAME}. For EACH paper below, summarize it in
@@ -1223,7 +1269,11 @@ bit longer and that is fine; only a runaway dump of the whole paper is wrong:
 - `studied_loc`: what exactly they studied in {UI_LANG_NAME} (target ~{TARGET_STUDIED} chars)
 - `method_loc`: how they studied it and on what exact data/benchmark/experiment/model/setup, if stated in `analysis_text`; if not stated, say the supplied text does not specify this (target ~{TARGET_METHOD} chars)
 - `found_loc`: what they found/claim in {UI_LANG_NAME}, with concrete numbers from `analysis_text` mandatory when present (target ~{TARGET_FOUND} chars)
-- `why_loc`: one practical sentence in {UI_LANG_NAME} — why THIS paper matters to a user building a local AI orchestrator with agents, memory/KB and tool-use (derived from `analysis_text`, target ~{TARGET_WHY} chars)
+- `why_selected_loc`: 2-4 sentences in {UI_LANG_NAME} with BOTH clauses
+  mandatory: (a) why THIS paper made today's selection — its topic in plain
+  words, and (b) what concretely to apply or check in the user's own projects
+  (derived from `analysis_text`, target ~{TARGET_WHY_SELECTED} chars).
+  {FOCUS_BLOCK}
 - `terms`: {TERMS_MIN}-{TERMS_MAX} glossary entries per paper, each a plain-language
   definition of a key acronym/technical term used in the summary — the glossary
   the user asked for. Each entry {{"term": "<name>", "def": "<plain-language definition in {UI_LANG_NAME}, target ~{TARGET_TERM_DEF} chars>"}}
@@ -1238,7 +1288,7 @@ Return ONLY one JSON object, no prose before or after, exactly this shape:
 "studied_loc": "<sentences in {UI_LANG_NAME}>",
 "method_loc": "<how it was researched, and on what data/benchmark/experiment/setup; or 'not specified in the supplied text' in {UI_LANG_NAME}>",
 "found_loc": "<sentences in {UI_LANG_NAME}, numbers when present>",
-"why_loc": "<practical sentence in {UI_LANG_NAME}>",
+"why_selected_loc": "<2-4 sentences in {UI_LANG_NAME}: why selected + what to apply in the user's projects>",
 "terms": [{{"term": "<name>", "def": "<plain-language definition in {UI_LANG_NAME}>"}}]}}]}}
 
 Rules: `studied_loc`/`method_loc`/`found_loc`/`abstract_loc` are
@@ -1329,8 +1379,10 @@ def _oversized(text: str, target: int) -> bool:
 
 
 def _valid_terms(raw) -> list:
-    """Return the accepted glossary entries: {term, def} with a non-empty term,
-    a non-empty def that is accept_loc-valid and not oversized (D2)."""
+    """Return the accepted glossary entries: {term, def} with a non-empty term
+    whose NAME is not oversized (spec full-paper-messages D2: the name gate
+    closes the "every rendered section ≤ TELEGRAM_MAX" guarantee) and a
+    non-empty def that is accept_loc-valid and not oversized (D2)."""
     out = []
     if not isinstance(raw, list):
         return out
@@ -1341,6 +1393,8 @@ def _valid_terms(raw) -> list:
         definition = str(e.get("def", "") or "").strip()
         if not term or not definition:
             continue
+        if _oversized(term, TARGET_TERM_NAME):
+            continue
         if _oversized(definition, TARGET_TERM_DEF) or not accept_loc(definition):
             continue
         out.append({"term": term, "def": definition})
@@ -1348,7 +1402,7 @@ def _valid_terms(raw) -> list:
 
 
 # Core required localized fields (present + accept_loc + not oversized) — the
-# gate for a SEMANTIC-success attempt (D1). why_loc/title_loc/terms are
+# gate for a SEMANTIC-success attempt (D1). why_selected_loc/title_loc/terms are
 # enrichment: their absence marks the run `partial`, never rejects the attempt.
 _CORE_LOC_FIELDS = (
     ("abstract_loc", TARGET_ABSTRACT),
@@ -1396,7 +1450,7 @@ def _validate_translation(papers: list, by_id: dict) -> tuple:
 
 def _apply_translation(papers: list, by_id: dict, agent: str) -> bool:
     """Commit an ACCEPTED attempt's fields (validated by _validate_translation).
-    Returns partial=True when any enrichment field (why_loc / terms glossary)
+    Returns partial=True when any enrichment field (why_selected_loc / terms glossary)
     fell back for at least one paper."""
     partial = False
     for p in papers:
@@ -1408,9 +1462,10 @@ def _apply_translation(papers: list, by_id: dict, agent: str) -> bool:
         title_loc = str(rec.get("title_loc", "") or "").strip()
         if title_loc and accept_loc(title_loc) and not _oversized(title_loc, 200):
             p["title_loc"] = title_loc
-        why_loc = str(rec.get("why_loc", "") or "").strip()
-        if why_loc and accept_loc(why_loc) and not _oversized(why_loc, TARGET_WHY):
-            p["why_loc"] = why_loc
+        why_selected = str(rec.get("why_selected_loc", "") or "").strip()
+        if (why_selected and accept_loc(why_selected)
+                and not _oversized(why_selected, TARGET_WHY_SELECTED)):
+            p["why_selected_loc"] = why_selected
         else:
             partial = True
         terms = _valid_terms(rec.get("terms"))
@@ -1423,7 +1478,7 @@ def _apply_translation(papers: list, by_id: dict, agent: str) -> bool:
 
 def translate_check(date_iso: str, papers: list) -> tuple:
     """D1 pluggable translate/analysis executor chain. Tries each configured
-    agent (KB_LEARNING_ARXIV_TRANSLATE_AGENTS, default codex,claude) in order;
+    agent (KB_LEARNING_ARXIV_TRANSLATE_AGENTS, default claude,codex) in order;
     the prompt is delivered by pointer FILE to every agent (never argv). SUCCESS
     IS SEMANTIC: an attempt counts only when its output parses as the JSON
     envelope, has a papers[] entry for every selected id, and every core field
@@ -1449,12 +1504,18 @@ def translate_check(date_iso: str, papers: list) -> tuple:
             log(f"{date_iso}: unknown translate agent {name!r}; skipping")
             continue
         remaining = int(deadline - time.monotonic())
-        if remaining < 30:
+        if name != "claude" and remaining < 30:
             log(f"{date_iso}: translate chain budget exhausted before {name}")
-            break
+            continue
         t0 = time.monotonic()
-        raw, rc, launch_reason, err_tail = fn(prompt_file, date_iso,
-                                              min(TRANSLATE_TIMEOUT, remaining))
+        lane_budget = (
+            TRANSLATE_TIMEOUT
+            if name == "claude"
+            else min(TRANSLATE_TIMEOUT, remaining)
+        )
+        raw, rc, launch_reason, err_tail = fn(
+            prompt_file, date_iso, lane_budget
+        )
         secs = round(time.monotonic() - t0, 1)
         if raw:
             last_raw = raw
@@ -1600,26 +1661,14 @@ def title_display(paper: dict, limit: int = 160) -> str:
     loc = _loc_field(paper, "title")
     if loc:
         return truncate_sentence(loc, limit)
-    return truncate_sentence(paper.get("title", ""), limit)
+    # Raw feed titles are ungated input — never render them unbounded.
+    return truncate_sentence(paper.get("title", ""), 200 if limit is None else limit)
 
 
-def reason_text(paper: dict) -> str:
-    """Human-readable localized selection reason, computable from manifest
-    fields alone (works on the stage-cache path too)."""
-    group_names = L("groups")
-    groups = [group_names.get(g, g) for g in paper.get("_groups", [])]
-    s = paper.get("scores", {})
-    parts = []
-    if groups:
-        parts.append(f"{L('topics')}: {', '.join(groups)}")
-    sig = s.get("abstract_signal")
-    if sig is not None:
-        parts.append(L("signal").format(sig=sig))
-    if s.get("final") is not None:
-        parts.append(L("score").format(final=s["final"]))
-    if paper.get("_dup_of"):
-        parts.append(L("dup_fill").format(dup=paper["_dup_of"]))
-    return "; ".join(parts) or L("relevant_default")
+# NOTE: the old score-based reason_text (topics; abstract-signal; score) is
+# gone from ALL user surfaces (spec full-paper-messages D4): «Почему выбрана»
+# is why_selected_text everywhere; the raw scoring audit lives in the report's
+# «Скоры» line and the snapshot's reason= field (p["reason"]).
 
 
 def render_snapshot(date_iso: str, papers: list, runner_ups: list, fetched: int, relevant: int) -> str:
@@ -1755,7 +1804,7 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
             f"- {L('report_authors')}: {render_authors(p['authors'])}",
             f"- arXiv: {p['link']}",
             f"- {L('report_category')}: {p.get('primary_category', '—')} · {p.get('published', '')[:10]}",
-            f"- {L('reason')}: {reason_text(p)}",
+            f"- {L('reason')}: {why_selected_text(p)}",
             f"- {L('report_scores')}: `{json.dumps(p['scores'])}`",
             "",
             f"**{L('studied')}:** {studied_display(p, None)}",
@@ -1774,8 +1823,6 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
                 "",
             ])
         block.extend([
-            f"**{L('why')}:** {why_text(p)}",
-            "",
             f"**{L('report_abstract')}:** {abstract_display(p, None)}",
             "",
         ])
@@ -1797,16 +1844,23 @@ def render_report(date_iso: str, papers: list, runner_ups: list, social_status: 
     return "\n".join(lines) + "\n"
 
 
-def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
-                  fetched: int = 0, social_status: str = "skipped",
-                  translate_status: str = "ok") -> str:
-    header = [f"🧪 arXiv learning — {date_iso}", ""]
-    # D5: visible degradation warning as the FIRST body line — never a silent
-    # fallback_en again.
+class RenderOversize(RuntimeError):
+    """A rendered Telegram message cannot fit TELEGRAM_MAX even after the
+    terms-drop and section-split cascade — a render bug by construction
+    (spec full-paper-messages D2 step 3). Delivery must fail closed: the
+    sender is never handed a message it would truncate."""
+
+
+def render_header_message(date_iso: str, papers: list, relevant: int,
+                          max_papers: int, fetched: int,
+                          translate_status: str) -> str:
+    lines = [f"🧪 arXiv learning — {date_iso}", ""]
+    # D5 (prior spec): visible degradation warning as the FIRST body line —
+    # never a silent fallback_en again.
     warning = translate_warning(translate_status)
     if warning:
-        header.append(warning)
-        header.append("")
+        lines.append(warning)
+        lines.append("")
     scanned = (
         L("scanned").format(fetched=fetched, relevant=relevant)
         if fetched else
@@ -1814,50 +1868,108 @@ def render_digest(date_iso: str, papers: list, relevant: int, max_papers: int,
     )
     report_rel = f"reports/learning-arxiv-summary-{date_iso}.md"
     if not papers:
-        header.append(f"{scanned} {L('zero')}")
-        header.append("")
-        header.append(L("footer").format(path=report_rel))
-        return "\n".join(header)
-    if len(papers) < max_papers:
-        header.append(f"{scanned} {L('fewer').format(n=len(papers))}")
+        lines.append(f"{scanned} {L('zero')}")
+    elif len(papers) < max_papers:
+        lines.append(f"{scanned} {L('fewer').format(n=len(papers))}")
     else:
-        header.append(f"{scanned} {L('picked').format(n=len(papers))}")
-    header.append("")
+        lines.append(f"{scanned} {L('picked').format(n=len(papers))}")
+    lines.append("")
+    lines.append(L("footer").format(path=report_rel))
+    return "\n".join(lines)
 
-    render_social = should_render_social(social_status)
 
-    def paper_block(p: dict, idx: int, text_limit: int) -> str:
+def paper_sections(p: dict, idx: int, total: int, social_status: str,
+                   include_terms: bool = True) -> tuple:
+    """(head, sections) for one paper message. Every narrative field renders
+    in FULL (limit=None) — the no-truncation invariant of the spec. The head
+    carries numbering; continuation pieces re-mint it via continuation_head."""
+    head = (f"{idx}/{total} · {title_display(p, None)}\n"
+            f"{render_authors(p['authors'])} · arXiv: {p['link']}")
+    sections = [
+        f"{L('reason')}: {why_selected_text(p)}",
+        f"{L('studied')}: {studied_display(p, None)}",
+        f"{L('method')}: {method_display(p, None)}",
+        f"{L('found')}: {found_display(p, None)}",
+    ]
+    if should_render_social(social_status):
         s = p.get("social", {})
-        line_limit = max(70, min(220, text_limit))
-        lines = [
-            f"{idx}. {title_display(p)} — {render_authors(p['authors'])}\n"
-            f"   arXiv: {p['link']}\n"
-            f"   {L('reason')}: {reason_text(p)}\n"
-            f"   {L('abstract')}: {abstract_display(p, text_limit)}\n"
-            f"   {L('studied')}: {studied_display(p, line_limit)}\n"
-            f"   {L('method')}: {method_display(p, line_limit)}\n"
-            f"   {L('found')}: {found_display(p, line_limit)}"
-        ]
-        if render_social:
-            social_line = (
-                f"X: {render_status(s.get('x_status', 'degraded'))} / "
-                f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
-            )
-            prior = s.get("prior_context", "")
-            if prior:
-                social_line += f" — {prior}"
-            lines.append(f"   {social_line}")
-        lines.append(f"   {L('why')}: {why_text(p)}")
-        return "\n".join(lines)
+        social_line = (
+            f"X: {render_status(s.get('x_status', 'degraded'))} / "
+            f"Reddit: {render_status(s.get('reddit_status', 'degraded'))}"
+        )
+        prior = s.get("prior_context", "")
+        if prior:
+            social_line += f" — {prior}"
+        sections.append(social_line)
+    terms = p.get("terms") or []
+    if include_terms and terms:
+        sections.append(
+            f"{L('report_terms')}:\n"
+            + "\n".join(f"- {t.get('term')}: {t.get('def')}" for t in terms)
+        )
+    return head, sections
 
-    footer = ["", L("footer").format(path=report_rel)]
-    text_limit = 320
-    while True:
-        blocks = [paper_block(p, i, text_limit) for i, p in enumerate(papers, 1)]
-        digest = "\n".join(header + ["\n\n".join(blocks)] + footer)
-        if len(digest) <= DIGEST_BUDGET or text_limit <= 60:
-            return digest
-        text_limit -= 30
+
+def continuation_head(p: dict, idx: int, total: int) -> str:
+    return f"{idx}/{total} · {title_display(p, None)} (продолжение)"
+
+
+def pack_paper_messages(p: dict, idx: int, total: int, social_status: str) -> list:
+    """One paper → one or more Telegram messages, each ≤ TELEGRAM_MAX.
+
+    Cascade (spec D2): full message → drop terms → greedy section-boundary
+    packing into as many pieces as needed (≥2). Raises RenderOversize when a
+    single head+section pair cannot fit — unreachable while the parse gates
+    hold (every field ≤ 3× its target, term names gated), kept as the
+    fail-closed guard."""
+    for include_terms in (True, False):
+        head, sections = paper_sections(p, idx, total, social_status,
+                                        include_terms=include_terms)
+        msg = "\n\n".join([head] + sections)
+        if len(msg) <= TELEGRAM_MAX:
+            return [msg]
+    # Greedy split at section boundaries; terms stay dropped (report keeps them).
+    head, sections = paper_sections(p, idx, total, social_status,
+                                    include_terms=False)
+    pieces, cur = [], [head]
+    cont = continuation_head(p, idx, total)
+    for sec in sections:
+        candidate = "\n\n".join(cur + [sec])
+        if len(candidate) <= TELEGRAM_MAX:
+            cur.append(sec)
+            continue
+        if len(cur) > 1:
+            pieces.append("\n\n".join(cur))
+            cur = [cont]
+        if len("\n\n".join(cur + [sec])) > TELEGRAM_MAX:
+            raise RenderOversize(
+                f"paper {p.get('id', '?')}: section of {len(sec)} chars cannot "
+                f"fit TELEGRAM_MAX={TELEGRAM_MAX} even alone"
+            )
+        cur.append(sec)
+    if len(cur) > 1:
+        pieces.append("\n\n".join(cur))
+    return pieces
+
+
+def render_messages(date_iso: str, papers: list, relevant: int, max_papers: int,
+                    fetched: int = 0, social_status: str = "skipped",
+                    translate_status: str = "ok") -> list:
+    """The full Telegram sequence: header message + per-paper messages
+    (spec full-paper-messages D1). Zero-paper days stay a single message.
+    Every returned message is ≤ TELEGRAM_MAX by construction; a violation
+    raises RenderOversize (fail closed — checked once more at the end)."""
+    messages = [render_header_message(date_iso, papers, relevant, max_papers,
+                                      fetched, translate_status)]
+    total = len(papers)
+    for idx, p in enumerate(papers, 1):
+        messages.extend(pack_paper_messages(p, idx, total, social_status))
+    for m in messages:
+        if len(m) > TELEGRAM_MAX:
+            raise RenderOversize(
+                f"rendered message of {len(m)} chars exceeds TELEGRAM_MAX={TELEGRAM_MAX}"
+            )
+    return messages
 
 
 # --------------------------------------------------------------------------
@@ -1879,10 +1991,42 @@ def resolve_channel_send_bin() -> str:
     return ""
 
 
-def deliver_digest(date_iso: str, digest: str, manifest: dict) -> int:
+def deliver_messages(date_iso: str, fresh_messages: list, manifest: dict) -> int:
+    """Sequential per-message delivery with resume-by-index (spec D5).
+
+    A partially delivered day stores its exact `messages` in the manifest;
+    a delivery-only retry reuses that stored list byte-for-byte and resumes
+    from `messages_delivered`, so already-sent messages are never duplicated.
+    A fresh pipeline pass (stage re-run, language switch, --force) reaches
+    here with those keys dropped and rebuilds from fresh_messages."""
     outputs = process_outputs()
     manifest["outputs"] = sorted(outputs)
-    manifest["digest"] = digest
+    stored = manifest.get("messages")
+    if isinstance(stored, list) and stored and all(isinstance(m, str) for m in stored):
+        messages = stored
+    else:
+        messages = list(fresh_messages)
+        manifest["messages"] = messages
+        manifest["messages_delivered"] = 0
+    # Outbound size validation for ANY source (stored included): the sender
+    # must never receive a message it would split/truncate. A corrupt stored
+    # list fails closed here; the keys are dropped so the next run rebuilds
+    # from the intact content stages (possible re-send of already delivered
+    # pieces is logged corrupt-store recovery, not the normal path).
+    oversize = [i for i, m in enumerate(messages) if len(m) > TELEGRAM_MAX]
+    if oversize:
+        if messages is stored:
+            # Distinct marker promised by spec D5: this is corrupt-store
+            # recovery (stored list dropped, next run rebuilds and may
+            # re-send already delivered pieces), not a fresh-render bug.
+            log(f"{date_iso}: corrupt-store recovery — stored message(s) "
+                f"{oversize} exceed TELEGRAM_MAX={TELEGRAM_MAX}; dropping "
+                f"stored sequence, full rebuild+resend on next run")
+        return _render_failed(
+            date_iso, manifest,
+            RuntimeError(f"stored/fresh message(s) {oversize} exceed "
+                         f"TELEGRAM_MAX={TELEGRAM_MAX}"))
+    manifest["digest"] = "\n\n".join(messages)
     if "telegram" not in outputs:
         manifest["digest_delivered"] = False
         manifest["status"] = "completed"
@@ -1894,24 +2038,53 @@ def deliver_digest(date_iso: str, digest: str, manifest: dict) -> int:
     if not sender:
         return _delivery_failed(date_iso, manifest, "kb-channel-send not found")
     try:
-        proc = subprocess.run(
-            [sender, "learning-arxiv", digest],
-            capture_output=True, text=True, timeout=60, check=False,
-            stdin=subprocess.DEVNULL,
-        )
-    except Exception as exc:
-        # A hung/crashed sender must record a failed manifest, not crash
-        # the runner with an unwritten state (TimeoutExpired included).
-        return _delivery_failed(date_iso, manifest, f"telegram delivery failed: {exc}")
-    if proc.returncode != 0:
-        detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
-        return _delivery_failed(date_iso, manifest, f"telegram delivery failed: {detail}")
+        start = int(manifest.get("messages_delivered") or 0)
+    except (TypeError, ValueError):
+        start = 0
+    # Clamp a malformed counter instead of crashing or over-indexing.
+    start = max(0, min(start, len(messages)))
+    manifest["messages_delivered"] = start
+    for i in range(start, len(messages)):
+        try:
+            proc = subprocess.run(
+                [sender, "learning-arxiv", messages[i]],
+                capture_output=True, text=True, timeout=60, check=False,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            # A hung/crashed sender must record a failed manifest, not crash
+            # the runner with an unwritten state (TimeoutExpired included).
+            return _delivery_failed(
+                date_iso, manifest,
+                f"telegram delivery failed at message {i + 1}/{len(messages)}: {exc}")
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
+            return _delivery_failed(
+                date_iso, manifest,
+                f"telegram delivery failed at message {i + 1}/{len(messages)}: {detail}")
+        # Durable per-message progress: a crash between sends resumes correctly.
+        manifest["messages_delivered"] = i + 1
+        save_manifest(date_iso, manifest)
     manifest["digest_delivered"] = True
     manifest["status"] = "completed"
     manifest["error"] = None
     save_manifest(date_iso, manifest)
-    log(f"{date_iso}: digest delivered")
+    log(f"{date_iso}: digest delivered ({len(messages)} messages)")
     return 0
+
+
+def _render_failed(date_iso: str, manifest: dict, exc: Exception) -> int:
+    """Spec D2 step 3 fail-closed: a message that cannot fit TELEGRAM_MAX is a
+    render bug; nothing is handed to the sender."""
+    manifest["digest_delivered"] = False
+    manifest["status"] = "failed"
+    manifest["error"] = f"render oversize (fail closed): {exc}"
+    manifest.pop("messages", None)
+    manifest.pop("messages_delivered", None)
+    maybe_suggest_incident(date_iso, manifest)
+    save_manifest(date_iso, manifest)
+    log(f"{date_iso}: {manifest['error']}")
+    return 1
 
 
 def _delivery_failed(date_iso: str, manifest: dict, error: str) -> int:
@@ -1932,9 +2105,12 @@ def _deliver_no_new_papers(date_iso: str, manifest: dict) -> int:
     manifest["runner_ups"] = []
     manifest["arxiv_relevant"] = 0
     manifest["error"] = None
-    digest = f"🧪 arXiv learning — {date_iso}\n\n{L('no_new_papers')}"
+    # Fresh pipeline pass: any partially delivered message list from an
+    # earlier attempt is invalid here (the window was re-fetched).
+    manifest.pop("messages", None)
+    manifest.pop("messages_delivered", None)
     log(f"{date_iso}: empty window — no papers newer than the watermark")
-    return deliver_digest(date_iso, digest, manifest)
+    return deliver_messages(date_iso, [L("no_new_papers")], manifest)
 
 
 def _advance_watermark_on_delivery(date_iso: str, manifest: dict) -> None:
@@ -2036,7 +2212,8 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         for stale_key in ("selected_papers", "runner_ups", "social_check",
                           "grok_rc", "grok_stderr_tail", "translate_check",
                           "translate_agent", "translate_attempts",
-                          "window_max_submitted", "no_new_papers", "digest"):
+                          "window_max_submitted", "no_new_papers", "digest",
+                          "messages", "messages_delivered"):
             manifest.pop(stale_key, None)
     manifest.update({
         "date": date_iso,
@@ -2081,13 +2258,23 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     if cached:
         log(f"{date_iso}: reusing cached selection+translation+social from manifest (stage cache)")
         papers = manifest["selected_papers"]
-        digest = render_digest(
-            date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)),
-            max_papers, fetched=int(manifest.get("arxiv_fetched") or 0),
-            social_status=str(manifest.get("social_check") or "skipped"),
-            translate_status=str(manifest.get("translate_check") or "ok"),
-        )
-        rc = deliver_digest(date_iso, digest, manifest)
+        stored = manifest.get("messages")
+        if isinstance(stored, list) and stored and all(isinstance(m, str) for m in stored):
+            # Delivery-only retry: the byte-exact stored sequence IS the
+            # content — never re-render over it (a render failure here would
+            # destroy resume progress; impl-review R1 blocker 1).
+            fresh_messages = stored
+        else:
+            try:
+                fresh_messages = render_messages(
+                    date_iso, papers, int(manifest.get("arxiv_relevant") or len(papers)),
+                    max_papers, fetched=int(manifest.get("arxiv_fetched") or 0),
+                    social_status=str(manifest.get("social_check") or "skipped"),
+                    translate_status=str(manifest.get("translate_check") or "ok"),
+                )
+            except RenderOversize as exc:
+                return _render_failed(date_iso, manifest, exc)
+        rc = deliver_messages(date_iso, fresh_messages, manifest)
         if rc == 0:
             _advance_watermark_on_delivery(date_iso, manifest)
         return rc
@@ -2186,7 +2373,7 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
         if should_render_social(status):
             m_p["social"] = p.get("social", {})
         for k in ("title_loc", "abstract_loc", "abstract_source",
-                  "studied_loc", "method_loc", "found_loc", "why_loc",
+                  "studied_loc", "method_loc", "found_loc", "why_selected_loc",
                   "summary_source", "terms"):
             if k in p:
                 m_p[k] = p[k]
@@ -2206,10 +2393,19 @@ def _run_locked(date_iso: str, cfg: dict, manifest: dict, force: bool) -> int:
     manifest["status"] = "report_written"
     save_manifest(date_iso, manifest)
 
-    digest = render_digest(date_iso, selected, relevant, max_papers,
-                           fetched=len(candidates), social_status=status,
-                           translate_status=t_status)
-    rc = deliver_digest(date_iso, digest, manifest)
+    # Fresh pipeline pass: stored per-message bookkeeping from an earlier
+    # attempt belongs to content that was just regenerated — drop it so the
+    # new messages are rebuilt (delivery-only retries go through the stage
+    # cache above and keep it).
+    manifest.pop("messages", None)
+    manifest.pop("messages_delivered", None)
+    try:
+        messages = render_messages(date_iso, selected, relevant, max_papers,
+                                   fetched=len(candidates), social_status=status,
+                                   translate_status=t_status)
+    except RenderOversize as exc:
+        return _render_failed(date_iso, manifest, exc)
+    rc = deliver_messages(date_iso, messages, manifest)
     if rc == 0:
         # D4: advance the watermark ONLY on a delivered digest from a fully
         # fetched window, to the newest submittedDate in it (forward-only CAS).

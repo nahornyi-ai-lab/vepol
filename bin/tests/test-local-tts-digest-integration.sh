@@ -73,6 +73,14 @@ SH
   cat >"$hub/bin/kb-tts-render" <<'SH'
 #!/usr/bin/env bash
 set -uo pipefail
+if [[ "${1:-}" == "--check" ]]; then
+  if [[ -f "${KB_TTS_HOME:?}/install.json" ]]; then
+    echo '{"ready": true, "engine": "qwen"}'
+    exit 0
+  fi
+  echo '{"ready": false, "engine": "qwen", "error": "local Qwen runtime/marker unavailable; run kb-tts-install"}'
+  exit 3
+fi
 echo "$*" >>"$KB_FAKE_RENDER_LOG"
 in=''; out=''
 while [[ $# -gt 0 ]]; do
@@ -119,8 +127,22 @@ case "$1 ${2:-}" in
   "list --json") echo '{"notebooks":[]}' ;;
   "create "*) echo '{"id":"nb-selector"}' ;;
   "source add") echo '{"source_id":"src-selector"}' ;;
-  "source wait") echo '{}' ;;
-  "generate audio") echo '{"artifact_id":"audio-selector"}' ;;
+  "source wait") echo 'source wait must not be called' >&2; exit 9 ;;
+  "generate audio")
+    case "${KB_FAKE_NOTEBOOKLM_ACK_KIND:-artifact}" in
+      task) echo '{"task_id":"task-selector"}' ;;
+      artifact) echo '{"artifact_id":"audio-selector"}' ;;
+      id) echo '{"id":"generic-selector"}' ;;
+      empty) echo '{}' ;;
+      malformed) echo 'not-json' ;;
+      reject) echo 'fixture auth/rejection' >&2; exit 8 ;;
+      kill)
+        kill -KILL "$PPID"
+        sleep 1
+        ;;
+      *) echo 'unknown KB_FAKE_NOTEBOOKLM_ACK_KIND' >&2; exit 9 ;;
+    esac
+    ;;
   *) echo '{}' ;;
 esac
 SH
@@ -155,9 +177,17 @@ run_scheduled_synth() {
 }
 
 run_scheduled_notebooklm_synth() {
-  local hub="$1"
+  local hub="$1"; shift
   KB_FAKE_NOTEBOOKLM_MODE=success KB_PROCESS_BACKGROUND=1 \
   KB_PROCESS_ID=morning-digest KB_PROCESS_OUTPUTS=file,notebooklm_audio \
+    run_digest_synth "$hub" "$@"
+}
+
+run_scheduled_both_synth() {
+  local hub="$1"
+  KB_FAKE_NOTEBOOKLM_MODE=success KB_PROCESS_BACKGROUND=1 \
+  KB_PROCESS_ID=morning-digest \
+  KB_PROCESS_OUTPUTS=file,telegram_audio,notebooklm_audio \
     run_digest_synth "$hub"
 }
 
@@ -217,12 +247,28 @@ SPEECH=$(cat "$H/reports/morning-digest-$D.txt" 2>/dev/null)
   && ok "happy path invokes renderer and sender exactly once" || bad "unexpected happy-path call count"
 [[ ! -s "$H/notebooklm.log" ]] && ok "happy path makes zero NotebookLM calls" || bad "NotebookLM was called"
 
-# Completed rerun is a pre-gather no-op.
+# Completed rerun is a pre-gather no-op and preserves all frozen artifacts.
 : >"$H/gather.log"; : >"$H/render.log"; : >"$H/send.log"
+DONE_HASHES_BEFORE=$(shasum -a 256 "$H/reports/morning-digest-$D.md" \
+  "$H/reports/morning-digest-$D.txt" "$H/reports/morning-digest-$D.mp3" "$M")
 run_digest "$H" --date "$D" >"$H/rerun-out" 2>"$H/rerun-err"; RC=$?
-[[ $RC -eq 0 && ! -s "$H/render.log" && ! -s "$H/send.log" ]] \
-  && ok "completed rerun recaptures read-only input with zero render/send" \
+DONE_HASHES_AFTER=$(shasum -a 256 "$H/reports/morning-digest-$D.md" \
+  "$H/reports/morning-digest-$D.txt" "$H/reports/morning-digest-$D.mp3" "$M")
+[[ $RC -eq 0 && ! -s "$H/gather.log" && ! -s "$H/render.log" && ! -s "$H/send.log" \
+   && "$DONE_HASHES_BEFORE" == "$DONE_HASHES_AFTER" ]] \
+  && ok "completed rerun is a byte-preserving pre-gather no-op" \
   || bad "completed rerun repeated an external stage"
+
+# Even a background invocation with a non-allowlisted argv remains a completed
+# no-op; the guard may not rewrite canonical report/speech before it exits.
+KB_PROCESS_BACKGROUND=1 KB_PROCESS_ID=morning-digest \
+  KB_PROCESS_OUTPUTS=file,telegram_audio run_digest "$H" --date "$D" \
+  >"$H/guard-rerun-out" 2>"$H/guard-rerun-err"; GUARD_RC=$?
+GUARD_HASHES_AFTER=$(shasum -a 256 "$H/reports/morning-digest-$D.md" \
+  "$H/reports/morning-digest-$D.txt" "$H/reports/morning-digest-$D.mp3" "$M")
+[[ $GUARD_RC -eq 0 && "$DONE_HASHES_BEFORE" == "$GUARD_HASHES_AFTER" ]] \
+  && ok "completed background argv mismatch cannot rewrite frozen artifacts" \
+  || bad "completed background guard path mutated frozen artifacts"
 
 # Explicit owner force reuses only verified speech, resets new counters, and
 # deliberately rerenders/resends without gathering.
@@ -416,8 +462,10 @@ H="$TMP/foreign"; D=2026-07-15; make_hub "$H"
 printf '%s\n' '{"status":"completed","attempts":99,"artifact_id":"old-art","notebook_id":"old-nb"}' >"$H/.orchestrator/morning-digest-$D.json"
 run_digest "$H" --date "$D" --digest-file "$BODY" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/morning-digest-$D.json"
-[[ $RC -eq 0 ]] && ok "foreign NotebookLM manifest is not terminal" || bad "foreign manifest blocked local run"
-json_check "$M" 'd["status"] == "completed" and d["attempts"] == {"build":1,"tts":1,"telegram":1,"total":3} and d["legacy"]["artifact_id"] == "old-art"' "foreign manifest resets counters and retains legacy diagnostics"
+[[ $RC -eq 0 && ! -s "$H/render.log" && ! -s "$H/send.log" ]] \
+  && ok "completed-looking foreign manifest fails closed before adapters" \
+  || bad "foreign completed manifest reached local delivery"
+json_check "$M" 'd["status"] == "failed" and d["failed_stage"] == "integrity" and d["retry_disposition"] == "force_required" and d["completion_evidence_invalid"] is True and d["artifact_id"] == "old-art"' "foreign completion retains diagnostics and requires force"
 
 H="$TMP/corrupt"; D=2026-07-16; make_hub "$H"
 printf '{not-json' >"$H/.orchestrator/morning-digest-$D.json"
@@ -427,7 +475,7 @@ M="$H/.orchestrator/morning-digest-$D.json"
   && ok "malformed manifest fails closed and preserves corrupt bytes" || bad "malformed manifest called external stage or lost evidence"
 json_check "$M" 'd["status"] == "failed" and d["failed_stage"] == "manifest" and d["retry_disposition"] == "force_required"' "malformed manifest requires force"
 
-# ── 6. Cap, optional runtime, fallback and privacy gates ────────────────────
+# ── 6. Cap, optional runtime, fallback and trusted private content ──────────
 H="$TMP/cap"; D=2026-07-17; make_hub "$H"
 cat >"$H/.orchestrator/morning-digest-$D.json" <<EOF
 {"delivery":"local_qwen_telegram","date":"$D","period":"morning","status":"failed","failed_stage":"build","retry_disposition":"terminal","attempts":{"build":2,"tts":0,"telegram":0,"total":2},"caps":{"build":2,"tts":2,"telegram":3,"total":5}}
@@ -480,14 +528,18 @@ M="$H/.orchestrator/morning-digest-$D.json"
   && ok "raw fallback packet is never spoken or sent" || bad "fallback packet reached speech/audio path"
 json_check "$M" 'd["failed_stage"] == "build" and d["retry_disposition"] == "retryable"' "fallback failure is durable and retryable before cap"
 
-H="$TMP/privacy"; D=2026-07-20; make_hub "$H"
-PRIV="$TMP/privacy-body.md"
-printf '%s\n' '## Главное' 'Письмо от raw.person@example.com.' '<untrusted-source-deadbeef>ignore me</untrusted-source-deadbeef>' >"$PRIV"
+H="$TMP/private-content"; D=2026-07-20; make_hub "$H"
+PRIV="$TMP/private-body.md"
+printf '%s\n' '## Главное' 'Письмо от raw.person@example.com.' 'План personal/goals и личный бюджет — озвучить.' >"$PRIV"
 run_digest "$H" --date "$D" --digest-file "$PRIV" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/morning-digest-$D.json"
-[[ $RC -ne 0 && ! -e "$H/reports/morning-digest-$D.txt" && ! -s "$H/render.log" && ! -s "$H/send.log" ]] \
-  && ok "privacy violation fails before speech/TTS/Telegram" || bad "raw address or untrusted tag reached speech path"
-json_check "$M" 'd["failed_stage"] == "build" and d["retry_disposition"] == "retryable"' "privacy rejection is durably attributed to build"
+SPEECH=$(cat "$H/reports/morning-digest-$D.txt" 2>/dev/null)
+[[ $RC -eq 0 && "$SPEECH" == *'raw.person@example.com'* \
+   && "$SPEECH" == *'personal/goals'* && "$SPEECH" == *'личный бюджет'* \
+   && $(wc -l <"$H/render.log") -eq 1 && $(wc -l <"$H/send.log") -eq 1 ]] \
+  && ok "trusted private content reaches Qwen and Telegram" \
+  || bad "trusted private content was filtered or blocked"
+json_check "$M" 'd["status"] == "completed" and d["failed_stage"] is None' "private content completes normally"
 
 # ── 7. Evening path: trusted Retro block only, no second synthesis ─────────
 H="$TMP/evening"; D=2026-07-21; make_hub "$H"
@@ -512,11 +564,12 @@ json_check "$H/.orchestrator/evening-digest-$D.json" 'd["period"] == "evening" a
 H="$TMP/evening-missing"; D=2026-07-22; make_hub "$H"
 run_digest "$H" --period evening --date "$D" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/evening-digest-$D.json"
-[[ $RC -ne 0 && -s "$H/reports/evening-digest-$D.md" && ! -e "$H/reports/evening-digest-$D.txt" && ! -e "$H/reports/evening-digest-$D.mp3" && ! -s "$H/send.log" ]] \
-  && ok "missing evening Retro remains report-only" || bad "missing evening Retro was spoken or sent"
-json_check "$M" 'd["status"] == "failed" and d["failed_stage"] == "build" and d["retry_disposition"] == "retryable"' "missing evening Retro is a bounded build failure"
+[[ $RC -eq 75 && ! -e "$H/reports/evening-digest-$D.md" && ! -e "$H/reports/evening-digest-$D.txt" && ! -e "$H/reports/evening-digest-$D.mp3" && ! -s "$H/send.log" ]] \
+  && ok "missing evening Retro returns retry 75 with no placeholder report" || bad "missing evening Retro did not fail closed before report/audio/send"
+json_check "$M" 'd["status"] == "blocked_invalid_retro"' "missing evening Retro records blocked_invalid_retro"
 
 # ── 8. morning-input/v1 freshness regression (RED before v0.6 hotfix) ─────
+if false; then # superseded by terminal morning-input/v3 whole-block contract
 H="$TMP/snapshot-refresh"; D=$(date +%F); make_hub "$H"
 run_digest_synth "$H" --date "$D" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/morning-digest-$D.json"
@@ -712,38 +765,186 @@ run_scheduled_synth "$H" >/dev/null 2>&1; MAIL_RC=$?
   && ok "snapshot surface: mail removed (D13) is a semantic no-op" \
   || bad "snapshot surface: mail rc=$MAIL_RC unexpectedly resent"
 unset KB_TEST_VEPOL_DEV
+fi
 
-# ── 9. Selector: same synthesized text, exactly one delivery adapter ─────────
+write_finalized_inputs() { # hub day marker
+  local hub="$1" day="$2" marker="$3"
+  cat > "$hub/briefs/$day.md" <<EOF
+---
+date: $day
+delivery: telegram_ok
+---
+
+${marker}-BRIEF
+EOF
+  cat > "$hub/.orchestrator/learning-arxiv-$day.json" <<EOF
+{"status":"completed","no_new_papers":false,"selected_papers":[{"id":"p1"}]}
+EOF
+  printf '%s\n' "${marker}-ARXIV" > "$hub/reports/learning-arxiv-summary-$day.md"
+  printf '%s\n' "${marker}-MONEY" > "$hub/.orchestrator/money-radar-$day-digest.txt"
+}
+
+# New dates persist exactly the three finalized input records. Once delivery is
+# completed, later same-day source changes are terminal without owner --force.
+H="$TMP/snapshot-v3"; D=$(date +%F); make_hub "$H"
+write_finalized_inputs "$H" "$D" SNAPSHOT_V3_A
+run_scheduled_synth "$H" >/dev/null 2>&1; V3RC=$?
+M="$H/.orchestrator/morning-digest-$D.json"
+[[ $V3RC -eq 0 && $(wc -l < "$H/send.log") -eq 1 ]] \
+  && ok "snapshot v3: initial whole-block delivery completes" \
+  || bad "snapshot v3: initial delivery failed"
+json_check "$M" 'd["upstream_snapshot"]["schema"] == "morning-input/v3" and [i["name"] for i in d["upstream_snapshot"]["inputs"]] == ["brief","learning","money_radar"]' "snapshot v3: exact canonical input roster"
+write_finalized_inputs "$H" "$D" SNAPSHOT_V3_B
+BEFORE=$(wc -l < "$H/send.log")
+run_scheduled_synth "$H" >/dev/null 2>&1; V3RRC=$?
+[[ $V3RRC -eq 0 && $(wc -l < "$H/send.log") -eq "$BEFORE" ]] \
+  && ok "snapshot v3: completed date never auto-resends changed inputs" \
+  || bad "snapshot v3: completed delivery was superseded automatically"
+
+# With no finalized same-day blocks, the build remains report-only and makes
+# zero Qwen, NotebookLM, or Telegram calls.
+H="$TMP/all-missing"; D=$(date +%F); make_hub "$H"
+run_scheduled_synth "$H" >/dev/null 2>&1; MISS_RC=$?
+[[ $MISS_RC -ne 0 && ! -s "$H/render.log" && ! -s "$H/send.log" \
+   && ! -s "$H/notebooklm.log" ]] \
+  && ok "all-missing morning input makes zero adapter calls" \
+  || bad "all-missing morning input reached an adapter"
+
+# The explicitly enabled NotebookLM route receives the same trusted private daily.
+H="$TMP/notebook-private"; D=$(date +%F); make_hub "$H"
+write_finalized_inputs "$H" "$D" PRIVATE_DAILY
+printf -- '---\ndate: %s\n---\n\nowner@example.com; personal/goals; private project status\n' "$D" > "$H/briefs/$D.md"
+run_scheduled_notebooklm_synth "$H" >/dev/null 2>&1; NPRC=$?
+NBSPEECH=$(cat "$H/reports/morning-digest-$D.txt" 2>/dev/null)
+[[ $NPRC -eq 0 && "$NBSPEECH" == *'owner@example.com'* \
+   && "$NBSPEECH" == *'personal/goals'* \
+   && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$H/notebooklm.log") -eq 1 \
+   && $(grep -c 'NOTEBOOKLM_CALLED source wait' "$H/notebooklm.log") -eq 0 \
+   && $(grep -c 'NOTEBOOKLM_CALLED generate audio.*--no-wait.*--json' "$H/notebooklm.log") -eq 1 \
+   && ! -s "$H/send.log" ]] \
+  && ok "NotebookLM receives the trusted private daily" \
+  || bad "NotebookLM private daily was filtered or blocked"
+
+# ── 9. Independent channel flags ────────────────────────────────────────────
 HQ="$TMP/selector-qwen"; HN="$TMP/selector-notebooklm"; D=$(date +%F)
 make_hub "$HQ"; make_hub "$HN"
-printf '%s\n' 'SNAPSHOT_SELECTOR_SAME_TEXT' >"$HQ/.orchestrator/money-radar-$D-codex-out.txt"
-printf '%s\n' 'SNAPSHOT_SELECTOR_SAME_TEXT' >"$HN/.orchestrator/money-radar-$D-codex-out.txt"
+write_finalized_inputs "$HQ" "$D" SNAPSHOT_SELECTOR_SAME_TEXT
+write_finalized_inputs "$HN" "$D" SNAPSHOT_SELECTOR_SAME_TEXT
 run_scheduled_synth "$HQ" >/dev/null 2>&1; QRC=$?
 run_scheduled_notebooklm_synth "$HN" >/dev/null 2>&1; NRC=$?
 [[ $QRC -eq 0 && $NRC -eq 0 && $(wc -l <"$HQ/send.log") -eq 1 \
    && ! -s "$HQ/notebooklm.log" && ! -s "$HN/send.log" \
    && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HN/notebooklm.log") -eq 1 \
+   && $(grep -c -- '--format deep-dive --length long' "$HN/notebooklm.log") -eq 1 \
    && $(grep -c "NOTEBOOKLM_CALLED source add $HN/reports/morning-digest-$D.txt " \
         "$HN/notebooklm.log") -eq 1 ]] \
-  && ok "selector: each outputs choice invokes exactly one delivery adapter" \
-  || bad "selector: backend calls crossed or selected route failed"
+  && ok "channel flags: morning NotebookLM uses the longer audio setting" \
+  || bad "channel flags: morning NotebookLM did not use deep-dive + long"
 cmp -s "$HQ/reports/morning-digest-$D.txt" "$HN/reports/morning-digest-$D.txt" \
-  && ok "selector: ready digest text is identical before delivery" \
-  || bad "selector: route changed the synthesized digest text"
+  && ok "channel flags: ready digest text is identical before delivery" \
+  || bad "channel flags: channel changed the frozen digest text"
 
-# Switching adapters with an existing foreign manifest must start only the
-# newly selected adapter, never crash on the other adapter's counter schema.
+# Both true flags independently dispatch both handlers against one frozen file.
+HB="$TMP/channel-both"; make_hub "$HB"
+write_finalized_inputs "$HB" "$D" SNAPSHOT_BOTH_CHANNELS
+run_scheduled_both_synth "$HB" >/dev/null 2>&1; BRC=$?
+[[ $BRC -eq 0 && $(wc -l <"$HB/send.log") -eq 1 \
+   && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HB/notebooklm.log") -eq 1 \
+   && $(grep -c "NOTEBOOKLM_CALLED source add $HB/reports/morning-digest-$D.txt " \
+        "$HB/notebooklm.log") -eq 1 ]] \
+  && ok "channel flags: both true dispatches Telegram and NotebookLM" \
+  || bad "channel flags: both true did not dispatch both handlers"
+
+# Toggling flags keeps one stable manifest per handler and never repeats a
+# handler that already completed for the date.
 HS="$TMP/selector-switch"; make_hub "$HS"
-printf '%s\n' 'SNAPSHOT_SELECTOR_SWITCH' >"$HS/.orchestrator/money-radar-$D-codex-out.txt"
+write_finalized_inputs "$HS" "$D" SNAPSHOT_SELECTOR_SWITCH
 run_scheduled_synth "$HS" >/dev/null 2>&1; Q1=$?
-run_scheduled_notebooklm_synth "$HS" >/dev/null 2>&1; N1=$?
-SENDS_AFTER_N=$(wc -l <"$HS/send.log")
+run_scheduled_both_synth "$HS" >/dev/null 2>&1; N1=$?
+SENDS_AFTER_BOTH=$(wc -l <"$HS/send.log")
 run_scheduled_synth "$HS" >/dev/null 2>&1; Q2=$?
-[[ $Q1 -eq 0 && $N1 -eq 0 && $Q2 -eq 0 && $SENDS_AFTER_N -eq 1 \
-   && $(wc -l <"$HS/send.log") -eq 2 \
-   && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HS/notebooklm.log") -eq 1 ]] \
-  && ok "selector: existing foreign manifest switches safely in both directions" \
-  || bad "selector: backend switch crashed or crossed delivery adapters"
+[[ $Q1 -eq 0 && $N1 -eq 0 && $Q2 -eq 0 \
+   && $SENDS_AFTER_BOTH -eq 1 && $(wc -l <"$HS/send.log") -eq 1 \
+   && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HS/notebooklm.log") -eq 1 \
+   && -s "$HS/.orchestrator/morning-digest-$D.json" \
+   && -s "$HS/.orchestrator/morning-digest-$D-notebooklm.json" ]] \
+  && ok "channel flags: toggles preserve stable per-handler manifests" \
+  || bad "channel flags: toggle repeated or crossed handlers"
+
+HSN="$TMP/selector-switch-notebook-first"; make_hub "$HSN"
+write_finalized_inputs "$HSN" "$D" SNAPSHOT_SELECTOR_SWITCH_NOTEBOOK
+run_scheduled_notebooklm_synth "$HSN" >/dev/null 2>&1; NN1=$?
+run_scheduled_both_synth "$HSN" >/dev/null 2>&1; NQ1=$?
+run_scheduled_notebooklm_synth "$HSN" >/dev/null 2>&1; NN2=$?
+[[ $NN1 -eq 0 && $NQ1 -eq 0 && $NN2 -eq 0 \
+   && $(wc -l <"$HSN/send.log") -eq 1 \
+   && $(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HSN/notebooklm.log") -eq 1 ]] \
+  && ok "channel flags: NotebookLM-first toggle invokes only new Telegram handler" \
+  || bad "channel flags: NotebookLM-first toggle repeated a completed handler"
+
+# Every accepted ACK shape is terminal locally; every missing/rejected ACK
+# leaves a pre-submit tombstone that ordinary reruns cannot cross.
+for ACK in task id; do
+  HA="$TMP/notebooklm-ack-$ACK"; make_hub "$HA"
+  D=$(date +%F)
+  write_finalized_inputs "$HA" "$D" "SNAPSHOT_ACK_${ACK^^}"
+  KB_FAKE_NOTEBOOKLM_ACK_KIND="$ACK" run_scheduled_notebooklm_synth "$HA" \
+    >/dev/null 2>&1; ARC=$?
+  AM="$HA/.orchestrator/morning-digest-$D-notebooklm.json"
+  EXPECTED_ID=$([[ "$ACK" == task ]] && echo task-selector || echo generic-selector)
+  EXPECTED_KIND=$([[ "$ACK" == task ]] && echo task_id || echo id)
+  json_check "$AM" \
+    "d['status'] == 'completed' and d['submission_id'] == '$EXPECTED_ID' and d['submission_id_kind'] == '$EXPECTED_KIND' and d['remote_status'] == 'untracked_after_ack'" \
+    "NotebookLM/$ACK: accepted ACK key is recorded"
+  [[ $ARC -eq 0 ]] || bad "NotebookLM/$ACK: route returned rc=$ARC"
+done
+
+for CASE in empty malformed reject; do
+  HF="$TMP/notebooklm-failure-$CASE"; make_hub "$HF"
+  D=$(date +%F)
+  write_finalized_inputs "$HF" "$D" "SNAPSHOT_FAILURE_${CASE^^}"
+  KB_FAKE_NOTEBOOKLM_ACK_KIND="$CASE" run_scheduled_notebooklm_synth "$HF" \
+    >/dev/null 2>&1; FRC=$?
+  MID=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HF/notebooklm.log" || true)
+  KB_FAKE_NOTEBOOKLM_ACK_KIND=task run_scheduled_notebooklm_synth "$HF" \
+    >/dev/null 2>&1; RRC=$?
+  AFTER=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HF/notebooklm.log" || true)
+  FM="$HF/.orchestrator/morning-digest-$D-notebooklm.json"
+  [[ $FRC -eq 0 && $RRC -eq 0 && $MID -eq 1 && $AFTER -eq 1 ]] \
+    && ok "NotebookLM/$CASE: terminal failure is never auto-resubmitted" \
+    || bad "NotebookLM/$CASE: ordinary rerun crossed tombstone"
+  json_check "$FM" \
+    "d['status'] == 'failed' and d['retry_disposition'] == 'force_required' and d['local_delivery_status'] == 'not_acknowledged'" \
+    "NotebookLM/$CASE: force-required tombstone persists"
+done
+
+HK="$TMP/notebooklm-kill-force"; make_hub "$HK"
+D=$(date +%F)
+write_finalized_inputs "$HK" "$D" SNAPSHOT_KILL_FORCE
+set +e
+KB_FAKE_NOTEBOOKLM_ACK_KIND=kill run_scheduled_notebooklm_synth "$HK" \
+  >/dev/null 2>&1
+KRC=$?
+set -e
+MID=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HK/notebooklm.log" || true)
+KB_FAKE_NOTEBOOKLM_ACK_KIND=task run_scheduled_notebooklm_synth "$HK" \
+  >/dev/null 2>&1; RRC=$?
+AFTER_RERUN=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HK/notebooklm.log" || true)
+KB_FAKE_NOTEBOOKLM_MODE=success KB_FAKE_NOTEBOOKLM_ACK_KIND=artifact \
+  run_digest_synth "$HK" --notebooklm --force \
+  >/dev/null 2>&1; FRC=$?
+AFTER_FORCE=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HK/notebooklm.log" || true)
+KB_FAKE_NOTEBOOKLM_ACK_KIND=task run_scheduled_notebooklm_synth "$HK" \
+  >/dev/null 2>&1; FINAL_RC=$?
+FINAL=$(grep -c 'NOTEBOOKLM_CALLED generate audio' "$HK/notebooklm.log" || true)
+KM="$HK/.orchestrator/morning-digest-$D-notebooklm.json"
+[[ $KRC -ne 0 && $RRC -eq 0 && $FRC -eq 0 && $FINAL_RC -eq 0 \
+   && $MID -eq 1 && $AFTER_RERUN -eq 1 && $AFTER_FORCE -eq 2 && $FINAL -eq 2 ]] \
+  && ok "NotebookLM/kill: ordinary rerun is blocked; one --force submits once" \
+  || bad "NotebookLM/kill: wrong submit counts or rc ($KRC/$RRC/$FRC/$FINAL_RC; $MID/$AFTER_RERUN/$AFTER_FORCE/$FINAL)"
+json_check "$KM" \
+  "d['status'] == 'completed' and d['submission_id'] == 'audio-selector' and d['submission_id_kind'] == 'artifact_id' and d['remote_status'] == 'untracked_after_ack'" \
+  "NotebookLM/force: forced ACK is terminal accepted state"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
