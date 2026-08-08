@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""kb-morning-digest — unchanged digest text with selectable audio delivery.
+"""kb-morning-digest — finalized digest sent to independently enabled channels.
 
-Design (owner directive 2026-06-25): every morning, gather the freshest output of
-each orchestrator process (arxiv research, money radar, daily brief, daily
-research, idea digest, project state/board, hub log/escalations) into ONE
-digest file, derive a speech-only text file, render it through the pinned local
-Qwen runtime on demand and send the MP3 to Telegram, or pass the same ready
-digest to NotebookLM. The selected route comes from KB_PROCESS_OUTPUTS.
-
-Synthesis: the digest prose is produced by a headless `claude -p` pass over a
-deterministic context packet. If the synth call fails or returns empty, the
-deterministic packet is retained in the report for diagnosis but is never
-spoken or sent.
+Morning resolves only the finalized same-day brief, eligible rich arXiv report,
+and finalized Money Radar digest. It joins those whole blocks without an LLM
+synthesis pass, then gives the same privacy-gated frozen speech file to every
+enabled audio channel. Evening Retro keeps its independent trusted path.
 
 Usage:
   kb-morning-digest                       # today: gather -> synth -> file -> audio
@@ -69,18 +62,21 @@ except Exception:  # noqa: BLE001
     UI_LANG, UI_LANG_NAME = "en", "English"
 
 from _kb_codex import CodexUnavailable, codex_bin
+from _kb_claude_runner import run_command as run_unbounded_command
+from _kb_retro import ParsedRetro, load_retro
 
 ATTEMPT_CAPS = {"build": 2, "tts": 2, "telegram": 3, "total": 5}
 DELIVERY_TAG = "local_qwen_telegram"
 
 # Synthesis is not bound to one runtime: subscriptions and rate limits move, so
 # the digest tries an ordered chain of CLI agents and uses the first that returns
-# a usable result. Owner directive 2026-06-25: codex primary, claude as fallback.
-# Override the order/membership with KB_MORNING_SYNTH_AGENTS (e.g. "claude,codex"
-# or "codex,claude,agy"). Known agents: codex, claude, agy, grok.
+# a usable result. Owner directive 2026-07-29 (chat): claude primary, codex as
+# fallback (supersedes 2026-06-25 codex-primary).
+# Override the order/membership with KB_MORNING_SYNTH_AGENTS (e.g. "codex,claude"
+# or "claude,codex,agy"). Known agents: codex, claude, agy, grok.
 SYNTH_AGENTS = [
     a.strip() for a in
-    os.environ.get("KB_MORNING_SYNTH_AGENTS", "codex,claude").split(",")
+    os.environ.get("KB_MORNING_SYNTH_AGENTS", "claude,codex").split(",")
     if a.strip()
 ]
 # Model override applies to the claude backend only (codex/agy/grok use their own
@@ -93,8 +89,10 @@ SYNTH_MODEL = os.environ.get("KB_MORNING_SYNTH_MODEL", "sonnet")
 # might be a preview, or a run that then soft-fails on quota). With a non-zero
 # "retry" code kb-tick leaves the flag unset and re-fires next tick, by which
 # time the contender has finished (lock auto-released) and the run either finds
-# the manifest already done or produces the digest itself.
+# the manifests already done or produces the digest itself. The config validator
+# is the first gate; channel selection is the independent outputs flag map.
 RC_LOCK_CONTENTION = 75
+RC_INVALID_RETRO = 75
 
 # Scheduler budget: kb-tick caps the whole process at 1800s. Synthesis and local
 # render each remain bounded, and Telegram upload has its own short timeout.
@@ -103,11 +101,8 @@ SYNTH_TOTAL_TIMEOUT = int(os.environ.get("KB_MORNING_SYNTH_TOTAL_TIMEOUT", "420"
 TTS_TIMEOUT = int(os.environ.get("KB_MORNING_TTS_TIMEOUT", "900"))
 TELEGRAM_TIMEOUT = int(os.environ.get("KB_MORNING_TELEGRAM_TIMEOUT", "180"))
 NBLM_MAX_ATTEMPTS = int(os.environ.get("KB_MORNING_DIGEST_MAX_ATTEMPTS", "3"))
-NBLM_ADD_TIMEOUT = int(os.environ.get("KB_MORNING_NBLM_ADD_TIMEOUT", "120"))
-NBLM_WAIT_TIMEOUT = int(os.environ.get("KB_MORNING_NBLM_WAIT_TIMEOUT", "90"))
-NBLM_AUDIO_TIMEOUT = int(os.environ.get("KB_MORNING_NBLM_AUDIO_TIMEOUT", "600"))
-AUDIO_FORMAT = os.environ.get("KB_MORNING_AUDIO_FORMAT", "brief")
-AUDIO_LENGTH = os.environ.get("KB_MORNING_AUDIO_LENGTH", "default")
+AUDIO_FORMAT = os.environ.get("KB_MORNING_AUDIO_FORMAT", "deep-dive")
+AUDIO_LENGTH = os.environ.get("KB_MORNING_AUDIO_LENGTH", "long")
 AUDIO_LANG = os.environ.get("KB_MORNING_AUDIO_LANG", "") or UI_LANG
 # Freshness window: an artifact older than this many days is still shown but
 # flagged "stale" so the synth does not present it as "this morning".
@@ -179,6 +174,10 @@ def digest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
 
 def manifest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
     return ORCH / f"{period}-digest-{date_iso}.json"
+
+
+def notebooklm_manifest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
+    return ORCH / f"{period}-digest-{date_iso}-notebooklm.json"
 
 
 def speech_path(date_iso: str, period: str = "morning") -> pathlib.Path:
@@ -689,22 +688,145 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
 # kb-mail-block itself). The mail pipeline (kb-mail-brief / kb-mail-block /
 # envelopes) is untouched.
 
-# Snapshot schema v2 (D13): "mail" and "project_board" left the input contract
-# with their blocks. A stored v1 snapshot on a completed manifest is handled as
-# a compatibility upgrade (like the pre-v0.6 no-provenance case), never as
-# corruption.
-SNAPSHOT_SCHEMA = "morning-input/v2"
-MORNING_INPUT_KEYS = (
-    "learning", "money_radar", "brief", "daily_research", "ideas",
-    "project_state", "project_log", "hub_log", "escalations",
-)
+# Finalized morning input contract. Diagnostics stay outside the semantic hash.
+SNAPSHOT_SCHEMA = "morning-input/v3"
+MORNING_INPUT_KEYS = ("brief", "learning", "money_radar")
+
+
+def _finalized_block(key: str, state: str, name: str, meta: str,
+                     text: str = "") -> dict[str, Any]:
+    return {
+        "snapshot_key": key,
+        "snapshot_state": state,
+        "name": name,
+        "meta": meta,
+        "text": text,
+    }
+
+
+def _read_exact_utf8(path: pathlib.Path) -> str:
+    return path.read_bytes().decode("utf-8", errors="strict")
+
+
+def _morning_brief_block(date_iso: str) -> dict[str, Any]:
+    path = BRIEFS / f"{date_iso}.md"
+    name = "Утренний бриф (finalized)"
+    if not path.is_file():
+        log(f"{date_iso}: finalized morning brief missing")
+        return _finalized_block("brief", "missing", name, "same-day file missing")
+    try:
+        raw = _read_exact_utf8(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"{date_iso}: finalized morning brief unreadable: {exc.__class__.__name__}")
+        return _finalized_block("brief", "unreadable", name, "same-day file unreadable")
+    lines = raw.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise ValueError("morning brief has no YAML frontmatter")
+    end = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.rstrip("\r\n") == "---":
+            end = index
+            break
+    if end is None:
+        raise ValueError("morning brief has unterminated YAML frontmatter")
+    body_lines: list[str] = []
+    exact_tail = re.compile(r"^## (?:Retro|Reflection) \([^\n]*\)$")
+    tail_lookalike = re.compile(r"^## (?:Retro|Reflection)(?:$|[:\s–—])")
+    for line in lines[end + 1:]:
+        visible = line.rstrip("\r\n")
+        if exact_tail.fullmatch(visible):
+            break
+        if tail_lookalike.match(visible):
+            log(f"{date_iso}: malformed morning/evening boundary: {visible}")
+            raise ValueError(f"malformed morning/evening boundary: {visible}")
+        body_lines.append(line)
+    body = "".join(body_lines).strip("\r\n")
+    if not body:
+        log(f"{date_iso}: finalized morning brief empty")
+        return _finalized_block("brief", "no_content", name, "same-day body empty")
+    return _finalized_block("brief", "present", name, "same-day finalized body", body)
+
+
+def _learning_finalized_block(date_iso: str) -> dict[str, Any]:
+    manifest_path = ORCH / f"learning-arxiv-{date_iso}.json"
+    report_path = REPORTS / f"learning-arxiv-summary-{date_iso}.md"
+    name = "ArXiv research (finalized rich report)"
+    if not manifest_path.is_file():
+        log(f"{date_iso}: learning manifest missing; arXiv audio block skipped")
+        return _finalized_block("learning", "missing", name, "same-day manifest missing")
+    try:
+        manifest = json.loads(_read_exact_utf8(manifest_path))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        log(f"{date_iso}: learning manifest unreadable: {exc.__class__.__name__}")
+        return _finalized_block("learning", "unreadable", name, "same-day manifest unreadable")
+    if not isinstance(manifest, dict):
+        log(f"{date_iso}: learning manifest root mismatch")
+        return _finalized_block("learning", "unreadable", name, "manifest root mismatch")
+    selected = manifest.get("selected_papers")
+    no_new = manifest.get("no_new_papers")
+    status = manifest.get("status")
+    if status == "completed" and no_new is True and selected == []:
+        log(f"{date_iso}: no new arXiv papers; audio block intentionally omitted")
+        return _finalized_block("learning", "no_content", name, "valid no-content state")
+    eligible = (
+        status == "completed"
+        and isinstance(selected, list) and bool(selected)
+        and (no_new is False or no_new is None)
+    )
+    if not eligible:
+        log(f"{date_iso}: learning manifest state mismatch; arXiv audio block skipped")
+        return _finalized_block("learning", "unreadable", name, "manifest state mismatch")
+    if not report_path.is_file():
+        log(f"{date_iso}: selected learning state lacks same-day report")
+        return _finalized_block("learning", "missing", name, "eligible same-day report missing")
+    try:
+        report = _read_exact_utf8(report_path).strip("\r\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"{date_iso}: same-day arXiv report unreadable: {exc.__class__.__name__}")
+        return _finalized_block("learning", "unreadable", name, "same-day report unreadable")
+    if not report:
+        log(f"{date_iso}: same-day arXiv report empty")
+        return _finalized_block("learning", "no_content", name, "same-day report empty")
+    return _finalized_block("learning", "present", name, "same-day eligible whole report", report)
+
+
+def _money_finalized_block(date_iso: str) -> dict[str, Any]:
+    path = ORCH / f"money-radar-{date_iso}-digest.txt"
+    name = "Money Radar (finalized digest)"
+    if not path.is_file():
+        log(f"{date_iso}: same-day Money Radar digest missing")
+        return _finalized_block("money_radar", "missing", name, "same-day digest missing")
+    try:
+        text = _read_exact_utf8(path).strip("\r\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        log(f"{date_iso}: Money Radar digest unreadable: {exc.__class__.__name__}")
+        return _finalized_block("money_radar", "unreadable", name, "same-day digest unreadable")
+    if not text:
+        log(f"{date_iso}: Money Radar digest empty")
+        return _finalized_block("money_radar", "no_content", name, "same-day digest empty")
+    return _finalized_block("money_radar", "present", name, "same-day whole digest", text)
+
+
+def gather_finalized_morning(date_iso: str) -> list[dict[str, Any]]:
+    return [
+        _morning_brief_block(date_iso),
+        _learning_finalized_block(date_iso),
+        _money_finalized_block(date_iso),
+    ]
+
+
+def assemble_finalized_morning(blocks: list[dict[str, Any]]) -> str:
+    return "\n\n".join(
+        str(block.get("text") or "")
+        for block in blocks
+        if block.get("snapshot_state") == "present" and block.get("text")
+    )
 
 
 def _semantic_projection(key: str, text: str) -> str:
-    projected = text.replace("\r\n", "\n").replace("\r", "\n")
-    if key in ("project_log", "hub_log"):
-        projected = "\n".join(line.rstrip() for line in projected.splitlines())
-    return projected.strip()
+    # Blocks were normalized only at their outer CR/LF boundary by the
+    # resolver. Internal bytes remain meaningful and are hashed whole.
+    return text
 
 
 def _snapshot_semantic_hash(inputs: list[dict[str, str]]) -> str:
@@ -757,7 +879,7 @@ def snapshot_valid(snapshot: Any) -> bool:
     for item in inputs:
         if set(item) != {"name", "state", "content_sha256"}:
             return False
-        if item["state"] not in ("present", "missing", "unreadable"):
+        if item["state"] not in ("present", "missing", "unreadable", "no_content"):
             return False
         if not isinstance(item["content_sha256"], str) or not hex_re.fullmatch(item["content_sha256"]):
             return False
@@ -770,7 +892,7 @@ def snapshot_valid(snapshot: Any) -> bool:
 
 
 def capture_morning_input(date_iso: str) -> dict[str, Any]:
-    blocks = gather(date_iso)
+    blocks = gather_finalized_morning(date_iso)
     return {
         "blocks": blocks,
         "upstream_snapshot": upstream_snapshot(blocks),
@@ -839,10 +961,9 @@ def strip_untrusted_spans(text: str) -> str:
         if not is_tag:
             if depth == 0:
                 _append_trusted_chunk(out, text[pos:m.start()])
-            # A malformed untrusted span in the morning block must never consume
-            # the trusted shell-delimited Retro/Reflection headings.
-            depth = 0
-            out.append(m.group(0))
+                out.append(m.group(0))
+            # A heading inside an open untrusted span is attacker-controlled;
+            # strip it without closing or resynchronizing the span.
             pos = m.end()
             continue
         if depth == 0:
@@ -886,19 +1007,22 @@ def render_evening_retro_source(date_iso: str, retro_text: str | None) -> str:
     return _cap_text(retro_text, 24000)
 
 
-def gather_evening(date_iso: str) -> list[dict[str, Any]]:
+def gather_evening(
+    date_iso: str, retro: ParsedRetro | None = None,
+) -> list[dict[str, Any]]:
     """Evening retro context. Deliberately does NOT reuse gather(): the recap is
     about what happened today (day file: brief + retro + reflection, plus the
     closed-today hub-log entries), not a re-read of the morning source map
     (spec D2). Raw mail envelopes under .orchestrator/mail/ are NEVER read here;
     the only mail the evening sees is what the brief/retro already surfaced in
-    the day file, post-strip. Both blocks are tolerant: a missing day file must
-    never block the retro (spec failure mode)."""
+    the day file, post-strip. The public caller supplies the same strict parsed
+    Retro that passed the fail-closed evening preflight."""
     blocks: list[dict[str, Any]] = []
 
     day_file = BRIEFS / f"{date_iso}.md"
-    if day_file.is_file():
-        retro_text = extract_evening_retro_text(_read_full_text(day_file))
+    parsed = retro if retro is not None else load_retro(HUB, date_iso)
+    if parsed is not None:
+        retro_text = f"{parsed.heading}\n\n{parsed.body.rstrip()}"
         text = render_evening_retro_source(date_iso, retro_text)
         blocks.append({
             "name": "Вечернее ретро (trusted Retro block)",
@@ -937,15 +1061,21 @@ def build_evening_context_packet(date_iso: str, blocks: list[dict[str, Any]]) ->
 
 SYNTH_INSTRUCTION = f"""\
 Ты — утренний редактор владельца. На входе ниже — сырые выходы всех утренних \
-процессов его системы (научная сводка по arXiv, радар быстрых денег, утренний \
-бриф — в нём почта, календарь и задачи дня, — состояние проектов, лог, эскалации).
+процессов его системы (обзор научных работ, обзор денежных возможностей, утренняя \
+сводка — в ней почта, календарь и задачи дня, — состояние проектов и последние изменения).
 
-Сделай ОДИН связный утренний дайджест на языке пользователя — {UI_LANG_NAME}, \
+Сделай ОДНУ связную утреннюю сводку на языке пользователя — {UI_LANG_NAME}, \
 который он ПОСЛУШАЕТ как аудио и пойдёт работать. Это не отчёт и не список \
 ссылок — это тёплый, плотный, по делу рассказ умного коллеги за кофе.
 
 Жёсткие правила:
-- Только {UI_LANG_NAME}. Минимум терминов; каждый термин — объясни одной фразой сразу.
+- Готовый текст — только на русском языке. Пиши простыми русскими словами.
+- Не используй англицизмы, латиницу и английские сокращения.
+- Сокращения раскрывай полностью русскими словами: «искусственный интеллект», а не «ИИ».
+- Необходимые имена и названия передавай кириллицей так, как они звучат. Каждое \
+имя или название пиши одинаково во всём тексте.
+- Пиши короткими, простыми и естественными фразами. Текст должен легко восприниматься на слух.
+- Расставляй знаки препинания так, чтобы при озвучке звучали понятные паузы.
 - Никаких ссылок, путей к файлам, JSON, markdown-таблиц, кусков на других языках — это для озвучки.
 - Каждый факт обязан опираться на данные ниже. НИЧЕГО не выдумывай. Если процесс \
 дал пусто или данные устаревшие — так и скажи коротко («сегодня тут пусто»).
@@ -955,21 +1085,21 @@ SYNTH_INSTRUCTION = f"""\
 Структура (ровно эти заголовки, каждый — '## '; названия заголовков — на языке \
 пользователя {UI_LANG_NAME}, русские формулировки ниже — образец структуры):
 ## Утро: коротко о главном
-## Наука и AI
+## Наука и искусственный интеллект
 ## Деньги и возможности
 ## Проекты: где мы
-## Твой день: дедлайны, фокус, жизнь
+## Твой день: сроки, главное, личное
 ## Решения от тебя
 ## Что предлагаю сделать сегодня
 
-Если утренний бриф за сегодня не создан (об этом прямо сказано в данных), не \
-выдумывай его содержимое: в разделе «Что предлагаю сделать сегодня» так и \
-скажи — «бриф не создан — действия только из состояния проектов и последних \
+Если утренняя сводка за сегодня не создана (об этом прямо сказано в данных), не \
+выдумывай её содержимое: в разделе «Что предлагаю сделать сегодня» так и \
+скажи — «утренняя сводка не создана — действия только из состояния проектов и последних \
 следов проектов» — и предложи шаги, опираясь только на состояние проектов и \
 их последние следы. Список задач дня в этом случае недоступен — не \
 реконструируй его и прямо скажи, что его сегодня нет.
 
-Верни ТОЛЬКО сам дайджест в markdown, без преамбулы и без послесловия.
+Верни ТОЛЬКО саму сводку в markdown, без преамбулы и без послесловия.
 
 === ДАННЫЕ УТРЕННИХ ПРОЦЕССОВ ===
 """
@@ -1019,22 +1149,38 @@ def _resolve_agent_bin(name: str, candidates: list[str]) -> str:
     return shutil.which(name) or name
 
 
-def _run_agent(argv: list[str], timeout: int,
-               capture_file: pathlib.Path | None = None) -> str | None:
-    """Run a CLI agent headlessly with a hard wall-clock cap. stdin is ALWAYS
+def _run_agent(
+    argv: list[str],
+    timeout: int,
+    capture_file: pathlib.Path | None = None,
+    *,
+    unbounded: bool = False,
+) -> str | None:
+    """Run a CLI agent headlessly; Claude uses the durable unbounded runner.
+
+    Other providers retain their wall-clock cap. stdin is ALWAYS
     /dev/null — codex 0.138+ hangs on open stdin, and a Bun/Node agent that
     inherits a live stdin can stall too (launch-matrix rule). Returns the cleaned
     answer, or None on failure / empty output (empty == failure, never 'no result')."""
     try:
-        proc = subprocess.run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(HUB),
-            check=False,
-        )
+        if unbounded:
+            proc = run_unbounded_command(
+                argv,
+                cwd=HUB,
+                output_mode="text",
+                kind="claude",
+                metadata={"caller": "kb-morning-digest"},
+            )
+        else:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(HUB),
+                check=False,
+            )
     except Exception as exc:  # noqa: BLE001 (includes TimeoutExpired)
         # str(TimeoutExpired) embeds the full argv (incl. the ~30KB prompt) — clip
         # it so a timeout (the expected failure mode) can't bloat the log.
@@ -1066,7 +1212,7 @@ def _synth_claude(prompt: str, timeout: int) -> str | None:
     argv = [bin_, "-p", prompt, "--output-format", "text", "--no-session-persistence"]
     if SYNTH_MODEL:
         argv += ["--model", SYNTH_MODEL]
-    return _run_agent(argv, timeout)
+    return _run_agent(argv, timeout, unbounded=True)
 
 
 def _synth_codex(prompt: str, timeout: int) -> str | None:
@@ -1129,10 +1275,10 @@ SYNTH_BACKENDS = {
 def synth_digest(context_packet: str,
                  instruction: str = SYNTH_INSTRUCTION) -> tuple[str | None, str | None]:
     """Try each configured agent in order until one returns a usable digest. The
-    WHOLE chain is bounded by SYNTH_TOTAL_TIMEOUT — each agent gets the smaller of
-    its per-agent cap and the time left — so a long chain can never exceed the
-    kb-tick scheduler budget. Returns (digest, agent_name), else (None, None) so
-    the caller falls back to the deterministic packet."""
+    non-Claude portion is bounded by SYNTH_TOTAL_TIMEOUT. Claude is always
+    admitted and waits for natural exit, regardless of elapsed chain time.
+    Returns (digest, agent_name), else (None, None) so the caller falls back to
+    the deterministic packet."""
     prompt = instruction + context_packet
     deadline = time.monotonic() + SYNTH_TOTAL_TIMEOUT
     for name in SYNTH_AGENTS:
@@ -1141,10 +1287,11 @@ def synth_digest(context_packet: str,
             log(f"unknown synth agent {name!r}; skipping")
             continue
         remaining = int(deadline - time.monotonic())
-        if remaining < 30:
+        if name != "claude" and remaining < 30:
             log(f"synth budget exhausted ({remaining}s left); stopping chain before {name}")
-            break
-        out = fn(prompt, min(SYNTH_TIMEOUT, remaining))
+            continue
+        lane_budget = SYNTH_TIMEOUT if name == "claude" else min(SYNTH_TIMEOUT, remaining)
+        out = fn(prompt, lane_budget)
         if out:
             log(f"synth via {name}: ok ({len(out)} chars)")
             return out, name
@@ -1215,10 +1362,10 @@ def _parse_notebooklm_json(stdout: str) -> Any:
         raise
 
 
-def run_notebooklm(args: list[str], timeout: int = 180) -> Any:
+def run_notebooklm(args: list[str]) -> Any:
     proc = subprocess.run(
         [NOTEBOOKLM_BIN, *args], capture_output=True, text=True,
-        timeout=timeout, check=False,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -1246,6 +1393,24 @@ def _pick_notebooklm_id(data: Any, *keys: str) -> str:
     return ""
 
 
+def _pick_notebooklm_submission(data: Any) -> tuple[str, str]:
+    if isinstance(data, dict):
+        for key in ("task_id", "artifact_id", "id"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip(), key
+        for value in data.values():
+            found, kind = _pick_notebooklm_submission(value)
+            if found:
+                return found, kind
+    elif isinstance(data, list):
+        for value in data:
+            found, kind = _pick_notebooklm_submission(value)
+            if found:
+                return found, kind
+    return "", ""
+
+
 def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -1253,9 +1418,9 @@ def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             return {}
-        # A local-Qwen manifest owns a different counter/state schema. An
-        # explicit route switch starts a fresh NotebookLM adapter state instead
-        # of coercing its attempts dict or treating its completed send as ours.
+        # A local-Qwen manifest owns a different counter/state schema. Ignore it
+        # instead of coercing its attempts dict or treating its completed send
+        # as NotebookLM state.
         if value.get("delivery") == DELIVERY_TAG or isinstance(value.get("attempts"), dict):
             return {}
         return value
@@ -1267,6 +1432,209 @@ def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
         }
 
 
+def ensure_notebooklm_manifest(date_iso: str, period: str) -> pathlib.Path:
+    """Give NotebookLM one stable manifest, importing legacy state once."""
+    target = notebooklm_manifest_path(date_iso, period)
+    if not target.is_file():
+        legacy = load_notebooklm_manifest(manifest_path(date_iso, period))
+        if legacy:
+            save_manifest(target, legacy)
+    return target
+
+
+RETRO_ACTIVE_FIELDS = (
+    "retro_sha256",
+    "source_id",
+    "source_retro_sha256",
+    "artifact_id",
+    "artifact_retro_sha256",
+    "submission_id",
+    "submission_id_kind",
+    "submission_state",
+    "retry_disposition",
+    "local_delivery_status",
+    "remote_status",
+)
+
+
+def _load_raw_manifest(path: pathlib.Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _retro_attempt_snapshot(manifest: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "delivery", "date", "period", "status", "attempts", "notebook_id",
+        *RETRO_ACTIVE_FIELDS, "error", "last_attempt_at",
+    )
+    snapshot = {key: manifest.get(key) for key in keys if key in manifest}
+    snapshot["archived_at"] = now_iso()
+    return snapshot
+
+
+def _has_active_retro_attempt(manifest: dict[str, Any]) -> bool:
+    return manifest.get("status") == "completed" or any(
+        manifest.get(key) not in (None, "") for key in RETRO_ACTIVE_FIELDS
+    )
+
+
+def _archive_active_retro_attempt(manifest: dict[str, Any]) -> None:
+    if _has_active_retro_attempt(manifest):
+        # Singular by contract: retain the immediately previous tuple as
+        # bounded, non-authoritative forensic state.
+        manifest["previous_attempt"] = _retro_attempt_snapshot(manifest)
+
+
+def _clear_active_retro_attempt(
+    manifest: dict[str, Any], retro_hash: str | None,
+) -> None:
+    manifest.update({
+        "retro_sha256": retro_hash,
+        "source_id": None,
+        "source_retro_sha256": None,
+        "artifact_id": None,
+        "artifact_retro_sha256": None,
+        "submission_id": None,
+        "submission_id_kind": None,
+        "submission_state": None,
+        "retry_disposition": None,
+        "local_delivery_status": None,
+        "remote_status": None,
+    })
+
+
+def block_invalid_evening_retro(
+    path: pathlib.Path, date_iso: str,
+) -> None:
+    """Remove active completion authority before returning retry rc 75."""
+    manifest = _load_raw_manifest(path)
+    _archive_active_retro_attempt(manifest)
+    _clear_active_retro_attempt(manifest, None)
+    manifest.update({
+        "date": date_iso,
+        "period": "evening",
+        "status": "blocked_invalid_retro",
+        "error": "current durable Retro is missing or invalid",
+        "updated_at": now_iso(),
+    })
+    save_manifest(path, manifest)
+
+
+def evening_notebooklm_already_done(
+    manifest: dict[str, Any], retro_hash: str,
+) -> bool:
+    return (
+        manifest.get("status") == "completed"
+        and isinstance(manifest.get("source_id"), str)
+        and bool(manifest["source_id"].strip())
+        and isinstance(manifest.get("artifact_id"), str)
+        and bool(manifest["artifact_id"].strip())
+        and manifest.get("retro_sha256") == retro_hash
+        and manifest.get("source_retro_sha256") == retro_hash
+        and manifest.get("artifact_retro_sha256") == retro_hash
+    )
+
+
+def prepare_evening_notebooklm_manifest(
+    manifest: dict[str, Any], retro_hash: str, force: bool,
+) -> dict[str, Any]:
+    """Return current-H state, archiving any legacy or stale active tuple."""
+    source_id = manifest.get("source_id")
+    artifact_id = manifest.get("artifact_id")
+    source_hash = manifest.get("source_retro_sha256")
+    artifact_hash = manifest.get("artifact_retro_sha256")
+    current_hash = manifest.get("retro_sha256")
+
+    no_remote_ids = all(
+        value in (None, "")
+        for value in (source_id, source_hash, artifact_id, artifact_hash)
+    )
+    current_empty = current_hash == retro_hash and no_remote_ids
+    current_source = (
+        current_hash == retro_hash
+        and isinstance(source_id, str) and bool(source_id.strip())
+        and source_hash == retro_hash
+        and artifact_id in (None, "")
+        and artifact_hash in (None, "")
+    )
+    unbound_fresh = (
+        current_hash in (None, "")
+        and no_remote_ids
+        and manifest.get("status") not in ("completed", "blocked_invalid_retro")
+    )
+    rollover = force or not (current_empty or current_source or unbound_fresh)
+
+    if rollover:
+        _archive_active_retro_attempt(manifest)
+        _clear_active_retro_attempt(manifest, retro_hash)
+        manifest.update({"status": "started", "attempts": 0, "error": None})
+    elif unbound_fresh:
+        _clear_active_retro_attempt(manifest, retro_hash)
+    return manifest
+
+
+def _positive_message_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def morning_delivery_guard(path: pathlib.Path, date_iso: str,
+                           period: str) -> tuple[str, str | None]:
+    """Classify route-independent morning terminal or integrity evidence."""
+    if period != "morning" or not path.is_file():
+        return "none", None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "none", None
+    if not isinstance(value, dict):
+        return "none", None
+    if (value.get("status") == "failed"
+            and value.get("failed_stage") == "integrity"
+            and value.get("retry_disposition") == "force_required"
+            and value.get("completion_evidence_invalid") is True):
+        return "invalid", str(value.get("error") or "invalid completion evidence")
+    if value.get("status") != "completed":
+        return "none", None
+    if value.get("date") != date_iso or value.get("period") != period:
+        return "invalid", "completed delivery identity does not match its manifest path"
+    if value.get("delivery") == DELIVERY_TAG:
+        message_id = (value.get("telegram") or {}).get("message_id") \
+            if isinstance(value.get("telegram"), dict) else None
+        if (value.get("retry_disposition") == "terminal"
+                and _positive_message_id(message_id)
+                and _manifest_semantics_valid(value)):
+            return "completed", f"message_id={message_id}"
+        return "invalid", "completed local delivery has invalid terminal evidence"
+    artifact_id = value.get("artifact_id")
+    if value.get("delivery") == "notebooklm" \
+            and isinstance(artifact_id, str) and artifact_id.strip():
+        return "completed", f"artifact={artifact_id}"
+    return "invalid", "completed delivery has invalid backend evidence"
+
+
+def mark_completion_integrity_failure(path: pathlib.Path, reason: str) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    value.update({
+        "status": "failed",
+        "failed_stage": "integrity",
+        "retry_disposition": "force_required",
+        "completion_evidence_invalid": True,
+        "error": reason[:400],
+        "updated_at": now_iso(),
+    })
+    save_manifest(path, value)
+
+
 def _ensure_notebook(manifest: dict[str, Any]) -> str:
     existing = manifest.get("notebook_id")
     if isinstance(existing, str) and existing:
@@ -1276,12 +1644,12 @@ def _ensure_notebook(manifest: dict[str, Any]) -> str:
         manifest["notebook_id"] = configured
         return configured
     title = str(manifest["notebook_title"])
-    data = run_notebooklm(["list", "--json"], timeout=90)
+    data = run_notebooklm(["list", "--json"])
     for notebook in data.get("notebooks", []) if isinstance(data, dict) else []:
         if notebook.get("title") == title and notebook.get("id"):
             manifest["notebook_id"] = notebook["id"]
             return str(notebook["id"])
-    created = run_notebooklm(["create", title, "--json"], timeout=120)
+    created = run_notebooklm(["create", title, "--json"])
     notebook_id = _pick_notebooklm_id(created, "id", "notebook_id")
     if not notebook_id:
         raise RuntimeError(f"could not parse notebook id from create output: {created!r}")
@@ -1291,23 +1659,39 @@ def _ensure_notebook(manifest: dict[str, Any]) -> str:
 
 def push_notebooklm(
     date_iso: str, source_file: pathlib.Path, mpath: pathlib.Path,
-    force: bool, period: str,
+    force: bool, period: str, retro_hash: str | None = None,
 ) -> int:
-    manifest = load_notebooklm_manifest(mpath)
-    if not force and manifest.get("status") == "completed" \
-            and manifest.get("artifact_id"):
-        print(f"already completed: artifact={manifest.get('artifact_id')}")
-        return 0
+    if period == "evening":
+        if not retro_hash:
+            raise RuntimeError("evening NotebookLM route requires a Retro hash")
+        manifest = _load_raw_manifest(mpath)
+        if not force and evening_notebooklm_already_done(manifest, retro_hash):
+            print(f"already completed: artifact={manifest.get('artifact_id')}")
+            return 0
+        manifest = prepare_evening_notebooklm_manifest(
+            manifest, retro_hash, force,
+        )
+    else:
+        manifest = load_notebooklm_manifest(mpath)
+        if not force and manifest.get("status") == "completed" \
+                and manifest.get("artifact_id"):
+            print(f"already completed: artifact={manifest.get('artifact_id')}")
+            return 0
     raw_attempts = manifest.get("attempts")
     attempts = raw_attempts if isinstance(raw_attempts, int) \
         and not isinstance(raw_attempts, bool) and raw_attempts >= 0 else 0
     if not force and manifest.get("status") == "failed" \
             and attempts >= NBLM_MAX_ATTEMPTS:
-        print("retry cap reached; skipping NotebookLM")
+        print("terminal NotebookLM attempt already recorded; skipping")
         return 0
-    if force:
-        manifest["source_id"] = None
-        manifest["artifact_id"] = None
+    if force and period != "evening":
+        for key in (
+            "source_id", "artifact_id", "submission_id", "submission_id_kind",
+            "submission_state", "retry_disposition", "local_delivery_status",
+            "remote_status",
+        ):
+            manifest[key] = None
+        attempts = 0
     manifest.update({
         "delivery": "notebooklm", "date": date_iso, "period": period,
         "status": manifest.get("status") or "started",
@@ -1326,48 +1710,84 @@ def push_notebooklm(
             added = run_notebooklm([
                 "source", "add", str(source_file), "-n", notebook_id,
                 "--title", str(manifest["source_title"]), "--type", "file", "--json",
-            ], timeout=NBLM_ADD_TIMEOUT)
+            ])
             source_id = _pick_notebooklm_id(added, "source_id", "id")
             if not source_id:
                 raise RuntimeError(f"could not parse source id from add output: {added!r}")
             manifest.update(source_id=source_id, status="source_uploaded")
+            if period == "evening":
+                manifest["source_retro_sha256"] = retro_hash
             save_manifest(mpath, manifest)
-        try:
-            run_notebooklm([
-                "source", "wait", str(manifest["source_id"]), "-n", notebook_id,
-                "--timeout", str(max(30, NBLM_WAIT_TIMEOUT - 20)), "--json",
-            ], timeout=NBLM_WAIT_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001
-            log(f"{date_iso}: NotebookLM source wait non-fatal: {exc}")
-        manifest["status"] = "source_ready"
-        save_manifest(mpath, manifest)
         prompt = (
             f"Язык озвучки — {UI_LANG_NAME}. Сделай короткое спокойное вечернее "
             "ретро: что закрыто сегодня, что висит и что ждёт ответа."
             if period == "evening" else
             f"Язык озвучки — {UI_LANG_NAME}. Сделай тёплый утренний аудиообзор "
-            "готового дайджеста: спокойно, по делу, без добавления новых фактов."
+            "готового дайджеста продолжительностью примерно восемь–двенадцать минут. "
+            "Равномерно раскрой все содержательные разделы, спокойно, по делу, без "
+            "добавления новых фактов."
         )
+        # Persist the at-most-one automatic attempt gate before the remote
+        # create. If the process dies after NotebookLM accepts the request but
+        # before it returns JSON, every ordinary rerun remains a no-op.
+        manifest.update({
+            "status": "failed",
+            "attempts": NBLM_MAX_ATTEMPTS,
+            "submission_state": "attempted_no_ack",
+            "retry_disposition": "force_required",
+            "local_delivery_status": "not_acknowledged",
+            "remote_status": "unknown_before_ack",
+            "error": "NotebookLM submission attempted; ACK not yet persisted",
+            "last_attempt_at": now_iso(),
+        })
+        save_manifest(mpath, manifest)
         generated = run_notebooklm([
             "generate", "audio", "-n", notebook_id, "-s", str(manifest["source_id"]),
-            "--format", AUDIO_FORMAT,
+            "--format", "brief" if period == "evening" else AUDIO_FORMAT,
             "--length", "short" if period == "evening" else AUDIO_LENGTH,
-            "--language", AUDIO_LANG, "--wait", "--timeout", str(NBLM_AUDIO_TIMEOUT),
-            "--retry", "1", "--json", prompt,
-        ], timeout=NBLM_AUDIO_TIMEOUT + 30)
-        artifact_id = _pick_notebooklm_id(generated, "artifact_id", "id", "task_id")
-        if not artifact_id:
-            raise RuntimeError("audio generation returned no artifact id")
-        manifest.update(status="completed", artifact_id=artifact_id, error=None)
+            "--language", AUDIO_LANG, "--no-wait", "--json", prompt,
+        ])
+        submission_id, submission_id_kind = _pick_notebooklm_submission(generated)
+        if not submission_id:
+            raise RuntimeError("audio submission returned no task/artifact id")
+        manifest.update({
+            "status": "completed",
+            "artifact_id": submission_id,
+            "submission_id": submission_id,
+            "submission_id_kind": submission_id_kind,
+            "submission_state": "acknowledged",
+            "retry_disposition": "terminal",
+            "local_delivery_status": "accepted",
+            "remote_status": "untracked_after_ack",
+            "error": None,
+        })
+        if period == "evening":
+            manifest["artifact_retro_sha256"] = retro_hash
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: NotebookLM completed artifact={artifact_id}")
-        print(f"completed: notebook={notebook_id} artifact={artifact_id}")
+        log(
+            f"{date_iso}: NotebookLM accepted submission={submission_id} "
+            "remote_status=untracked_after_ack"
+        )
+        print(f"accepted: notebook={notebook_id} task={submission_id}")
         return 0
     except Exception as exc:  # noqa: BLE001
-        manifest.update(status="failed", error=str(exc), last_attempt_at=now_iso())
+        manifest.update({
+            "status": "failed",
+            "attempts": NBLM_MAX_ATTEMPTS,
+            "retry_disposition": "force_required",
+            "local_delivery_status": "not_acknowledged",
+            "remote_status": (
+                "unknown_before_ack"
+                if manifest.get("submission_state") == "attempted_no_ack"
+                else "not_submitted"
+            ),
+            "error": str(exc),
+            "last_attempt_at": now_iso(),
+        })
+        manifest.setdefault("submission_state", "not_attempted")
         save_manifest(mpath, manifest)
-        log(f"{date_iso}: NotebookLM failed softly: {exc}")
-        print(f"NotebookLM failed softly (kept file): {exc}")
+        log(f"{date_iso}: NotebookLM terminal one-shot failure: {exc}")
+        print(f"NotebookLM terminal one-shot failure (use --force to retry): {exc}")
         return 0
 
 
@@ -1376,12 +1796,9 @@ def push_notebooklm(
 # Local Qwen render + Telegram delivery
 # ---------------------------------------------------------------------------
 
-EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-PROVIDER_ID_RE = re.compile(r"(?i)\b(?:gmail|provider|thread|message)[_-]?id\b")
 URL_RE = re.compile(r"(?i)\bhttps?://\S+")
 MARKDOWN_LINK_RE = re.compile(r"!?\[([^\]]+)\]\([^)]+\)")
 WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-INTERNAL_PATH_RE = re.compile(r"(?i)(?:^|\s)(?:knowledge|reports|briefs|personal|\.orchestrator)/\S+")
 VALID_STATUSES = {
     "started", "report_ready", "tts_rendered", "telegram_sending",
     "telegram_failed", "telegram_ambiguous", "completed", "unavailable", "failed",
@@ -1399,15 +1816,7 @@ def file_sha256(path: pathlib.Path) -> str:
 
 
 def speech_from_digest(body: str) -> str:
-    """Deterministic body-only Markdown cleanup; reject private raw shapes."""
-    if "<untrusted-source-" in body or "</untrusted-source-" in body:
-        raise ValueError("untrusted-source marker in finalized digest")
-    if EMAIL_RE.search(body):
-        raise ValueError("raw email address in finalized digest")
-    if PROVIDER_ID_RE.search(body) or '"schema": "mail-' in body:
-        raise ValueError("raw provider/envelope identifier in finalized digest")
-    if any(marker in body for marker in ("/Users/", "personal/.secrets", ".orchestrator/")):
-        raise ValueError("private file path in finalized digest")
+    """Deterministic Markdown cleanup for the trusted finalized private daily."""
 
     def visible_wiki(match: re.Match[str]) -> str:
         inner = match.group(1).strip()
@@ -1436,8 +1845,6 @@ def speech_from_digest(body: str) -> str:
     text = re.sub(r"(?m)^\s*>\s?", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if INTERNAL_PATH_RE.search(text):
-        raise ValueError("internal file path remains after speech cleanup")
     if not text:
         raise ValueError("speech text is empty after cleanup")
     return text + "\n"
@@ -1508,6 +1915,13 @@ def load_local_manifest(path: pathlib.Path, date_iso: str, period: str,
             save_manifest(path, manifest)
             return manifest, False
         return manifest, True
+    if period == "evening" and raw.get("status") == "blocked_invalid_retro":
+        manifest = fresh_manifest(date_iso, period)
+        previous_attempt = raw.get("previous_attempt")
+        if isinstance(previous_attempt, dict):
+            manifest["previous_attempt"] = previous_attempt
+        save_manifest(path, manifest)
+        return manifest, False
     if raw.get("delivery") != DELIVERY_TAG:
         manifest = fresh_manifest(date_iso, period, _legacy_diagnostics(raw))
         save_manifest(path, manifest)
@@ -1694,26 +2108,99 @@ def _run_child(argv: list[str], timeout: int) -> subprocess.CompletedProcess[str
             signal.signal(sig, handler)
 
 
+def _tts_alert_marker(date_iso: str, period: str) -> pathlib.Path:
+    return ORCH / "alerts" / f"{date_iso}-{period}.tts-alert-sent"
+
+
+def _send_tts_alert(date_iso: str, period: str, manifest: dict[str, Any]) -> None:
+    """Owner-visible one-line Telegram alert on terminal TTS failure.
+
+    Dedup: a per date+period marker file that survives fresh_manifest();
+    ordering is send-then-mark (a crash between them may duplicate the alert,
+    never suppress it). Best-effort: failures only log, never change state.
+    """
+    marker = _tts_alert_marker(date_iso, period)
+    if marker.exists():
+        return
+    sender = HUB / "bin" / "kb-channel-send"
+    if not sender.is_file() or not os.access(sender, os.X_OK):
+        log(f"{date_iso} {period}: tts alert skipped (kb-channel-send unavailable)")
+        return
+    reason = str(manifest.get("error") or "unknown failure")[:200]
+    engine = "unknown"
+    try:
+        probe = subprocess.run(
+            [str(HUB / "bin" / "kb-tts-render"), "--check"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30,
+        )
+        data = json.loads((probe.stdout or "").strip() or "{}")
+        if isinstance(data, dict) and data.get("engine"):
+            engine = str(data["engine"])
+    except Exception:  # noqa: BLE001 — engine name is cosmetic in the alert
+        pass
+    extra = (
+        "; продление моста: kb-tts-engine extend-bridge --days N --reason ..."
+        if "bridge expired" in reason else ""
+    )
+    text = (
+        f"Озвучка дайджеста упала ({engine}): {reason}. Текст сохранён. "
+        f"Откат: kb-tts-engine set qwen; повтор: kb-morning-digest --force{extra}"
+    )
+    try:
+        proc = subprocess.run(
+            [str(sender), "tts_failure_alert", text],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            log(f"{date_iso} {period}: tts alert send failed rc={proc.returncode}")
+            return
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log(f"{date_iso} {period}: tts alert failed: {exc}")
+
+
+def _tts_unavailable(date_iso: str, period: str, mpath: pathlib.Path,
+                     manifest: dict[str, Any], reason: str) -> int:
+    manifest.update({
+        "status": "unavailable", "failed_stage": "tts",
+        "retry_disposition": "terminal",
+        "error": reason[:400], "updated_at": now_iso(),
+    })
+    save_manifest(mpath, manifest)
+    _append_failure_log(date_iso, period, manifest)
+    _send_tts_alert(date_iso, period, manifest)
+    return 0
+
+
 def render_local_audio(date_iso: str, period: str, mpath: pathlib.Path,
                        manifest: dict[str, Any]) -> int | None:
     paths = canonical_artifacts(date_iso, period)
     renderer = HUB / "bin" / "kb-tts-render"
-    tts_home = pathlib.Path(
-        os.environ.get("KB_TTS_HOME", "~/.local/share/vepol-qwen-tts")
-    ).expanduser()
-    runtime_marker = tts_home / "install.json"
-    if (not renderer.is_file() or not os.access(renderer, os.X_OK)
-            or not runtime_marker.is_file()):
-        manifest.update({
-            "status": "unavailable", "failed_stage": "tts",
-            "retry_disposition": "terminal",
-            "error": "local Qwen runtime/marker unavailable; run kb-tts-install",
-            "updated_at": now_iso(),
-        })
-        save_manifest(mpath, manifest)
-        _append_failure_log(date_iso, period, manifest)
-        return 0
+    if not renderer.is_file() or not os.access(renderer, os.X_OK):
+        return _tts_unavailable(
+            date_iso, period, mpath, manifest,
+            "tts renderer unavailable; run kb-tts-install",
+        )
+    # Engine-agnostic local-readiness gate: the renderer owns engine selection
+    # and runtime checks; the digest only consumes the ready/unavailable verdict.
+    check = _run_child([str(renderer), "--check"], 60)
+    if check.returncode != 0:
+        reason = ""
+        try:
+            data = json.loads((check.stdout or "").strip() or "{}")
+            if isinstance(data, dict):
+                reason = str(data.get("error") or "")
+        except ValueError:
+            pass
+        if not reason:
+            reason = (check.stderr or check.stdout
+                      or f"tts engine check failed rc={check.returncode}").strip()
+        return _tts_unavailable(date_iso, period, mpath, manifest, reason)
     if _block_at_cap(mpath, manifest, "tts", date_iso, period):
+        _send_tts_alert(date_iso, period, manifest)
         return 0
     _begin_attempt(mpath, manifest, "tts", "report_ready")
     voice = (
@@ -1724,13 +2211,25 @@ def render_local_audio(date_iso: str, period: str, mpath: pathlib.Path,
         str(renderer), "--file", str(paths["speech"]), "--out", str(paths["audio"]),
         "--language", UI_LANG_NAME, "--voice-instruct", voice,
     ], TTS_TIMEOUT)
+    if proc.returncode == 3:
+        # Unavailable surfaced only at render time (e.g. the bridge expired
+        # between check and render): refund the begun attempt exactly — this
+        # failure class is not retryable, so it must not consume the budget.
+        attempts = manifest["attempts"]
+        attempts["tts"] = max(0, int(attempts.get("tts", 1)) - 1)
+        attempts["total"] = max(0, int(attempts.get("total", 1)) - 1)
+        err = (proc.stderr or proc.stdout or "renderer unavailable (exit 3)").strip()
+        return _tts_unavailable(date_iso, period, mpath, manifest, err)
     if proc.returncode != 0 or not paths["audio"].is_file() or not paths["audio"].stat().st_size:
         try:
             paths["audio"].unlink()
         except OSError:
             pass
         err = (proc.stderr or proc.stdout or f"renderer rc={proc.returncode}").strip()
-        return _stage_failed(mpath, manifest, "tts", date_iso, period, err)
+        rc = _stage_failed(mpath, manifest, "tts", date_iso, period, err)
+        if manifest.get("retry_disposition") == "terminal":
+            _send_tts_alert(date_iso, period, manifest)
+        return rc
     os.chmod(paths["audio"], 0o600)
     manifest.update({
         "status": "tts_rendered", "retry_disposition": "retryable",
@@ -1769,7 +2268,8 @@ def send_local_audio(date_iso: str, period: str, mpath: pathlib.Path,
         result = json.loads((proc.stdout or "").strip())
     except Exception:  # noqa: BLE001
         result = {}
-    if proc.returncode == 0 and result.get("outcome") == "success":
+    if proc.returncode == 0 and result.get("outcome") == "success" \
+            and _positive_message_id(result.get("message_id")):
         audio_meta = result.get("audio")
         if not isinstance(audio_meta, dict) or not all(
             key in audio_meta for key in ("file_id", "file_unique_id", "duration")
@@ -1886,34 +2386,28 @@ def background_push_denied() -> str | None:
     argv = [os.path.basename(sys.argv[0])] + sys.argv[1:]
     if argv != allowed_argv:
         return f"argv {argv!r} does not match the allowlisted command for {process_id!r}"
-    outputs = [o.strip() for o in os.environ.get("KB_PROCESS_OUTPUTS", "").split(",")]
-    if outputs not in (
-        ["file", "notebooklm_audio"], ["file", "telegram_audio"],
-    ):
-        return (
-            "KB_PROCESS_OUTPUTS must be exactly file,notebooklm_audio or "
-            "file,telegram_audio"
-        )
     return None
 
 
-def selected_audio_backend() -> str:
-    """Return the delivery adapter after the background guard accepted argv.
+def selected_audio_channels() -> list[str]:
+    """Return every independently enabled audio channel.
 
     Manual test runs keep the already shipped local-Qwen behavior. Production
-    scheduled runs select only through the validated outputs declaration.
+    scheduled runs read the normalized true flags from KB_PROCESS_OUTPUTS.
     """
     if os.environ.get("KB_PROCESS_ID") is None:
-        return "local_qwen"
+        return ["telegram_audio"]
     outputs = [o.strip() for o in os.environ.get("KB_PROCESS_OUTPUTS", "").split(",")]
-    if outputs == ["file", "notebooklm_audio"]:
-        return "notebooklm"
-    return "local_qwen"
+    return [
+        channel for channel in ("telegram_audio", "notebooklm_audio")
+        if channel in outputs
+    ]
 
 
 def build_ready_digest(
     date_iso: str, period: str, digest_file: pathlib.Path | None,
     morning_input: dict[str, Any] | None = None,
+    evening_retro: ParsedRetro | None = None,
 ) -> tuple[dict[str, pathlib.Path], str, str | None]:
     """Generate the report once and freeze the exact text passed to adapters.
 
@@ -1921,42 +2415,33 @@ def build_ready_digest(
     byte-identical adapter input for both NotebookLM and local Qwen.
     """
     if period == "evening":
-        blocks = gather_evening(date_iso)
+        blocks = gather_evening(date_iso, evening_retro)
     else:
         if morning_input is None:
             morning_input = capture_morning_input(date_iso)
         blocks = morning_input["blocks"]
 
     if digest_file is not None:
-        digest_body = digest_file.read_text(encoding="utf-8").strip()
+        digest_body = digest_file.read_text(encoding="utf-8").strip("\r\n")
         source = "digest-file"
     elif period == "evening":
         digest_body = "\n\n".join(b["text"].strip() for b in blocks if b.get("text"))
         source = "missing-retro" if "## Evening retro missing" in digest_body else "retro-block"
     else:
-        context = build_context_packet(date_iso, blocks)
-        digest_body, synth_agent = synth_digest(context, SYNTH_INSTRUCTION)
-        if digest_body is None:
-            digest_body = (
-                "## Утро: коротко о главном\n"
-                "Автосводка не собралась — ниже сырой контекст утренних процессов.\n\n"
-                + context
-            )
-            source = "fallback-packet"
-        else:
-            source = f"synth:{synth_agent}"
+        digest_body = assemble_finalized_morning(blocks)
+        source = "whole-finalized-blocks"
 
     paths = canonical_artifacts(date_iso, period)
     file_content = render_source_file(date_iso, digest_body, blocks, period)
     atomic_write(paths["report"], file_content)
     log(f"{date_iso}: wrote {rel(paths['report'])} ({source}, {len(file_content)} chars)")
     print(f"wrote {paths['report']} ({source})")
-    if source in ("fallback-packet", "missing-retro"):
+    if source == "missing-retro":
         return paths, source, (
-            "all synthesis agents failed; raw fallback packet is report-only"
-            if source == "fallback-packet"
-            else "trusted evening Retro block is missing; report-only"
+            "trusted evening Retro block is missing; report-only"
         )
+    if period == "morning" and not digest_body:
+        return paths, source, "no finalized same-day morning blocks; report-only"
     try:
         speech = speech_from_digest(digest_body)
     except ValueError as exc:
@@ -1968,34 +2453,55 @@ def build_ready_digest(
 def run_notebooklm_route(
     date_iso: str, period: str, digest_file: pathlib.Path | None,
     out_path: pathlib.Path, mpath: pathlib.Path, force: bool,
+    evening_retro: ParsedRetro | None = None,
+    prepared: bool = False,
 ) -> int:
-    """Build the unchanged current report, then invoke only NotebookLM."""
-    existing = load_notebooklm_manifest(mpath)
-    if not force and existing.get("status") == "completed" \
-            and existing.get("artifact_id"):
-        print(f"already completed for {date_iso}: artifact={existing.get('artifact_id')}")
+    """Send the canonical speech file to NotebookLM, building it when needed."""
+    existing = (
+        _load_raw_manifest(mpath)
+        if period == "evening" else load_notebooklm_manifest(mpath)
+    )
+    already_done = (
+        evening_retro is not None
+        and evening_notebooklm_already_done(existing, evening_retro.sha256)
+        if period == "evening" else
+        existing.get("status") == "completed" and bool(existing.get("artifact_id"))
+    )
+    if not force and already_done:
+        print(f"already accepted for {date_iso}: submission={existing.get('artifact_id')}")
         return 0
 
-    paths, source, build_error = build_ready_digest(
-        date_iso, period, digest_file,
-    )
+    if prepared:
+        paths = canonical_artifacts(date_iso, period)
+        source, build_error = "shared-build", None
+        if not paths["report"].is_file() or not paths["speech"].is_file():
+            build_error = "shared speech file is unavailable"
+    else:
+        paths, source, build_error = build_ready_digest(
+            date_iso, period, digest_file, evening_retro=evening_retro,
+        )
     if paths["report"] != out_path:
-        raise RuntimeError("NotebookLM selector requires the canonical report path")
+        raise RuntimeError("NotebookLM delivery requires the canonical report path")
     if build_error is not None:
         log(f"{date_iso}: {source} remains report-only: {build_error}")
         return 1
     # NotebookLM and Qwen receive the same frozen text bytes. NotebookLM keeps
     # its Audio Overview remotely; there is no download or Telegram call here.
-    rc = push_notebooklm(date_iso, paths["speech"], mpath, force, period)
+    rc = push_notebooklm(
+        date_iso, paths["speech"], mpath, force, period,
+        evening_retro.sha256 if evening_retro is not None else None,
+    )
     manifest = load_notebooklm_manifest(mpath)
-    artifact = manifest.get("artifact_id") or "—"
+    submission = manifest.get("submission_id") or manifest.get("artifact_id") or "—"
+    delivery = manifest.get("local_delivery_status") or manifest.get("status", "unknown")
+    remote = manifest.get("remote_status") or "legacy_unknown"
     label = "Вечернее ретро" if period == "evening" else "Утренний дайджест"
     try:
         with HUB_LOG.open("a", encoding="utf-8") as handle:
             handle.write(
                 f"\n## [{date_iso}] digest | hub | \"{label} → NotebookLM "
-                f"({manifest.get('status', 'unknown')}); файл {rel(paths['report'])}; "
-                f"artifact {artifact}\"\n"
+                f"(local={delivery}, remote={remote}); файл {rel(paths['report'])}; "
+                f"submission {submission}\"\n"
             )
     except Exception as exc:  # noqa: BLE001
         log(f"{date_iso}: NotebookLM hub log append failed: {exc}")
@@ -2006,26 +2512,193 @@ def run_notebooklm_route(
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def run_local_route(
+    date_iso: str, period: str, digest_file: pathlib.Path | None,
+    mpath: pathlib.Path, force: bool,
+    evening_retro: ParsedRetro | None = None,
+) -> int:
+    """Run the existing local Qwen → Telegram handler."""
+    morning_input: dict[str, Any] | None = None
+
+    # Telegram completion is terminal only for the Telegram handler. It must not
+    # suppress another independently enabled channel.
+    if not force:
+        guard, evidence = morning_delivery_guard(mpath, date_iso, period)
+        if guard == "completed":
+            print(f"already completed for {date_iso}: {evidence}")
+            return 0
+        if guard == "invalid":
+            mark_completion_integrity_failure(
+                mpath, evidence or "invalid completed delivery evidence",
+            )
+            log(f"{date_iso} {period}: invalid completed delivery evidence; --force required")
+            print("invalid completed delivery evidence; --force required")
+            return 0
+
+    manifest, blocked = load_local_manifest(mpath, date_iso, period, force)
+    if blocked:
+        _append_failure_log(date_iso, period, manifest)
+        return 0
+
+    if force:
+        # Explicit owner recovery must be able to replace even a locally
+        # corrupted semantic/counter schema.  Reuse only independently
+        # hash-verified canonical speech; never trust attempts/caps/state.
+        reusable_speech = _speech_valid(manifest, date_iso, period)
+        legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
+        manifest = fresh_manifest(date_iso, period, legacy)
+        if reusable_speech:
+            paths = canonical_artifacts(date_iso, period)
+            manifest.update({
+                "status": "report_ready",
+                "speech_sha256": file_sha256(paths["speech"]),
+                "updated_at": now_iso(),
+            })
+            save_manifest(mpath, manifest)
+            return render_and_send(date_iso, period, mpath, manifest, True)
+    else:
+        # Exact schema/caps are persisted invariants, not ambient
+        # configuration.  Without explicit force, corruption fails closed
+        # before gather, TTS or Telegram.
+        attempts = manifest.get("attempts")
+        caps = manifest.get("caps")
+        if (not isinstance(attempts, dict) or caps != ATTEMPT_CAPS
+                or not _manifest_semantics_valid(manifest) or any(
+            isinstance(attempts.get(key), bool)
+            or not isinstance(attempts.get(key), int) or attempts.get(key) < 0
+            for key in ("build", "tts", "telegram", "total")
+        )):
+            return _set_integrity_failure(
+                mpath, manifest, date_iso, period,
+                "invalid attempts/caps manifest schema",
+            )
+
+        status = manifest.get("status")
+        disposition = manifest.get("retry_disposition")
+        if status == "telegram_sending":
+            manifest.update({
+                "status": "telegram_ambiguous", "failed_stage": "telegram",
+                "retry_disposition": "force_required",
+                "error": "previous run stopped after Telegram transmission may have begun",
+                "updated_at": now_iso(),
+            })
+            save_manifest(mpath, manifest)
+            _append_failure_log(date_iso, period, manifest)
+            return 0
+        if status == "completed":
+            message_id = (manifest.get("telegram") or {}).get("message_id")
+            if not _positive_message_id(message_id):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "completed manifest is missing telegram.message_id",
+                )
+            # A completed morning delivery is terminal for its date across
+            # legacy v1/v2 and v3 snapshots. Same-day input drift never
+            # causes an automatic resend; only explicit owner --force can.
+            print(f"already completed for {date_iso}: message_id={message_id}")
+            return 0
+        if disposition in ("terminal", "force_required") or status in (
+            "unavailable", "telegram_ambiguous",
+        ):
+            print(f"delivery state {status}/{disposition}; --force required for recovery")
+            return 0
+        failed_stage = manifest.get("failed_stage")
+        if status == "failed" and failed_stage in ("build", "tts", "telegram"):
+            if _block_at_cap(mpath, manifest, failed_stage, date_iso, period):
+                return 0
+        if status == "report_ready" or (status == "failed" and failed_stage == "tts"):
+            if not _speech_valid(manifest, date_iso, period):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "stored report/speech path or speech hash failed validation",
+                )
+            return render_and_send(date_iso, period, mpath, manifest, True)
+        if status in ("tts_rendered", "telegram_failed") or (
+            status == "failed" and failed_stage == "telegram"
+        ):
+            if not _speech_valid(manifest, date_iso, period):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "stored report/speech path or speech hash failed validation",
+                )
+            return render_and_send(
+                date_iso, period, mpath, manifest, not _audio_valid(manifest, date_iso, period)
+            )
+
+    if period == "morning" and morning_input is None:
+        morning_input = capture_morning_input(date_iso)
+    if morning_input is not None:
+        manifest["upstream_snapshot"] = morning_input["upstream_snapshot"]
+
+    if _block_at_cap(mpath, manifest, "build", date_iso, period):
+        return 0
+    _begin_attempt(mpath, manifest, "build", "started")
+
+    paths = canonical_artifacts(date_iso, period)
+    for stale in (paths["speech"], paths["audio"]):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    paths, source, build_error = build_ready_digest(
+        date_iso, period, digest_file, morning_input, evening_retro,
+    )
+    if build_error is not None:
+        return _stage_failed(
+            mpath, manifest, "build", date_iso, period, build_error,
+        )
+    manifest.update({
+        "status": "report_ready", "retry_disposition": "retryable",
+        "failed_stage": None, "speech_sha256": file_sha256(paths["speech"]),
+        "audio_sha256": None, "telegram": None, "error": None,
+        "updated_at": now_iso(),
+    })
+    save_manifest(mpath, manifest)
+    rc = render_and_send(date_iso, period, mpath, manifest, True)
+    if manifest.get("status") == "completed":
+        append_hub_log(date_iso, paths["report"], manifest, period)
+    return rc
+
+
+
 def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
-        out: pathlib.Path | None, no_push: bool, force: bool) -> int:
+        out: pathlib.Path | None, no_push: bool, force: bool,
+        notebooklm_only: bool = False) -> int:
     out_path = out or digest_path(date_iso, period)
     mpath = manifest_path(date_iso, period)
+    evening_retro: ParsedRetro | None = None
 
-    # Deterministic test seam: for morning, emit the exact input handed to the
-    # synthesis agent (instruction + context packet, including the
-    # untrusted-wrapped mail block). For evening v0.5.1, there is no synthesis
-    # agent: emit the ready local-audio source packet built from the trusted Retro
-    # block. Stop BEFORE any lock, LLM, TTS, or Telegram call. Mirrors
-    # KB_BRIEF_PROMPT_ONLY in kb-brief; used by test-mail-digest-integration.sh
-    # and test-evening-digest.sh.
+    # The durable same-day Retro is the first evening authority check. It must
+    # precede every completion shortcut, report/speech write, attempt counter,
+    # adapter selection and remote call; CLI/background modes cannot bypass it.
+    if period == "evening":
+        evening_retro = load_retro(HUB, date_iso)
+        if evening_retro is None:
+            # Preview and explicit file-only runs validate the canonical Retro
+            # but never mutate canonical delivery state.
+            if out is None and not no_push:
+                block_invalid_evening_retro(mpath, date_iso)
+                block_invalid_evening_retro(
+                    notebooklm_manifest_path(date_iso, period), date_iso,
+                )
+            log(f"{date_iso}: current durable Retro is missing or invalid; retry")
+            print("current durable Retro is missing or invalid; retry after kb-retro")
+            return RC_INVALID_RETRO
+
+    # Deterministic test seam. Morning emits the exact finalized whole-block
+    # assembly before Markdown-to-speech normalization. Evening keeps its
+    # trusted Retro packet. No lock, agent, adapter, or Telegram call occurs.
     if os.environ.get("KB_DIGEST_PROMPT_ONLY") == "1":
         if period == "evening":
-            context = build_evening_context_packet(date_iso, gather_evening(date_iso))
+            context = build_evening_context_packet(
+                date_iso, gather_evening(date_iso, evening_retro),
+            )
             sys.stdout.write(context)
         else:
             captured = capture_morning_input(date_iso)
-            context = build_context_packet(date_iso, captured["blocks"])
-            sys.stdout.write(SYNTH_INSTRUCTION + context)
+            context = assemble_finalized_morning(captured["blocks"])
+            sys.stdout.write(context)
         if not context.endswith("\n"):
             sys.stdout.write("\n")
         return 0
@@ -2047,39 +2720,58 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
 
     try:
         denied = background_push_denied()
-        delivery_enabled = not no_push and out is None and denied is None
-        backend = selected_audio_backend() if delivery_enabled else None
+        channels = (
+            ["notebooklm_audio"]
+            if notebooklm_only and not no_push and out is None
+            else selected_audio_channels() if not no_push and out is None else []
+        )
+        delivery_enabled = not no_push and out is None and denied is None and bool(channels)
         morning_input: dict[str, Any] | None = None
 
         # Compatibility/file-only paths deliberately do not inspect or mutate
         # the delivery manifest and can never resume an external effect.
         if not delivery_enabled:
+            # Preserve completed local artifacts on denied/file-only reruns.
+            # This guard is intentionally inside the no-delivery branch so it
+            # cannot suppress another independently enabled channel.
+            if out is None and not force:
+                guard, evidence = morning_delivery_guard(mpath, date_iso, period)
+                if guard == "completed":
+                    print(f"already completed for {date_iso}: {evidence}")
+                    return 0
+                if guard == "invalid":
+                    mark_completion_integrity_failure(
+                        mpath, evidence or "invalid completed delivery evidence",
+                    )
+                    log(f"{date_iso} {period}: invalid completed delivery evidence; --force required")
+                    print("invalid completed delivery evidence; --force required")
+                    return 0
             if period == "evening":
-                blocks = gather_evening(date_iso)
+                blocks = gather_evening(date_iso, evening_retro)
             else:
                 morning_input = capture_morning_input(date_iso)
                 blocks = morning_input["blocks"]
             if digest_file is not None:
-                digest_body, source = digest_file.read_text(encoding="utf-8").strip(), "digest-file"
+                digest_body, source = digest_file.read_text(encoding="utf-8").strip("\r\n"), "digest-file"
             elif period == "evening":
                 digest_body = "\n\n".join(b["text"].strip() for b in blocks if b.get("text"))
                 source = "missing-retro" if "## Evening retro missing" in digest_body else "retro-block"
             else:
-                context = build_context_packet(date_iso, blocks)
-                digest_body, synth_agent = synth_digest(context, SYNTH_INSTRUCTION)
-                if digest_body is None:
-                    digest_body = (
-                        "## Утро: коротко о главном\n"
-                        "Автосводка не собралась — ниже сырой контекст утренних процессов.\n\n"
-                        + context
-                    )
-                    source = "fallback-packet"
-                else:
-                    source = f"synth:{synth_agent}"
+                digest_body = assemble_finalized_morning(blocks)
+                source = "whole-finalized-blocks"
             file_content = render_source_file(date_iso, digest_body, blocks, period)
             atomic_write(out_path, file_content)
             log(f"{date_iso}: wrote {rel(out_path)} ({source}, {len(file_content)} chars)")
             print(f"wrote {out_path} ({source})")
+            # Canonical file-only runs still freeze the exact privacy-gated
+            # adapter input for audit/proof. They invoke no audio adapter.
+            if out is None and digest_body and source != "missing-retro":
+                try:
+                    frozen_speech = speech_from_digest(digest_body)
+                except ValueError as exc:
+                    log(f"{date_iso}: file-only speech gate rejected source: {exc}")
+                    return 1
+                atomic_write(speech_path(date_iso, period), frozen_speech)
             if denied:
                 log(f"{date_iso}: background guard kept run file-only: {denied}")
                 print(f"background guard: audio skipped ({denied}); file kept")
@@ -2087,194 +2779,26 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
                 print("skipped local audio delivery (--no-push/--out)")
             return 0
 
-        if backend == "notebooklm":
-            return run_notebooklm_route(
-                date_iso, period, digest_file, out_path, mpath, force,
-            )
-
-        manifest, blocked = load_local_manifest(mpath, date_iso, period, force)
-        if blocked:
-            _append_failure_log(date_iso, period, manifest)
-            return 0
-
-        if force:
-            # Explicit owner recovery must be able to replace even a locally
-            # corrupted semantic/counter schema.  Reuse only independently
-            # hash-verified canonical speech; never trust attempts/caps/state.
-            reusable_speech = _speech_valid(manifest, date_iso, period)
-            legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
-            manifest = fresh_manifest(date_iso, period, legacy)
-            if reusable_speech:
-                paths = canonical_artifacts(date_iso, period)
-                manifest.update({
-                    "status": "report_ready",
-                    "speech_sha256": file_sha256(paths["speech"]),
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                return render_and_send(date_iso, period, mpath, manifest, True)
-        else:
-            # Exact schema/caps are persisted invariants, not ambient
-            # configuration.  Without explicit force, corruption fails closed
-            # before gather, TTS or Telegram.
-            attempts = manifest.get("attempts")
-            caps = manifest.get("caps")
-            if (not isinstance(attempts, dict) or caps != ATTEMPT_CAPS
-                    or not _manifest_semantics_valid(manifest) or any(
-                isinstance(attempts.get(key), bool)
-                or not isinstance(attempts.get(key), int) or attempts.get(key) < 0
-                for key in ("build", "tts", "telegram", "total")
-            )):
-                return _set_integrity_failure(
-                    mpath, manifest, date_iso, period,
-                    "invalid attempts/caps manifest schema",
-                )
-
-            status = manifest.get("status")
-            disposition = manifest.get("retry_disposition")
-            if status == "telegram_sending":
-                manifest.update({
-                    "status": "telegram_ambiguous", "failed_stage": "telegram",
-                    "retry_disposition": "force_required",
-                    "error": "previous run stopped after Telegram transmission may have begun",
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                _append_failure_log(date_iso, period, manifest)
-                return 0
-            if status == "completed":
-                message_id = (manifest.get("telegram") or {}).get("message_id")
-                if not message_id:
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "completed manifest is missing telegram.message_id",
-                    )
-                if period != "morning":
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-
-                stored_snapshot = manifest.get("upstream_snapshot")
-                if (
-                    isinstance(stored_snapshot, dict)
-                    and stored_snapshot.get("schema") == "morning-input/v1"
-                ):
-                    # Input-contract upgrade (EXACTLY v1→v2, D13: mail/board
-                    # left the roster): a completed delivery built under the
-                    # known previous contract is NOT corrupt — treat it exactly
-                    # like the pre-v0.6 no-provenance case below (manual no-op;
-                    # the exact scheduler caller upgrades the manifest once).
-                    # Any OTHER schema (malformed, future) falls through to
-                    # snapshot_valid and fails closed as integrity corruption.
-                    stored_snapshot = None
-                exact_scheduled = bool(
-                    os.environ.get("KB_PROCESS_BACKGROUND")
-                    and os.environ.get("KB_PROCESS_ID") == "morning-digest"
-                    and denied is None
-                )
-                if stored_snapshot is None and not exact_scheduled:
-                    # Compatibility: an old/local manifest without v0.6 input
-                    # provenance remains a manual no-op.  The exact scheduler
-                    # caller upgrades it once so a pre-chain smoke cannot occupy
-                    # the real post-chain slot.
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-                if stored_snapshot is not None and not snapshot_valid(stored_snapshot):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        f"invalid {SNAPSHOT_SCHEMA} upstream_snapshot",
-                    )
-
-                morning_input = capture_morning_input(date_iso)
-                current_snapshot = morning_input["upstream_snapshot"]
-                if (
-                    stored_snapshot is not None
-                    and stored_snapshot["semantic_sha256"]
-                    == current_snapshot["semantic_sha256"]
-                ):
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-
-                previous = {
-                    "message_id": message_id,
-                    "semantic_sha256": (
-                        stored_snapshot.get("semantic_sha256")
-                        if isinstance(stored_snapshot, dict) else None
-                    ),
-                    "completed_at": manifest.get("updated_at"),
-                }
-                legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
-                manifest = fresh_manifest(date_iso, period, legacy)
-                manifest.update({
-                    "upstream_snapshot": current_snapshot,
-                    "superseded_delivery": previous,
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                status = manifest["status"]
-                disposition = manifest["retry_disposition"]
-                log(f"{date_iso}: completed morning delivery superseded by newer semantic input")
-            if disposition in ("terminal", "force_required") or status in (
-                "unavailable", "telegram_ambiguous",
-            ):
-                print(f"delivery state {status}/{disposition}; --force required for recovery")
-                return 0
-            failed_stage = manifest.get("failed_stage")
-            if status == "failed" and failed_stage in ("build", "tts", "telegram"):
-                if _block_at_cap(mpath, manifest, failed_stage, date_iso, period):
-                    return 0
-            if status == "report_ready" or (status == "failed" and failed_stage == "tts"):
-                if not _speech_valid(manifest, date_iso, period):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "stored report/speech path or speech hash failed validation",
-                    )
-                return render_and_send(date_iso, period, mpath, manifest, True)
-            if status in ("tts_rendered", "telegram_failed") or (
-                status == "failed" and failed_stage == "telegram"
-            ):
-                if not _speech_valid(manifest, date_iso, period):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "stored report/speech path or speech hash failed validation",
-                    )
-                return render_and_send(
-                    date_iso, period, mpath, manifest, not _audio_valid(manifest, date_iso, period)
-                )
-
-        if period == "morning" and morning_input is None:
-            morning_input = capture_morning_input(date_iso)
-        if morning_input is not None:
-            manifest["upstream_snapshot"] = morning_input["upstream_snapshot"]
-
-        if _block_at_cap(mpath, manifest, "build", date_iso, period):
-            return 0
-        _begin_attempt(mpath, manifest, "build", "started")
-
-        paths = canonical_artifacts(date_iso, period)
-        for stale in (paths["speech"], paths["audio"]):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-
-        paths, source, build_error = build_ready_digest(
-            date_iso, period, digest_file, morning_input,
+        notebook_mpath = (
+            ensure_notebooklm_manifest(date_iso, period)
+            if "notebooklm_audio" in channels else None
         )
-        if build_error is not None:
-            return _stage_failed(
-                mpath, manifest, "build", date_iso, period, build_error,
-            )
-        manifest.update({
-            "status": "report_ready", "retry_disposition": "retryable",
-            "failed_stage": None, "speech_sha256": file_sha256(paths["speech"]),
-            "audio_sha256": None, "telegram": None, "error": None,
-            "updated_at": now_iso(),
-        })
-        save_manifest(mpath, manifest)
-        rc = render_and_send(date_iso, period, mpath, manifest, True)
-        if manifest.get("status") == "completed":
-            append_hub_log(date_iso, paths["report"], manifest, period)
-        return rc
+        handlers = {
+            "telegram_audio": lambda: run_local_route(
+                date_iso, period, digest_file, mpath, force, evening_retro,
+            ),
+            "notebooklm_audio": lambda: run_notebooklm_route(
+                date_iso, period, digest_file, out_path, notebook_mpath, force,
+                evening_retro=evening_retro,
+                prepared=out_path.is_file() and speech_path(date_iso, period).is_file(),
+            ),
+        }
+        retry = False
+        for channel in channels:
+            if handlers[channel]() != 0:
+                retry = True
+        return 1 if retry else 0
+
     finally:
         if lock_fh is not None:
             lock_fh.close()
@@ -2282,7 +2806,7 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Morning/evening digest -> selected NotebookLM or local-Qwen audio route."
+        description="Morning/evening digest -> enabled audio channels."
     )
     parser.add_argument("--period", choices=("morning", "evening"), default="morning",
                         help="Which digest to build (default morning).")
@@ -2290,6 +2814,10 @@ def main() -> int:
     parser.add_argument("--digest-file", help="Use this file as the digest body (skip synth).")
     parser.add_argument("--out", help="Write digest to this path instead of the canonical report.")
     parser.add_argument("--no-push", action="store_true", help="Build the report only; skip selected audio delivery.")
+    parser.add_argument(
+        "--notebooklm", action="store_true",
+        help="Manually select only the NotebookLM audio channel.",
+    )
     parser.add_argument("--force", action="store_true", help="Regenerate even if manifest completed.")
     args = parser.parse_args()
 
@@ -2302,9 +2830,12 @@ def main() -> int:
         print(f"--digest-file not found: {digest_file}", file=sys.stderr)
         return 2
     out = pathlib.Path(args.out).expanduser() if args.out else None
+    if args.notebooklm and (args.no_push or out is not None):
+        parser.error("--notebooklm cannot be combined with --no-push or --out")
 
     return run(args.date, period=args.period, digest_file=digest_file, out=out,
-               no_push=args.no_push, force=args.force)
+               no_push=args.no_push, force=args.force,
+               notebooklm_only=args.notebooklm)
 
 
 if __name__ == "__main__":

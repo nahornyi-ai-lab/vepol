@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Send exactly one frozen private text part with typed Telegram outcomes."""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import re
+import ssl
+import stat
+import sys
+from pathlib import Path
+from urllib.parse import urlencode, urlsplit
+
+
+MAX_UTF16 = 3500
+MESSAGE_TYPES = {"brief", "brief_error"}
+
+
+def emit(outcome: str, message_id=None, reason: str | None = None) -> None:
+    value = {"outcome": outcome, "message_id": message_id}
+    if reason:
+        value["reason"] = reason
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
+def reject(reason: str) -> int:
+    emit("known_rejection", reason=reason)
+    return 20
+
+
+def ambiguous(reason: str) -> int:
+    emit("ambiguous", reason=reason)
+    return 21
+
+
+def main() -> int:
+    if len(sys.argv) != 3 or sys.argv[1] not in MESSAGE_TYPES:
+        return reject("invalid_local_arguments")
+    part_path = Path(sys.argv[2])
+    try:
+        if not part_path.is_file() or stat.S_IMODE(part_path.stat().st_mode) != 0o600:
+            return reject("invalid_private_part")
+        raw = part_path.read_bytes()
+        text = raw.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return reject("invalid_private_part")
+    if not text or len(text.encode("utf-16-le")) // 2 > MAX_UTF16:
+        return reject("invalid_private_part")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id or not re.fullmatch(r"[^\s/]+", token):
+        return reject("missing_credentials")
+    try:
+        timeout = float(os.environ.get("KB_TG_TEXT_TIMEOUT", "20"))
+        if not 0 < timeout <= 120:
+            raise ValueError
+    except ValueError:
+        return reject("invalid_timeout")
+
+    base = os.environ.get("KB_TG_API_BASE", "https://api.telegram.org").rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError
+        base_path = parsed.path.rstrip("/")
+        path = f"{base_path}/bot{token}/sendMessage"
+        port = parsed.port
+    except (ValueError, TypeError):
+        return reject("invalid_api_base")
+
+    if parsed.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            parsed.hostname, port=port, timeout=timeout, context=ssl.create_default_context()
+        )
+    else:
+        connection = http.client.HTTPConnection(parsed.hostname, port=port, timeout=timeout)
+
+    # A connect failure is the only network error proven to precede request
+    # transmission. Everything after this point is possibly delivered.
+    try:
+        connection.connect()
+    except Exception:
+        connection.close()
+        return reject("connect_failed_before_transmission")
+
+    payload = urlencode({"chat_id": chat_id, "text": text}).encode("ascii")
+    try:
+        connection.request(
+            "POST",
+            path,
+            body=payload,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(payload)),
+            },
+        )
+        response = connection.getresponse()
+        response_raw = response.read()
+    except Exception:
+        connection.close()
+        return ambiguous("uncertain_after_transmission_began")
+    finally:
+        connection.close()
+
+    try:
+        value = json.loads(response_raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ambiguous("malformed_response")
+    if not isinstance(value, dict):
+        return ambiguous("malformed_response")
+    if value.get("ok") is True:
+        result = value.get("result")
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if (isinstance(message_id, bool) or not isinstance(message_id, int)
+                or message_id <= 0):
+            return ambiguous("success_with_invalid_message_id")
+        emit("success", message_id=message_id)
+        return 0
+    if value.get("ok") is False:
+        return reject("telegram_rejected")
+    return ambiguous("malformed_response")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

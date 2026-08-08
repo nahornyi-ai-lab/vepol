@@ -64,6 +64,26 @@ else
   echo '{"ok":false,"description":"fixture telegram down"}'
 fi
 SH
+  # kb-brief now owns text delivery through the typed one-part sender. Keep the
+  # same outcome controls/counter as the legacy curl fake so this suite still
+  # covers brief + Retro in one fixture without any network call.
+  cat > "$H/bin/kb-channel-send-text" <<'SH'
+#!/bin/sh
+echo "send typed $*" >> "$KB_HUB/tg.log"
+N=$(cat "$KB_HUB/tg.count" 2>/dev/null || echo 0)
+N=$((N+1)); echo "$N" > "$KB_HUB/tg.count"
+MODE="${KB_FAKE_TG_MODE:-ok}"
+if [ -n "${KB_FAKE_TG_MODES:-}" ]; then
+  MODE=$(echo "$KB_FAKE_TG_MODES" | cut -d, -f"$N")
+  [ -n "$MODE" ] || MODE=$(echo "$KB_FAKE_TG_MODES" | awk -F, '{print $NF}')
+fi
+if [ "$MODE" = "ok" ]; then
+  echo "{\"outcome\":\"success\",\"message_id\":$((40+N))}"
+  exit 0
+fi
+echo '{"outcome":"known_rejection","message_id":null}'
+exit 20
+SH
   chmod +x "$H/bin/"* "$H/fakebin/curl"
 }
 
