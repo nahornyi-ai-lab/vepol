@@ -2707,13 +2707,26 @@ def _ih_codex_launcher_drift(canonical: pathlib.Path) -> list[Finding]:
     return findings
 
 
-def _ih_check_codex_currency(env_path: str | None = None) -> list[Finding]:
+def _ih_check_codex_currency(env_path: str | None = None,
+                             home: pathlib.Path | None = None) -> list[Finding]:
     import subprocess as _sp
     findings: list[Finding] = []
+    home_path = pathlib.Path(home) if home is not None else pathlib.Path.home()
     try:
-        resolved_codex = codex_bin()
+        resolved_codex = codex_bin(home=home_path)
     except CodexUnavailable as exc:
-        canonical = pathlib.Path.home() / ".local" / "bin" / "codex"
+        canonical = home_path / ".local" / "bin" / "codex"
+        if not (home_path / ".codex").exists():
+            # install.sh lists the Codex CLI as optional; a hub that never
+            # configured Codex (no ~/.codex) simply doesn't have the feature.
+            # P1 is reserved for a configured Codex whose binary went missing.
+            findings.append(finding(
+                "install-health:codex-optional-absent", "hub",
+                str(canonical), "info",
+                "optional Codex CLI not installed; cross-agent review disabled",
+                evidence=str(exc),
+            ))
+            return findings
         findings.append(finding(
             "install-health:codex-missing", "hub",
             str(canonical), "P1",

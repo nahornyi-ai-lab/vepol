@@ -21,6 +21,13 @@ import sys
 import tempfile
 import textwrap
 
+# kb-doctor imports sibling bin/ modules (e.g. _kb_codex); when the fixtures
+# below exec it via importlib those imports resolve through sys.path, so the
+# tree's own bin/ must be importable in every topology (repo, hub, seed).
+_BIN_DIR = pathlib.Path(__file__).resolve().parents[2] / "bin"
+if str(_BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_BIN_DIR))
+
 
 def setup_sandbox():
     sb = tempfile.mkdtemp(prefix="kb-phase8-")
@@ -437,6 +444,36 @@ def f_install_health_optional_feature_opt_out():
     shutil.rmtree(sb)
 
 
+def f_install_health_codex_optional():
+    """Codex is optional at install time; only a configured-then-lost Codex is P1."""
+    print("install-health codex optional: never-configured → info; configured-but-missing → P1")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_codex", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_codex", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-codex-optional-"))
+    home = sb / "home"
+    home.mkdir(parents=True)
+
+    findings = mod._ih_check_codex_currency(home=home)
+    ids = "\n".join(f.id for f in findings)
+    assert_("codex-optional-absent" in ids, "never-configured Codex is reported as optional-absent")
+    assert_(not any(f.severity in {"P0", "P1"} for f in findings),
+            "never-configured Codex produces no P0/P1")
+
+    (home / ".codex").mkdir()
+    findings = mod._ih_check_codex_currency(home=home)
+    ids = "\n".join(f.id for f in findings)
+    assert_("codex-missing" in ids, "configured-but-missing Codex is still reported")
+    assert_(any(f.severity == "P1" for f in findings), "configured-but-missing Codex stays P1")
+    shutil.rmtree(sb)
+
+
 def f_install_health_runtime_bypass_flags():
     """Runtime launch flags must not reintroduce bypass mode."""
     print("install-health runtime bypass flags: channel/launchd flag → P0")
@@ -492,6 +529,7 @@ def main():
     f_install_health_settings_bypass()
     f_install_health_orchestrator_cycle_disabled_state()
     f_install_health_optional_feature_opt_out()
+    f_install_health_codex_optional()
     f_install_health_runtime_bypass_flags()
     print("\nAll Phase 8 fixtures PASSED")
 
