@@ -14,6 +14,41 @@ upgrading.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-09
+
+### Added
+- **Whole-block morning audio.** The morning digest now assembles the whole
+  finalized same-day morning brief, an eligible rich arXiv report, and the
+  Money Radar digest — in that order, with no second synthesis or compression
+  pass. Local Qwen narrates the frozen source literally; NotebookLM receives
+  the same source for its own non-literal Audio Overview. New `kb-brief-preflight`
+  freshness gate and dedicated delivery helpers (`_kb_brief_delivery.py`,
+  `kb-channel-send-text`) ship with the digest, plus their test suites
+  (`test-brief-v2-preflight.sh`, `test-morning-whole-block-audio.sh`,
+  `test-morning-brief-fidelity.sh`, `test-channel-send-text.sh`,
+  `test-seed-sync-morning-scope.sh`).
+- Secrets hygiene in the brief pipeline: `export`-prefixed lines in env files
+  are parsed correctly, so they can never leak into a generated brief.
+
+### Fixed
+- **The test suite now tests the package it ships with.** Cycle and wave-rollup
+  fixtures used to copy binaries from the machine's installed hub; they now
+  default to the repository's own tree (override with `KB_CYCLE_SRC_BIN`).
+  `tests/run-all.sh` runs green end to end from a clean checkout — previously
+  it aborted mid-chain on any machine whose hub had evolved past the release.
+- A fresh install without the optional Codex CLI no longer fails
+  `kb-doctor install-health --strict`: absence of a never-configured Codex is
+  informational; a configured Codex whose binary went missing stays P1.
+- The whole-block audio test no longer demands rewriting shipped release
+  notes: its doc-check asserts that *current* docs (README, getting-started,
+  the mutable CHANGELOG `[Unreleased]` section) describe current behavior, and
+  two latent defects (an errexit leak and a date-pinned assertion path) that
+  silently aborted the suite are repaired.
+
+### Removed
+- Obsolete `test-morning-digest-rebalance.sh` (superseded by the whole-block
+  behavior and its suites).
+
 ## [0.7.2] — 2026-08-07
 
 ### Fixed
