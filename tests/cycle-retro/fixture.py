@@ -148,12 +148,33 @@ def setup_sandbox():
     retro_stub.chmod(0o755)
 
     # Copy the actual cycle CLI + retro prompt template into the sandbox.
-    HUB_SRC = pathlib.Path.home() / "knowledge"
-    shutil.copy(HUB_SRC / "bin" / "kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
-    shutil.copy(HUB_SRC / "bin" / "templates" / "cycle-retro.prompt.md",
-                p / "bin" / "templates" / "cycle-retro.prompt.md")
+    _install_cycle_cli(p)
 
     return p
+
+
+def _cycle_src_bin() -> pathlib.Path:
+    """Source bin/ for the cycle CLI under test.
+
+    Defaults to this tree's own bin/ so the suite tests the code it ships
+    with; KB_CYCLE_SRC_BIN points the suite at another tree (e.g. an
+    installed hub copy).
+    """
+    override = os.environ.get("KB_CYCLE_SRC_BIN")
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path(__file__).resolve().parents[2] / "bin"
+
+
+def _install_cycle_cli(p: pathlib.Path) -> None:
+    src_bin = _cycle_src_bin()
+    shutil.copy(src_bin / "kb-orchestrator-cycle", p / "bin" / "kb-orchestrator-cycle")
+    shutil.copy(src_bin / "templates" / "cycle-retro.prompt.md",
+                p / "bin" / "templates" / "cycle-retro.prompt.md")
+    # The CLI may import sibling _kb_*.py helpers (installed hub copies do);
+    # bring them along so the sandboxed binary runs in every topology.
+    for mod in sorted(src_bin.glob("_kb_*.py")):
+        shutil.copy(mod, p / "bin" / mod.name)
 
 
 def assert_(cond, msg):
