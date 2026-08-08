@@ -2716,10 +2716,13 @@ def _ih_check_codex_currency(env_path: str | None = None,
         resolved_codex = codex_bin(home=home_path)
     except CodexUnavailable as exc:
         canonical = home_path / ".local" / "bin" / "codex"
-        if not (home_path / ".codex").exists():
+        configured = (bool(os.environ.get("KB_CODEX_BIN", "").strip())
+                      or (home_path / ".codex").exists())
+        if not configured:
             # install.sh lists the Codex CLI as optional; a hub that never
-            # configured Codex (no ~/.codex) simply doesn't have the feature.
-            # P1 is reserved for a configured Codex whose binary went missing.
+            # configured Codex (no ~/.codex, no KB_CODEX_BIN) simply doesn't
+            # have the feature. P1 is reserved for a configured Codex whose
+            # binary went missing.
             findings.append(finding(
                 "install-health:codex-optional-absent", "hub",
                 str(canonical), "info",

@@ -60,6 +60,9 @@ def _install_cycle_cli(sb: pathlib.Path) -> None:
     # bring them along so the sandboxed binary runs in every topology.
     for mod in sorted(src_bin.glob("_kb_*.py")):
         shutil.copy(mod, sb / "bin" / mod.name)
+    for pkg in sorted(src_bin.glob("_kb_*")):
+        if pkg.is_dir():
+            shutil.copytree(pkg, sb / "bin" / pkg.name, dirs_exist_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────

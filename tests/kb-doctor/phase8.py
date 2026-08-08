@@ -460,17 +460,24 @@ def f_install_health_codex_optional():
     home = sb / "home"
     home.mkdir(parents=True)
 
-    findings = mod._ih_check_codex_currency(home=home)
-    ids = "\n".join(f.id for f in findings)
-    assert_("codex-optional-absent" in ids, "never-configured Codex is reported as optional-absent")
-    assert_(not any(f.severity in {"P0", "P1"} for f in findings),
-            "never-configured Codex produces no P0/P1")
+    # Hermetic: the check consults KB_CODEX_BIN as a "configured" signal, so a
+    # host exporting it must not leak into the never-configured scenario.
+    saved_codex_bin = os.environ.pop("KB_CODEX_BIN", None)
+    try:
+        findings = mod._ih_check_codex_currency(home=home)
+        ids = "\n".join(f.id for f in findings)
+        assert_("codex-optional-absent" in ids, "never-configured Codex is reported as optional-absent")
+        assert_(not any(f.severity in {"P0", "P1"} for f in findings),
+                "never-configured Codex produces no P0/P1")
 
-    (home / ".codex").mkdir()
-    findings = mod._ih_check_codex_currency(home=home)
-    ids = "\n".join(f.id for f in findings)
-    assert_("codex-missing" in ids, "configured-but-missing Codex is still reported")
-    assert_(any(f.severity == "P1" for f in findings), "configured-but-missing Codex stays P1")
+        (home / ".codex").mkdir()
+        findings = mod._ih_check_codex_currency(home=home)
+        ids = "\n".join(f.id for f in findings)
+        assert_("codex-missing" in ids, "configured-but-missing Codex is still reported")
+        assert_(any(f.severity == "P1" for f in findings), "configured-but-missing Codex stays P1")
+    finally:
+        if saved_codex_bin is not None:
+            os.environ["KB_CODEX_BIN"] = saved_codex_bin
     shutil.rmtree(sb)
 
 

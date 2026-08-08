@@ -448,7 +448,7 @@ RC_TILDE=$?
   && ok "kb-extract-people expands ~ in --hub itself" \
   || bad "kb-extract-people expands ~ in --hub itself (rc=$RC_TILDE)"
 else
-ok "kb-extract-people tilde fixture skipped (hub-only deps unavailable)"
+ok "kb-extract-people tilde fixture skipped (hub-only; opt in with KB_PROCESSES_HUB_PEOPLE_TESTS=1)"
 fi
 
 echo
@@ -810,7 +810,7 @@ echo
 echo "=== T6: people-extract creates People without Calendar ==="
 
 if ! people_runner_ready; then
-  ok "kb-extract-people fixtures skipped (hub-only deps unavailable)"
+  ok "kb-extract-people fixtures skipped (hub-only; opt in with KB_PROCESSES_HUB_PEOPLE_TESTS=1)"
 else
 ok "kb-extract-people present in hub bin"
 PHUB="$TMP/hub-people6"; mkdir -p "$PHUB"/{bin,people,.orchestrator}
