@@ -11,6 +11,11 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from _kb_board import check as check_mod, fmt as fmt_mod  # noqa: E402
+from _kb_board.mutation import BoardMutationError  # noqa: E402
+
+# Set once the arguments are parsed, so the top-level BoardMutationError
+# handler can answer in the same mode the caller asked for.
+_JSON_OUT = False
 
 
 def _jsonable(value):
@@ -36,6 +41,22 @@ def _emit(value, json_out: bool) -> None:
 
 
 def main() -> int:
+    """Turn every structured board mutation failure into a clean refusal.
+
+    Before this handler each BoardMutationError (ETRANSITION, ECLAIM, EHASH,
+    ECHECK, and now EORIGINAL) surfaced as a Python traceback.
+    """
+    try:
+        return _main()
+    except BoardMutationError as exc:
+        if _JSON_OUT:
+            print(json.dumps({"ok": False, "code": exc.code, "message": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"kb-board: {exc}", file=sys.stderr)
+        return 1
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(prog="kb-board")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -136,6 +157,8 @@ def main() -> int:
     p_close.add_argument("--json", action="store_true", dest="json_out")
 
     args = parser.parse_args()
+    global _JSON_OUT
+    _JSON_OUT = bool(getattr(args, "json_out", False))
     path = pathlib.Path(args.path)
     text = path.read_text(encoding="utf-8")
 
@@ -172,7 +195,13 @@ def main() -> int:
     if args.cmd in {"hash", "list", "append", "claim", "ready", "heartbeat", "progress", "sweep", "request-review", "close"}:
         from _kb_board.hashing import content_hash
         from _kb_board.model import TaskBlock
-        from _kb_board.mutation import _parse_now, _write_atomic, mutate_file
+        from _kb_board.mutation import (
+            BoardMutationError,
+            _parse_now,
+            _write_atomic,
+            ensure_original_mutable,
+            mutate_file,
+        )
         from _kb_board.parsing import parse_board
 
         def find_task(board, plan_item_id):
@@ -182,6 +211,16 @@ def main() -> int:
             raise SystemExit(f"plan_item_id not found: {plan_item_id}")
 
         board = parse_board(text)
+
+        # Advisory pre-check: the unlocked find_task above would otherwise die
+        # with a misleading "plan_item_id not found" on a board kb-board cannot
+        # mutate at all. Runs in exactly the five mutation branches that call
+        # find_task; the authoritative gate still runs under the lock inside
+        # mutate_file. `hash`/`list` stay ungated (read-only), `heartbeat` needs
+        # no pre-check (no find_task), and `sweep` must NOT be pre-gated or its
+        # silent-no-op contract over legacy boards breaks.
+        if args.cmd in {"claim", "ready", "progress", "request-review", "close"}:
+            ensure_original_mutable(text, path)
 
         if args.cmd == "hash":
             task = find_task(board, args.plan_item_id)
@@ -233,6 +272,7 @@ def main() -> int:
                     if cycle_source_id and existing.fields.get("cycle_source_id") == cycle_source_id and existing.status not in {"Done", "Cancelled"}:
                         _emit({"ok": True, "status": "skipped", "reason": "cycle_source_id exists", "cycle_source_id": cycle_source_id}, args.json_out)
                         return 5
+                ensure_original_mutable(locked_text, path)
                 fields = {
                     "plan_item_id": args.plan_item_id,
                     "priority": args.priority,

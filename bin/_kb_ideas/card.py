@@ -165,16 +165,18 @@ def _create_board_task(
     from _kb_board import check as check_mod, fmt as fmt_mod
     from _kb_board.locks import acquire_file_lock
     from _kb_board.model import TaskBlock
-    from _kb_board.mutation import _write_atomic
+    from _kb_board.mutation import _write_atomic, ensure_original_mutable
     from _kb_board.parsing import parse_board
 
     board_path = _board_path_for_slug(root, project_slug)
     lock_path = board_path.with_name(board_path.name + ".lock")
     with acquire_file_lock(lock_path, timeout_s=30.0):
-        board = parse_board(board_path.read_text(encoding="utf-8"))
+        original = board_path.read_text(encoding="utf-8")
+        board = parse_board(original)
         for existing in board.tasks:
             if existing.fields.get("plan_item_id") == idea_id:
                 return idea_id
+        ensure_original_mutable(original, board_path)
         today = datetime.now().astimezone().date().isoformat()
         fields = {
             "plan_item_id": idea_id,

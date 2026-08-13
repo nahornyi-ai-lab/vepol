@@ -200,17 +200,7 @@ def test_promotion_handoff_sets_kb_board_pointer_not_execution_state() -> None:
 
 def test_promotion_can_create_markdown_board_task() -> None:
     hub = make_hub()
-    (hub / "backlog.md").write_text(
-        "# Backlog\n\n"
-        "## Backlog\n\n"
-        "## Ready\n\n"
-        "## In Progress\n\n"
-        "## Blocked\n\n"
-        "## Review\n\n"
-        "## Done\n\n"
-        "## Cancelled\n",
-        encoding="utf-8",
-    )
+    (hub / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
     created = card.capture(
         "Создать markdown task из идеи без приватной зависимости.",
         source="chat",
@@ -241,6 +231,98 @@ def test_promotion_can_create_markdown_board_task() -> None:
         fail("promotion did not mirror kb-board plan_item_id back to card")
         return
     ok("test_promotion_can_create_markdown_board_task")
+
+
+def test_promote_create_task_refuses_legacy_board() -> None:
+    """AC2: promotion must refuse a non-canonical board instead of erasing it."""
+    import subprocess
+
+    legacy = (
+        "# Backlog — example-project\n"
+        "\n"
+        "## Open\n"
+        "\n"
+        "- [ ] Hand-written legacy task (owner: unassigned, P1)\n"
+        "\n"
+        "## Notes\n"
+        "\n"
+        "Prose that no parser knows about.\n"
+    )
+
+    # (a) direct API call raises the structured error.
+    hub = make_hub()
+    (hub / "backlog.md").write_text(legacy, encoding="utf-8")
+    created = card.capture(
+        "Promotion must not erase a legacy board.",
+        source="chat",
+        now="2026-06-16T12:30:00+02:00",
+        hub=hub,
+    )
+    idea_id = created["id"]
+    card.triage(
+        idea_id,
+        priority="P1",
+        materiality="cheap-test",
+        next_action="Create board task",
+        expected_evidence="Refusal, board untouched",
+        hub=hub,
+    )
+    try:
+        card._create_board_task(
+            hub,
+            project_slug="hub",
+            idea_id=idea_id,
+            title="Should never be written",
+            priority="P1",
+            acceptance="n/a",
+            context="n/a",
+        )
+    except Exception as exc:
+        if getattr(exc, "code", None) != "EORIGINAL":
+            fail(f"_create_board_task raised {exc!r}, expected EORIGINAL")
+            return
+    else:
+        fail("_create_board_task published over a legacy board")
+        return
+    if (hub / "backlog.md").read_text(encoding="utf-8") != legacy:
+        fail("refused _create_board_task still modified the board")
+        return
+
+    # (b) the shipped CLI exits 1 with the same error and leaves bytes intact.
+    env = dict(os.environ, KB_HUB=str(hub))
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "bin" / "kb-idea"),
+            "promote",
+            idea_id,
+            "--project",
+            "hub",
+            "--create-task",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    if proc.returncode != 1:
+        fail(f"kb-idea promote --create-task exited {proc.returncode}, expected 1")
+        return
+    combined = proc.stdout + proc.stderr
+    if "Traceback (most recent call last)" in combined:
+        fail("kb-idea promote leaked a Python traceback")
+        return
+    if "EORIGINAL" not in proc.stderr:
+        fail(f"kb-idea promote did not report EORIGINAL on stderr: {combined!r}")
+        return
+    if (hub / "backlog.md").read_text(encoding="utf-8") != legacy:
+        fail("refused kb-idea promote still modified the board")
+        return
+    post = read_post(Path(created["path"]))
+    if post["status"] == "promoted":
+        fail("card was marked promoted even though the board task was refused")
+        return
+    ok("test_promote_create_task_refuses_legacy_board")
 
 
 def test_calendar_approval_and_outcome_writeback() -> None:
@@ -307,6 +389,7 @@ def main() -> int:
     test_triage_ready_and_brief()
     test_promotion_handoff_sets_kb_board_pointer_not_execution_state()
     test_promotion_can_create_markdown_board_task()
+    test_promote_create_task_refuses_legacy_board()
     test_calendar_approval_and_outcome_writeback()
     print(f"  Passed: {PASS}, Failed: {FAIL}")
     return 0 if FAIL == 0 else 1
