@@ -934,7 +934,12 @@ def guard_e2e_cli_full_cycle_on_canonical_board() -> None:
 def fixture_and_seed_are_canonical() -> None:
     """Pin both declared test assets so they cannot drift non-canonical again."""
     _check(_read_fixture("valid_board.md"))
-    seed_source = (ROOT / "tests" / "idea-os" / "idea_os.py").read_text(encoding="utf-8")
+    seed_path = ROOT / "tests" / "idea-os" / "idea_os.py"
+    if not seed_path.exists():
+        # Never pass vacuously: an unreachable sibling suite is a red, but say
+        # so in the suite's own vocabulary instead of a bare FileNotFoundError.
+        raise ContractFailure(f"idea-os suite not found at {seed_path}; cannot pin its board seed")
+    seed_source = seed_path.read_text(encoding="utf-8")
     marker = '(hub / "backlog.md").write_text('
     if marker not in seed_source:
         raise ContractFailure("idea-os board seed marker not found; pin is stale")
