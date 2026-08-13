@@ -950,12 +950,18 @@ def guard_progress_validates_arguments_before_the_gate() -> None:
         path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
         proc = _run_cli("progress", str(path), "--plan-item-id", "pi-ready", "--json")
         combined = proc.stdout + proc.stderr
-        if proc.returncode == 0:
-            raise ContractFailure("progress without --field must fail")
+        if proc.returncode != 1:
+            raise ContractFailure(f"progress without --field must exit 1, got {proc.returncode}")
+        if proc.stdout:
+            raise ContractFailure(f"argument error must not print to stdout: {proc.stdout!r}")
         if "EORIGINAL" in combined:
             raise ContractFailure(f"argument validation was pre-empted by the gate: {combined!r}")
-        if "--field" not in combined:
-            raise ContractFailure(f"expected the missing-argument error, got {combined!r}")
+        if proc.stderr.strip() != "progress requires at least one --field key=value":
+            raise ContractFailure(f"missing-argument error drifted: {proc.stderr!r}")
+        # Same for a malformed field: the branch's own error, not the gate's.
+        bad = _run_cli("progress", str(path), "--plan-item-id", "pi-ready", "--field", "novalue", "--json")
+        if bad.returncode != 1 or "EORIGINAL" in (bad.stdout + bad.stderr):
+            raise ContractFailure(f"malformed --field must keep its own error: {bad.stdout + bad.stderr!r}")
 
 
 def guard_e2e_cli_full_cycle_on_canonical_board() -> None:
