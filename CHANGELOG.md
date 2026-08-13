@@ -14,6 +14,24 @@ upgrading.
 
 ## [Unreleased]
 
+### Fixed
+- **Board writers can no longer erase your backlog.** Every `kb-board`
+  mutation (and `kb-idea promote --create-task`) used to re-render the board
+  from what its parser recognized and replace the whole file — so prose,
+  hand-written notes, and legacy headings were dropped, and a board with no
+  recognized task blocks could be replaced wholesale by a single new task,
+  silently and with exit 0. Writers now validate the *existing* file before
+  publishing: a non-empty board that fails `kb-board check` is refused with
+  `EORIGINAL`, the offending codes, and the remedy commands, and the file is
+  left byte-identical. Empty and title-only boards stay mutable so bootstrap
+  still works, and a sweep with nothing to move stays a silent no-op.
+  **Behavior change:** mutations on a non-canonical board now refuse instead
+  of quietly canonicalizing it — run `kb-board fmt <path>` (dry run first) or
+  `kb-board migrate <path>` to canonicalize deliberately.
+- `kb-board` reports structured mutation failures instead of a Python
+  traceback: `{"ok": false, "code", "message"}` with `--json`, or
+  `kb-board: <code>: <message>` on stderr, exit 1.
+
 ## [0.8.0] — 2026-08-09
 
 ### Added
