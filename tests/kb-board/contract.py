@@ -839,6 +839,18 @@ def guard_append_allows_empty_and_title_only_board() -> None:
             raise ContractFailure(f"append to an empty board must succeed: {proc.stderr or proc.stdout}")
         _check(empty.read_text(encoding="utf-8"))
 
+        # Whitespace-only, not just zero-byte: the exemption is `.strip()`, and
+        # an `original == ""` weakening must not survive this suite.
+        blank = tmp / "blank.md"
+        blank.write_text("   \n\n", encoding="utf-8")
+        proc = _run_cli(
+            "append", str(blank), "First task",
+            "--plan-item-id", "guard-blank", "--status", "Ready", "--json",
+        )
+        if proc.returncode != 0:
+            raise ContractFailure(f"append to a whitespace-only board must succeed: {proc.stderr or proc.stdout}")
+        _check(blank.read_text(encoding="utf-8"))
+
         title_only = tmp / "title_only.md"
         title_only.write_text("# Backlog — example-project\n", encoding="utf-8")
         proc = _run_cli(
@@ -899,6 +911,51 @@ def guard_cli_claim_emits_structured_eoriginal() -> None:
         # A wrong id on a non-canonical board reports EORIGINAL, not "not found".
         wrong = _run_cli("claim", str(path), "--plan-item-id", "pi-nonexistent", "--actor", "codex", "--json")
         _expect_eoriginal_cli(wrong, json_mode=True)
+
+
+def guard_advisory_precheck_covers_every_find_task_branch() -> None:
+    """All five find_task branches answer EORIGINAL, not 'not found'.
+
+    Pinning only `claim` let the other four be dropped from the advisory set
+    without a single test going red.
+    """
+    branches = [
+        ("claim", ["--actor", "codex"]),
+        ("ready", ["--actor", "codex"]),
+        ("progress", ["--field", "priority=P0", "--actor", "codex"]),
+        ("request-review", ["--claim-id", "clm-whatever", "--actor", "codex"]),
+        ("close", ["--claim-id", "clm-whatever", "--actor", "codex"]),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        for cmd, extra in branches:
+            path = pathlib.Path(d) / f"{cmd}.md"
+            shutil.copyfile(FIXTURES / "valid_tasks_plus_prose.md", path)
+            before = path.read_text(encoding="utf-8")
+            proc = _run_cli(cmd, str(path), "--plan-item-id", "pi-nonexistent", *extra, "--json")
+            try:
+                _expect_eoriginal_cli(proc, json_mode=True)
+            except ContractFailure as exc:
+                raise ContractFailure(f"{cmd}: {exc}") from exc
+            if path.read_text(encoding="utf-8") != before:
+                raise ContractFailure(f"{cmd} modified a board it refused")
+
+
+def guard_progress_validates_arguments_before_the_gate() -> None:
+    """The advisory gate must not pre-empt a branch's own argument errors.
+
+    `progress` without `--field` publishes nothing, so it is a no-op path and
+    must keep reporting the missing argument — on any board.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        proc = _run_cli("progress", str(path), "--plan-item-id", "pi-ready", "--json")
+        combined = proc.stdout + proc.stderr
+        if proc.returncode == 0:
+            raise ContractFailure("progress without --field must fail")
+        if "EORIGINAL" in combined:
+            raise ContractFailure(f"argument validation was pre-empted by the gate: {combined!r}")
+        if "--field" not in combined:
+            raise ContractFailure(f"expected the missing-argument error, got {combined!r}")
 
 
 def guard_e2e_cli_full_cycle_on_canonical_board() -> None:
@@ -988,6 +1045,8 @@ TESTS: list[Callable[[], None]] = [
     guard_append_allows_empty_and_title_only_board,
     guard_heartbeat_refuses_after_hand_edit,
     guard_cli_claim_emits_structured_eoriginal,
+    guard_advisory_precheck_covers_every_find_task_branch,
+    guard_progress_validates_arguments_before_the_gate,
     guard_e2e_cli_full_cycle_on_canonical_board,
     fixture_and_seed_are_canonical,
 ]

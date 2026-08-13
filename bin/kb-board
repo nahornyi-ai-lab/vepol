@@ -212,14 +212,18 @@ def _main() -> int:
 
         board = parse_board(text)
 
-        # Advisory pre-check: the unlocked find_task above would otherwise die
-        # with a misleading "plan_item_id not found" on a board kb-board cannot
-        # mutate at all. Runs in exactly the five mutation branches that call
-        # find_task; the authoritative gate still runs under the lock inside
-        # mutate_file. `hash`/`list` stay ungated (read-only), `heartbeat` needs
-        # no pre-check (no find_task), and `sweep` must NOT be pre-gated or its
-        # silent-no-op contract over legacy boards breaks.
-        if args.cmd in {"claim", "ready", "progress", "request-review", "close"}:
+        def advisory_gate():
+            """Pre-check so `find_task` cannot answer with a misleading error.
+
+            Without it the unlocked lookup below dies with "plan_item_id not
+            found" on a board kb-board cannot mutate at all. Called from
+            exactly the five branches that call find_task, immediately before
+            the lookup and after that branch's own argument validation — the
+            authoritative gate still runs under the lock inside mutate_file.
+            `hash`/`list` stay ungated (read-only), `heartbeat` needs no
+            pre-check (no find_task), and `sweep` must NOT be pre-gated or its
+            silent-no-op contract over legacy boards breaks.
+            """
             ensure_original_mutable(text, path)
 
         if args.cmd == "hash":
@@ -296,6 +300,7 @@ def _main() -> int:
             return 0
 
         if args.cmd == "claim":
+            advisory_gate()
             task = find_task(board, args.plan_item_id)
             result = mutate_file(
                 path=path,
@@ -309,6 +314,7 @@ def _main() -> int:
             return 0
 
         if args.cmd == "ready":
+            advisory_gate()
             task = find_task(board, args.plan_item_id)
             result = mutate_file(
                 path=path,
@@ -343,6 +349,7 @@ def _main() -> int:
                     raise SystemExit(f"--field expects key=value, got {item!r}")
                 key, value = item.split("=", 1)
                 updates[key.strip()] = value.strip()
+            advisory_gate()
             task = find_task(board, args.plan_item_id)
             result = mutate_file(
                 path=path,
@@ -363,6 +370,7 @@ def _main() -> int:
             return 0
 
         if args.cmd == "request-review":
+            advisory_gate()
             task = find_task(board, args.plan_item_id)
             result = mutate_file(
                 path=path,
@@ -377,6 +385,7 @@ def _main() -> int:
             return 0
 
         if args.cmd == "close":
+            advisory_gate()
             task = find_task(board, args.plan_item_id)
             result = mutate_file(
                 path=path,

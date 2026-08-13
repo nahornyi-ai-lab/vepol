@@ -20,8 +20,10 @@ upgrading.
   from what its parser recognized and replace the whole file — so prose,
   hand-written notes, and legacy headings were dropped, and a board with no
   recognized task blocks could be replaced wholesale by a single new task,
-  silently and with exit 0. Writers now validate the *existing* file before
-  publishing: a non-empty board that fails `kb-board check` is refused with
+  silently and with exit 0. Mutating writers now validate the *existing* file
+  before publishing (`kb-board fmt --write` and `kb-board migrate --write` are
+  the deliberate exceptions — they are the dry-run-first remedy commands): a
+  non-empty board that fails `kb-board check` is refused with
   `EORIGINAL`, the offending codes, and the remedy commands, and the file is
   left byte-identical. Empty and title-only boards stay mutable so bootstrap
   still works, and a sweep with nothing to move stays a silent no-op.
