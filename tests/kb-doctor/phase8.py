@@ -618,8 +618,8 @@ def f_audit_fc_nested_parent_repo():
     _fc_git("commit", "-q", "-m", "parent", cwd=sb)
     _fc_seed_repo(sb, {"knowledge/personal/goals.md": "secret\n"}, git=False)
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:no-git" in proc.stdout,
-            f"AC2: no-git finding when git resolves the PARENT repo (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC2: no-git finding at P1 when git resolves the PARENT repo (got: {proc.stdout[:200]})")
     assert_(str(pathlib.Path(str(sb)).resolve()) in proc.stdout,
             "AC2: the foreign toplevel path appears in the finding")
     shutil.rmtree(sb)
@@ -692,6 +692,24 @@ def f_audit_fc_root_fails_before_enumeration():
             f"root failure reported with ITS rc and stderr (got: {proc.stdout[:200]})")
     assert_("timed out" not in proc.stdout, "no timeout diagnostic — ls-files never ran")
     assert_(elapsed < 8, f"answers fast ({elapsed:.1f}s) — the hung ls-files was never launched")
+    # Same contract for the FOREIGN-ROOT branch: rc 0 with a wrong toplevel
+    # must also answer before enumeration (R2 impl review: moving only this
+    # check after ls-files passed every other leg).
+    d2 = sb / "fc-foreignroot"; d2.mkdir()
+    (d2 / "git").write_text(
+        "#!" + py + "\n"
+        "import os, sys\n"
+        "if 'rev-parse' in sys.argv:\n"
+        "    print('/'); sys.exit(0)\n"
+        "os.execv('/bin/sleep', ['sleep', '15'])\n", encoding="utf-8")
+    (d2 / "git").chmod(0o755)
+    t0 = time.monotonic()
+    proc = _fc_audit(sb, path=f"{d2}:{bindir}")
+    elapsed = time.monotonic() - t0
+    assert_("not the repository root" in proc.stdout and "P1=1" in proc.stdout,
+            f"foreign root reported with its diagnostic (got: {proc.stdout[:200]})")
+    assert_("timed out" not in proc.stdout and elapsed < 8,
+            f"foreign root answers fast ({elapsed:.1f}s) — ls-files never launched")
     shutil.rmtree(sb)
 
 
@@ -699,14 +717,15 @@ def f_audit_fc_quiet_cases():
     print("audit-fc AC5 quiet legs: absent seed dir and empty proven repo stay silent")
     sb = setup_sandbox()  # no orchestrator-seed at all
     proc = _fc_audit(sb)
-    assert_("P0=0 P1=0" in proc.stdout, "absent seed dir → zero findings")
+    assert_("P0=0 P1=0 P2=0 info=0" in proc.stdout and "No visible findings" in proc.stdout,
+            f"absent seed dir → COMPLETELY silent (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
     sb = setup_sandbox()
     seed = sb / "orchestrator-seed"; seed.mkdir()
     _fc_git("init", "-q", cwd=seed)
     proc = _fc_audit(sb)
-    assert_("P0=0 P1=0" in proc.stdout,
-            f"empty root-proven repo → zero findings (got: {proc.stdout[:200]})")
+    assert_("P0=0 P1=0 P2=0 info=0" in proc.stdout and "No visible findings" in proc.stdout,
+            f"empty root-proven repo → COMPLETELY silent (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
 
@@ -787,8 +806,9 @@ def f_audit_fc_decode_replace():
         "sys.exit(128)\n", encoding="utf-8")
     (d9 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d9}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
-            f"AC9: first-call decode failure → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout
+            and "128" in proc.stdout,
+            f"AC9: first-call decode failure → P1 no-git with the rc (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("first-\ufffd-line" in proc.stdout,
             "AC9: evidence carries the U+FFFD-decoded first stderr line")
     assert_("second-line" not in proc.stdout, "AC9: second stderr line excluded")
@@ -804,8 +824,9 @@ def f_audit_fc_decode_replace():
         "sys.exit(128)\n", encoding="utf-8")
     (d10 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d10}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
-            f"AC10: second-call rc 128 → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout
+            and "128" in proc.stdout,
+            f"AC10: second-call rc 128 → P1 no-git with the rc (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("first-\ufffd-line" in proc.stdout,
             "AC10: evidence carries the U+FFFD-decoded first stderr line")
     assert_("second-line" not in proc.stdout, "AC10: second stderr line excluded")
@@ -925,8 +946,10 @@ def f_audit_fc_source_contract():
     helper = next((n for n in ast.walk(fn)
                    if isinstance(n, ast.FunctionDef) and n.name == "_no_git"), None)
     assert_(helper is not None, "AC14iii: the _no_git helper exists in the function")
-    assert_(not any(isinstance(n, (ast.If, ast.IfExp)) for n in ast.walk(helper)),
-            "AC14iii: _no_git itself is branch-free")
+    assert_(len(helper.body) == 1 and isinstance(helper.body[0], ast.Return),
+            "AC14iii: _no_git's body is exactly one return statement — no room for "
+            "if/match/try or any other branching construct (R2 impl review: an "
+            "ast.Match returning [] for BlockingIOError slipped the If/IfExp-only check)")
     hseg = ast.get_source_segment(src, helper) or ""
     assert_("seed-content-audit:no-git" in hseg and '"P1"' in hseg,
             "AC14iii: _no_git builds the P1 seed-content-audit:no-git finding")
