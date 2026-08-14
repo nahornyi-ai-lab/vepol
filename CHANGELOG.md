@@ -14,6 +14,8 @@ upgrading.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-14
+
 ### Fixed
 - **Board writers can no longer erase your backlog.** Every `kb-board`
   mutation (and `kb-idea promote --create-task`) used to re-render the board
@@ -30,6 +32,7 @@ upgrading.
   **Behavior change:** mutations on a non-canonical board now refuse instead
   of quietly canonicalizing it — run `kb-board fmt <path>` (dry run first) or
   `kb-board migrate <path>` to canonicalize deliberately.
+  ([v0.8.1](releases/v0.8.1.md))
 - `kb-board` reports structured mutation failures instead of a Python
   traceback: `{"ok": false, "code", "message"}` with `--json`, or
   `kb-board: <code>: <message>` on stderr, exit 1.
