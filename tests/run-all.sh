@@ -36,7 +36,7 @@ bash kb-backlog/claim-drift.sh > /dev/null && pass "claim-drift.sh" || { fail "c
 
 echo
 echo "=== kb-board single-source markdown contract ==="
-bash kb-board/run.sh > /dev/null && pass "kb-board/run.sh (29 contract tests)" || { fail "kb-board/run.sh"; exit 1; }
+bash kb-board/run.sh > /dev/null && pass "kb-board/run.sh (43 contract tests)" || { fail "kb-board/run.sh"; exit 1; }
 
 echo
 echo "=== kb-search board smoke ==="

@@ -696,6 +696,321 @@ for i in range(count):
         _check(path.read_text(encoding="utf-8"))
 
 
+def _run_cli(*argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run([str(_cli()), *argv], text=True, capture_output=True)
+
+
+def _expect_eoriginal_cli(proc: subprocess.CompletedProcess, *, json_mode: bool) -> None:
+    """A CLI refusal must be structured, non-zero, and traceback-free."""
+    if proc.returncode == 0:
+        raise ContractFailure(f"expected non-zero exit, got 0: {proc.stdout!r}")
+    combined = proc.stdout + proc.stderr
+    if "Traceback (most recent call last)" in combined:
+        raise ContractFailure(f"CLI leaked a Python traceback: {combined!r}")
+    if "EORIGINAL" not in combined:
+        raise ContractFailure(f"expected EORIGINAL in output, got {combined!r}")
+    if json_mode:
+        payload = json.loads(proc.stdout)
+        if payload.get("ok") is not False or payload.get("code") != "EORIGINAL":
+            raise ContractFailure(f"expected structured EORIGINAL json, got {payload!r}")
+        if not payload.get("message"):
+            raise ContractFailure(f"EORIGINAL json carries no message: {payload!r}")
+
+
+def guard_append_refuses_unrecognized_heading_board() -> None:
+    """AC1: the verified data-loss repro — append must refuse, bytes unchanged."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "unrecognized_headings.md")
+        before = path.read_text(encoding="utf-8")
+        proc = _run_cli(
+            "append", str(path), "New task",
+            "--plan-item-id", "guard-ac1", "--status", "Ready", "--json",
+        )
+        _expect_eoriginal_cli(proc, json_mode=True)
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused append still modified the board")
+        # Human mode carries the same refusal and the remedy commands.
+        human = _run_cli(
+            "append", str(path), "New task",
+            "--plan-item-id", "guard-ac1", "--status", "Ready",
+        )
+        _expect_eoriginal_cli(human, json_mode=False)
+        message = human.stdout + human.stderr
+        for remedy in ("kb-board fmt", "kb-board migrate", "kb-board check"):
+            if remedy not in message:
+                raise ContractFailure(f"refusal does not name remedy {remedy!r}: {message!r}")
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused append (human mode) still modified the board")
+
+
+def guard_append_refuses_valid_tasks_plus_prose() -> None:
+    """F2: valid tasks plus prose used to publish and drop the prose."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        before = path.read_text(encoding="utf-8")
+        proc = _run_cli(
+            "append", str(path), "Another task",
+            "--plan-item-id", "guard-f2", "--status", "Backlog", "--json",
+        )
+        _expect_eoriginal_cli(proc, json_mode=True)
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused append still modified the board")
+
+
+def guard_mutate_file_refuses_prose_board() -> None:
+    """AC3: the API-level gate fires under the lock, not only in the CLI."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        before = path.read_text(encoding="utf-8")
+        _expect_error(
+            "EORIGINAL",
+            lambda: _mutate(
+                path,
+                op="claim",
+                plan_item_id="pi-ready",
+                actor="codex",
+                now="2026-05-29T10:00:00Z",
+            ),
+        )
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused claim still modified the board")
+
+
+def guard_sweep_refuses_prose_board_with_expired_claim() -> None:
+    """AC4a: a sweep that WOULD publish refuses instead of truncating."""
+    lease = _module("lease")
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "prose_plus_expired_claim.md")
+        before = path.read_text(encoding="utf-8")
+        try:
+            lease.sweep_expired_file(path=path, actor="sweeper", now="2026-05-29T12:00:00Z")
+        except Exception as exc:
+            if getattr(exc, "code", None) != "EORIGINAL":
+                raise ContractFailure(f"expected EORIGINAL, got {exc!r}") from exc
+        else:
+            raise ContractFailure("sweep published over a non-canonical board")
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused sweep still modified the board")
+
+
+def guard_sweep_noop_on_legacy_board_stays_silent() -> None:
+    """AC4b: schedulers ticking over legacy boards must not start failing."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "unrecognized_headings.md")
+        before = path.read_text(encoding="utf-8")
+        proc = _run_cli("sweep", str(path), "--actor", "sweeper", "--json")
+        if proc.returncode != 0:
+            raise ContractFailure(f"no-op sweep on a legacy board must stay exit 0: {proc.stderr or proc.stdout}")
+        payload = json.loads(proc.stdout)
+        if payload.get("changed") != 0:
+            raise ContractFailure(f"expected changed == 0, got {payload!r}")
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("no-op sweep modified the board")
+
+
+def guard_readonly_cli_ungated_on_legacy_board() -> None:
+    """The gate is a PUBLISH gate: read-only subcommands stay usable."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        listed = _run_cli("list", str(path), "--all", "--json")
+        if listed.returncode != 0:
+            raise ContractFailure(f"list must stay ungated: {listed.stderr or listed.stdout}")
+        hashed = _run_cli("hash", str(path), "--plan-item-id", "pi-ready", "--json")
+        if hashed.returncode != 0:
+            raise ContractFailure(f"hash must stay ungated: {hashed.stderr or hashed.stdout}")
+        if not json.loads(hashed.stdout).get("content_hash"):
+            raise ContractFailure(f"hash returned no content_hash: {hashed.stdout!r}")
+        checked = _run_cli("check", str(path), "--json")
+        if checked.returncode != 1:
+            raise ContractFailure(f"check must still report the drift itself: rc={checked.returncode}")
+
+
+def guard_append_allows_empty_and_title_only_board() -> None:
+    """AC5: bootstrap stays legal — empty file and the new-wiki template board."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = pathlib.Path(d)
+        empty = tmp / "empty.md"
+        empty.write_text("", encoding="utf-8")
+        proc = _run_cli(
+            "append", str(empty), "First task",
+            "--plan-item-id", "guard-empty", "--status", "Ready", "--json",
+        )
+        if proc.returncode != 0:
+            raise ContractFailure(f"append to an empty board must succeed: {proc.stderr or proc.stdout}")
+        _check(empty.read_text(encoding="utf-8"))
+
+        # Whitespace-only, not just zero-byte: the exemption is `.strip()`, and
+        # an `original == ""` weakening must not survive this suite.
+        blank = tmp / "blank.md"
+        blank.write_text("   \n\n", encoding="utf-8")
+        proc = _run_cli(
+            "append", str(blank), "First task",
+            "--plan-item-id", "guard-blank", "--status", "Ready", "--json",
+        )
+        if proc.returncode != 0:
+            raise ContractFailure(f"append to a whitespace-only board must succeed: {proc.stderr or proc.stdout}")
+        _check(blank.read_text(encoding="utf-8"))
+
+        title_only = tmp / "title_only.md"
+        title_only.write_text("# Backlog — example-project\n", encoding="utf-8")
+        proc = _run_cli(
+            "append", str(title_only), "First task",
+            "--plan-item-id", "guard-title", "--status", "Ready", "--json",
+        )
+        if proc.returncode != 0:
+            raise ContractFailure(f"append to a title-only board must succeed: {proc.stderr or proc.stdout}")
+        _check(title_only.read_text(encoding="utf-8"))
+
+
+def guard_heartbeat_refuses_after_hand_edit() -> None:
+    """F6: a hand edit mid-lease strands the claim instead of deleting the edit."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_board.md")
+        _mutate(
+            path,
+            op="claim",
+            plan_item_id="pi-ready",
+            actor="codex",
+            now="2026-05-29T10:00:00Z",
+        )
+        claimed = _parse(path.read_text(encoding="utf-8"))
+        claim_id = _field(_task(claimed, "pi-ready"), "claim_id")
+        text = path.read_text(encoding="utf-8")
+        hand_edited = text.replace(
+            "# Backlog — kb-board valid fixture\n",
+            "# Backlog — kb-board valid fixture\n\nHand-written note added mid-lease.\n",
+            1,
+        )
+        if hand_edited == text:
+            raise ContractFailure("fixture title line changed; hand-edit setup is stale")
+        path.write_text(hand_edited, encoding="utf-8")
+        _expect_error(
+            "EORIGINAL",
+            lambda: _mutate(
+                path,
+                op="heartbeat",
+                plan_item_id="pi-ready",
+                actor="codex",
+                claim_id=claim_id,
+                now="2026-05-29T10:05:00Z",
+            ),
+        )
+        if path.read_text(encoding="utf-8") != hand_edited:
+            raise ContractFailure("refused heartbeat destroyed the hand edit")
+
+
+def guard_cli_claim_emits_structured_eoriginal() -> None:
+    """AC8d: no traceback, structured json, and no misleading 'not found'."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        before = path.read_text(encoding="utf-8")
+        proc = _run_cli("claim", str(path), "--plan-item-id", "pi-ready", "--actor", "codex", "--json")
+        _expect_eoriginal_cli(proc, json_mode=True)
+        if path.read_text(encoding="utf-8") != before:
+            raise ContractFailure("refused claim still modified the board")
+        # A wrong id on a non-canonical board reports EORIGINAL, not "not found".
+        wrong = _run_cli("claim", str(path), "--plan-item-id", "pi-nonexistent", "--actor", "codex", "--json")
+        _expect_eoriginal_cli(wrong, json_mode=True)
+
+
+def guard_advisory_precheck_covers_every_find_task_branch() -> None:
+    """All five find_task branches answer EORIGINAL, not 'not found'.
+
+    Pinning only `claim` let the other four be dropped from the advisory set
+    without a single test going red.
+    """
+    branches = [
+        ("claim", ["--actor", "codex"]),
+        ("ready", ["--actor", "codex"]),
+        ("progress", ["--field", "priority=P0", "--actor", "codex"]),
+        ("request-review", ["--claim-id", "clm-whatever", "--actor", "codex"]),
+        ("close", ["--claim-id", "clm-whatever", "--actor", "codex"]),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        for cmd, extra in branches:
+            path = pathlib.Path(d) / f"{cmd}.md"
+            shutil.copyfile(FIXTURES / "valid_tasks_plus_prose.md", path)
+            before = path.read_text(encoding="utf-8")
+            proc = _run_cli(cmd, str(path), "--plan-item-id", "pi-nonexistent", *extra, "--json")
+            try:
+                _expect_eoriginal_cli(proc, json_mode=True)
+            except ContractFailure as exc:
+                raise ContractFailure(f"{cmd}: {exc}") from exc
+            if path.read_text(encoding="utf-8") != before:
+                raise ContractFailure(f"{cmd} modified a board it refused")
+
+
+def guard_progress_validates_arguments_before_the_gate() -> None:
+    """The advisory gate must not pre-empt a branch's own argument errors.
+
+    `progress` without `--field` publishes nothing, so it is a no-op path and
+    must keep reporting the missing argument — on any board.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_tasks_plus_prose.md")
+        proc = _run_cli("progress", str(path), "--plan-item-id", "pi-ready", "--json")
+        combined = proc.stdout + proc.stderr
+        if proc.returncode != 1:
+            raise ContractFailure(f"progress without --field must exit 1, got {proc.returncode}")
+        if proc.stdout:
+            raise ContractFailure(f"argument error must not print to stdout: {proc.stdout!r}")
+        if "EORIGINAL" in combined:
+            raise ContractFailure(f"argument validation was pre-empted by the gate: {combined!r}")
+        if proc.stderr.strip() != "progress requires at least one --field key=value":
+            raise ContractFailure(f"missing-argument error drifted: {proc.stderr!r}")
+        # Same for a malformed field: the branch's own error, not the gate's.
+        bad = _run_cli("progress", str(path), "--plan-item-id", "pi-ready", "--field", "novalue", "--json")
+        if bad.returncode != 1 or "EORIGINAL" in (bad.stdout + bad.stderr):
+            raise ContractFailure(f"malformed --field must keep its own error: {bad.stdout + bad.stderr!r}")
+
+
+def guard_e2e_cli_full_cycle_on_canonical_board() -> None:
+    """AC8c: a canonical board keeps its full lifecycle, gate or no gate."""
+    with tempfile.TemporaryDirectory() as d:
+        path = pathlib.Path(d) / "backlog.md"
+        path.write_text("# Backlog — example-project\n", encoding="utf-8")
+        steps = [
+            ("append", ["append", str(path), "Cycle task", "--plan-item-id", "guard-cycle",
+                        "--status", "Ready", "--json"]),
+            ("claim", ["claim", str(path), "--plan-item-id", "guard-cycle", "--actor", "codex", "--json"]),
+        ]
+        for label, argv in steps:
+            proc = _run_cli(*argv)
+            if proc.returncode != 0:
+                raise ContractFailure(f"{label} failed on a canonical board: {proc.stderr or proc.stdout}")
+        claim_id = _field(_task(_parse(path.read_text(encoding="utf-8")), "guard-cycle"), "claim_id")
+        for label, argv in [
+            ("request-review", ["request-review", str(path), "--plan-item-id", "guard-cycle",
+                                "--claim-id", claim_id, "--actor", "codex", "--json"]),
+            ("close", ["close", str(path), "--plan-item-id", "guard-cycle", "--claim-id", claim_id,
+                       "--actor", "codex", "--outcome", "closed", "--json"]),
+        ]:
+            proc = _run_cli(*argv)
+            if proc.returncode != 0:
+                raise ContractFailure(f"{label} failed on a canonical board: {proc.stderr or proc.stdout}")
+        final = path.read_text(encoding="utf-8")
+        _check(final)
+        if _status(_task(_parse(final), "guard-cycle")) != "Done":
+            raise ContractFailure("full cycle did not land the task in Done")
+
+
+def fixture_and_seed_are_canonical() -> None:
+    """Pin both declared test assets so they cannot drift non-canonical again."""
+    _check(_read_fixture("valid_board.md"))
+    seed_path = ROOT / "tests" / "idea-os" / "idea_os.py"
+    if not seed_path.exists():
+        # Never pass vacuously: an unreachable sibling suite is a red, but say
+        # so in the suite's own vocabulary instead of a bare FileNotFoundError.
+        raise ContractFailure(f"idea-os suite not found at {seed_path}; cannot pin its board seed")
+    seed_source = seed_path.read_text(encoding="utf-8")
+    marker = '(hub / "backlog.md").write_text('
+    if marker not in seed_source:
+        raise ContractFailure("idea-os board seed marker not found; pin is stale")
+    tail = seed_source.split(marker, 1)[1]
+    if '"# Backlog\\n"' not in tail.split(")", 1)[0]:
+        raise ContractFailure("idea-os board seed is not the canonical '# Backlog\\n'")
+
+
 TESTS: list[Callable[[], None]] = [
     mutation_happy_path,
     cas_conflict,
@@ -727,6 +1042,19 @@ TESTS: list[Callable[[], None]] = [
     cli_progress_updates_metadata,
     cli_list_non_json_no_repr_line,
     cli_multi_writer_append_stress,
+    guard_append_refuses_unrecognized_heading_board,
+    guard_append_refuses_valid_tasks_plus_prose,
+    guard_mutate_file_refuses_prose_board,
+    guard_sweep_refuses_prose_board_with_expired_claim,
+    guard_sweep_noop_on_legacy_board_stays_silent,
+    guard_readonly_cli_ungated_on_legacy_board,
+    guard_append_allows_empty_and_title_only_board,
+    guard_heartbeat_refuses_after_hand_edit,
+    guard_cli_claim_emits_structured_eoriginal,
+    guard_advisory_precheck_covers_every_find_task_branch,
+    guard_progress_validates_arguments_before_the_gate,
+    guard_e2e_cli_full_cycle_on_canonical_board,
+    fixture_and_seed_are_canonical,
 ]
 
 

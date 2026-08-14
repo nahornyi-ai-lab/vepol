@@ -65,7 +65,8 @@
   owner: antigravity
   created: 2026-05-29
   updated: 2026-05-29
-  blocked_reason: waiting on dependency
+  blocked_reason: |
+    waiting on dependency
   acceptance: |
     Unblock can move it to In Progress.
   body: |
@@ -95,10 +96,10 @@
   owner: codex
   created: 2026-05-29
   updated: 2026-05-29
-  evidence: |
-    Finished in fixture.
   acceptance: |
     Done stays terminal until explicit reopen.
+  evidence: |
+    Finished in fixture.
   body: |
     Done details.
 
@@ -110,9 +111,9 @@
   owner: unassigned
   created: 2026-05-29
   updated: 2026-05-29
-  evidence: |
-    Cancelled in fixture.
   acceptance: |
     Cancelled stays terminal until explicit reopen.
+  evidence: |
+    Cancelled in fixture.
   body: |
     Cancelled details.

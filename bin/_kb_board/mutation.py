@@ -26,6 +26,29 @@ class BoardMutationError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+def ensure_original_mutable(original: str, path: pathlib.Path) -> None:
+    """Publish gate: refuse to overwrite a board that does not round-trip.
+
+    parse_board drops anything that is not a recognized status section or
+    task block, so a candidate derived from a non-canonical original would
+    silently destroy that content on publish.
+    """
+    if not original.strip():
+        return  # empty/missing file: nothing to lose, bootstrap stays legal
+    result = check_board_text(original)
+    if not result.ok:
+        codes = ",".join(sorted({e.code for e in result.errors}))
+        raise BoardMutationError(
+            "EORIGINAL",
+            f"existing board at {path} is not in canonical kb-board multiline "
+            f"format ({codes}); mutating would silently drop unrecognized "
+            "content. Inspect with `kb-board check`; canonicalize drifted "
+            "boards with `kb-board fmt <path>` (review dry-run output, then "
+            "--write); migrate legacy one-line boards with `kb-board migrate "
+            "<path>` (review dry-run output, then --write).",
+        )
+
+
 @dataclass
 class MutationResult:
     status: str
@@ -257,6 +280,7 @@ def mutate_file(
     lock_path = path.with_name(path.name + ".lock")
     with acquire_file_lock(lock_path, timeout_s=timeout_s):
         original = path.read_text(encoding="utf-8") if path.exists() else ""
+        ensure_original_mutable(original, path)
         board = parse_board(original)
         result = _mutate_board(
             board,

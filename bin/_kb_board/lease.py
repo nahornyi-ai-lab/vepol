@@ -7,7 +7,7 @@ import pathlib
 from .check import check_board_text
 from .fmt import format_board
 from .locks import acquire_file_lock
-from .mutation import _clear_claim, _fsync_parent, _iso, _parse_now
+from .mutation import _clear_claim, _fsync_parent, _iso, _parse_now, ensure_original_mutable
 from .parsing import parse_board
 
 
@@ -32,7 +32,8 @@ def sweep_expired_file(*, path: pathlib.Path, actor: str, now: str | None = None
     lock_path = path.with_name(path.name + ".lock")
     changed = 0
     with acquire_file_lock(lock_path, timeout_s=timeout_s):
-        board = parse_board(path.read_text(encoding="utf-8") if path.exists() else "")
+        original = path.read_text(encoding="utf-8") if path.exists() else ""
+        board = parse_board(original)
         for task in list(board.sections.get("In Progress", [])):
             if _expired(task.fields.get("claim_expires_at"), parsed_now):
                 board.sections["In Progress"].remove(task)
@@ -42,6 +43,10 @@ def sweep_expired_file(*, path: pathlib.Path, actor: str, now: str | None = None
                 board.sections.setdefault("Ready", []).append(task)
                 changed += 1
         if changed:
+            # Publish gate: a sweep that would rewrite the file must not drop
+            # unrecognized content. A sweep with nothing to move stays a
+            # silent no-op on any board, canonical or not.
+            ensure_original_mutable(original, path)
             candidate = format_board(board)
             result = check_board_text(candidate)
             if not result.ok:
