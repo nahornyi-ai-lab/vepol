@@ -526,6 +526,356 @@ def f_install_health_runtime_bypass_flags():
     shutil.rmtree(sb)
 
 
+
+# ──────────────────────────────────────────────────────────────────────────
+# seed-content-audit fail-closed (spec seed-content-audit-failclosed-2026-08-14,
+# contract 3e4769f8…): the audit must never report clean when it cannot
+# enumerate the seed's tracked files. AC numbering below follows the spec.
+# ──────────────────────────────────────────────────────────────────────────
+
+def _fc_git(*args, cwd, env=None):
+    subprocess.run(["git", *args], cwd=str(cwd), check=True,
+                   capture_output=True, env=env)
+
+
+def _fc_seed_repo(sb, files, git=True):
+    """Build orchestrator-seed with the given {relpath: content} files."""
+    seed = sb / "orchestrator-seed"
+    for rel, content in files.items():
+        f = seed / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content, encoding="utf-8")
+    if git:
+        _fc_git("init", "-q", cwd=seed)
+        _fc_git("config", "user.email", "t@example.com", cwd=seed)
+        _fc_git("config", "user.name", "t", cwd=seed)
+        _fc_git("add", "-A", cwd=seed)
+        _fc_git("commit", "-q", "-m", "x", cwd=seed)
+    return seed
+
+
+def _fc_audit(sb, env_extra=None, path=None):
+    env = {**os.environ, "KB_HUB": str(sb)}
+    if env_extra:
+        env.update(env_extra)
+    if path is not None:
+        env["PATH"] = path
+    return subprocess.run(
+        ["__HOME__/knowledge/bin/kb-doctor", "seed-content-audit"],
+        env=env, capture_output=True, text=True,
+    )
+
+
+def _fc_clean_bindir(sb):
+    """A PATH dir with the interpreter and coreutils the CLI needs, no git."""
+    bindir = sb / "fc-bin"
+    bindir.mkdir(exist_ok=True)
+    import sys as _sys
+    for name, target in (
+        ("python3", _sys.executable),
+        ("sh", "/bin/sh"),
+        ("env", "/usr/bin/env"),
+        ("sleep", "/bin/sleep"),
+    ):
+        link = bindir / name
+        if not link.exists():
+            link.symlink_to(target)
+    return bindir
+
+
+def f_audit_fc_nongit_and_sync_contract():
+    print("audit-fc AC1+AC6: standalone non-git seed → P1 no-git; sync grep contract")
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/registry.md": "real registry\n"}, git=False)
+    proc = _fc_audit(sb)
+    assert_("seed-content-audit:no-git" in proc.stdout,
+            f"AC1: no-git finding on a non-git seed (got: {proc.stdout[:200]})")
+    assert_("P1=1" in proc.stdout, "AC1: exactly one P1")
+    assert_("128" in proc.stdout, "AC1: finding carries the git rc")
+    assert_("fatal" in proc.stdout, "AC1: finding carries the first stderr line")
+    import re
+    assert_(re.search(r"P1=[1-9]", proc.stdout) is not None,
+            "AC6: output satisfies the exact kb-seed-sync grep regex")
+    sync_path = pathlib.Path("__HOME__/knowledge/bin/kb-seed-sync")
+    if sync_path.exists():  # hub tool; not shipped in the public product tree
+        assert_("could not verify the seed" in sync_path.read_text(encoding="utf-8"),
+                "AC6: kb-seed-sync die-message covers the cannot-verify case")
+    else:
+        print("  - AC6 message check skipped: kb-seed-sync is a hub tool, absent in this tree")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_nested_parent_repo():
+    print("audit-fc AC2: non-git seed nested in a parent repo → P1 no-git naming the foreign toplevel")
+    sb = setup_sandbox()
+    _fc_git("init", "-q", cwd=sb)
+    _fc_git("config", "user.email", "t@example.com", cwd=sb)
+    _fc_git("config", "user.name", "t", cwd=sb)
+    (sb / "anchor.txt").write_text("x\n", encoding="utf-8")
+    _fc_git("add", "anchor.txt", cwd=sb)
+    _fc_git("commit", "-q", "-m", "parent", cwd=sb)
+    _fc_seed_repo(sb, {"knowledge/personal/goals.md": "secret\n"}, git=False)
+    proc = _fc_audit(sb)
+    assert_("seed-content-audit:no-git" in proc.stdout,
+            f"AC2: no-git finding when git resolves the PARENT repo (got: {proc.stdout[:200]})")
+    assert_(str(pathlib.Path(str(sb)).resolve()) in proc.stdout,
+            "AC2: the foreign toplevel path appears in the finding")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_unicode_filename():
+    print("audit-fc AC3: tracked non-ASCII forbidden filename is not hidden by C-quoting")
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/personal/\u00e9.md": "secret\n"})
+    proc = _fc_audit(sb)
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC3: forbidden-tracked fires for personal/é.md (got: {proc.stdout[:200]})")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_oserror_family():
+    print("audit-fc AC4: git launch OSError (EACCES, ENOEXEC) → P1 no-git, no traceback")
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"})
+    bindir = _fc_clean_bindir(sb)
+    # (a) EACCES: the only git on PATH is mode-000
+    stubdir_a = sb / "fc-stub-a"; stubdir_a.mkdir()
+    stub = stubdir_a / "git"
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o000)
+    proc = _fc_audit(sb, path=f"{stubdir_a}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC4a: EACCES → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("Traceback" not in proc.stderr, "AC4a: no traceback")
+    # (b) ENOEXEC: executable binary garbage
+    stubdir_b = sb / "fc-stub-b"; stubdir_b.mkdir()
+    garbage = stubdir_b / "git"
+    garbage.write_bytes(b"\x00\x01\x02 not an executable format")
+    garbage.chmod(0o755)
+    proc = _fc_audit(sb, path=f"{stubdir_b}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC4b: ENOEXEC → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("Traceback" not in proc.stderr, "AC4b: no traceback")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_env_sanitization():
+    print("audit-fc AC8: GIT_* poisons are stripped; full caller env otherwise preserved")
+    import json as _json, uuid
+    sb = setup_sandbox()
+    seed = _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"})
+    # foreign empty repo for the GIT_DIR poison
+    foreign = sb / "fc-foreign"; foreign.mkdir()
+    _fc_git("init", "-q", cwd=foreign)
+    empty_index = sb / "fc-empty-index"
+    poison_base = {
+        "GIT_INDEX_FILE": str(empty_index),
+        "GIT_DIR": str(foreign / ".git"),
+        "GIT_WORK_TREE": str(seed),
+        "GIT_CONFIG_COUNT": "bogus",
+        f"GIT_{uuid.uuid4().hex[:12].upper()}": "bogus",
+    }
+    # (a) index poison alone, (b) dir/worktree poison alone — direct legs
+    proc = _fc_audit(sb, env_extra={"GIT_INDEX_FILE": str(empty_index)})
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC8a: forbidden-tracked fires despite GIT_INDEX_FILE poison (got: {proc.stdout[:200]})")
+    proc = _fc_audit(sb, env_extra={"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(seed)})
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC8b: forbidden-tracked fires despite GIT_DIR/GIT_WORK_TREE poison (got: {proc.stdout[:200]})")
+    # (c) recording stub: full-set equality of received env vs filtered caller env
+    recdir = sb / "fc-rec"; recdir.mkdir()
+    rec_log = recdir / "envs.jsonl"
+    stub = recdir / "git"
+    stub.write_text(
+        "#!" + str(_fc_clean_bindir(sb) / "python3") + "\n"
+        "import json, os, subprocess, sys\n"
+        f"open({str(rec_log)!r}, 'a').write(json.dumps(dict(os.environ)) + chr(10))\n"
+        "r = subprocess.run(['/usr/bin/git', *sys.argv[1:]], capture_output=True)\n"
+        "sys.stdout.buffer.write(r.stdout); sys.stderr.buffer.write(r.stderr)\n"
+        "sys.exit(r.returncode)\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    sentinel_name = f"KB_AUDIT_SENTINEL_{uuid.uuid4().hex[:12]}"
+    sentinel_value = uuid.uuid4().hex
+    caller_env = {**os.environ, "KB_HUB": str(sb), **poison_base,
+                  sentinel_name: sentinel_value,
+                  "PATH": f"{recdir}:{os.environ['PATH']}"}
+    # Explicit interpreter: the /usr/bin/env→Apple-trampoline path mutates
+    # MANPATH between our launch and kb-doctor's os.environ, which would break
+    # the exact-equality baseline through no fault of the audited code.
+    import sys as _sys
+    proc = subprocess.run(
+        [_sys.executable, "__HOME__/knowledge/bin/kb-doctor", "seed-content-audit"],
+        env=caller_env, capture_output=True, text=True,
+    )
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC8c: audit still finds the tracked forbidden file (got: {proc.stdout[:200]})")
+    recorded = [_json.loads(line) for line in rec_log.read_text(encoding="utf-8").splitlines()]
+    assert_(len(recorded) == 2, f"AC8c: exactly two git invocations recorded (got {len(recorded)})")
+    expected = {k: v for k, v in caller_env.items() if not k.startswith("GIT_")}
+    for i, got in enumerate(recorded):
+        assert_(got == expected,
+                f"AC8c: call {i + 1} received EXACTLY the caller env filtered by GIT_ prefix "
+                f"(missing: {sorted(set(expected) - set(got))[:5]}, "
+                f"extra: {sorted(set(got) - set(expected))[:5]})")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_decode_replace():
+    print("audit-fc AC9+AC10: invalid UTF-8 stderr on either call → P1 with U+FFFD first line")
+    sb = setup_sandbox()
+    seed = _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"})
+    bindir = _fc_clean_bindir(sb)
+    py = str(bindir / "python3")
+    # AC9: first call (rev-parse) fails with invalid UTF-8 stderr
+    d9 = sb / "fc-ac9"; d9.mkdir()
+    (d9 / "git").write_text(
+        "#!" + py + "\n"
+        "import sys\n"
+        "sys.stderr.buffer.write(b'first-\\xff-line\\nsecond-line\\n')\n"
+        "sys.exit(128)\n", encoding="utf-8")
+    (d9 / "git").chmod(0o755)
+    proc = _fc_audit(sb, path=f"{d9}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC9: first-call decode failure → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("first-\ufffd-line" in proc.stdout,
+            "AC9: evidence carries the U+FFFD-decoded first stderr line")
+    assert_("second-line" not in proc.stdout, "AC9: second stderr line excluded")
+    assert_("Traceback" not in proc.stderr, "AC9: no traceback")
+    # AC10: rev-parse OK (correct root), ls-files fails with invalid UTF-8
+    d10 = sb / "fc-ac10"; d10.mkdir()
+    (d10 / "git").write_text(
+        "#!" + py + "\n"
+        "import sys\n"
+        "if 'rev-parse' in sys.argv:\n"
+        f"    print({str(seed)!r}); sys.exit(0)\n"
+        "sys.stderr.buffer.write(b'first-\\xff-line\\nsecond-line\\n')\n"
+        "sys.exit(128)\n", encoding="utf-8")
+    (d10 / "git").chmod(0o755)
+    proc = _fc_audit(sb, path=f"{d10}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC10: second-call rc 128 → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("first-\ufffd-line" in proc.stdout,
+            "AC10: evidence carries the U+FFFD-decoded first stderr line")
+    assert_("second-line" not in proc.stdout, "AC10: second stderr line excluded")
+    assert_("Traceback" not in proc.stderr, "AC10: no traceback")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_newline_filename():
+    print("audit-fc AC11: tracked filename with embedded newline still matches forbidden glob")
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/migration-secret\n.yaml": "x\n"})
+    proc = _fc_audit(sb)
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC11: newline filename detected via NUL split (got: {proc.stdout[:200]})")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_symlinked_hub():
+    print("audit-fc AC12: healthy seed reached through a symlinked hub path → no false no-git")
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"})
+    alias = pathlib.Path(str(sb) + "-alias")
+    if alias.exists() or alias.is_symlink():
+        alias.unlink()
+    alias.symlink_to(sb)
+    proc = _fc_audit(alias)
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
+            f"AC12: forbidden-tracked fires through the symlinked path (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:no-git" not in proc.stdout,
+            "AC12: no spurious no-git on a symlinked but healthy seed")
+    alias.unlink()
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_timeouts():
+    print("audit-fc AC13+AC15: a hung git on either call times out into P1 no-git (~20s)")
+    sb = setup_sandbox()
+    seed = _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"})
+    bindir = _fc_clean_bindir(sb)
+    py = str(bindir / "python3")
+    # AC13: rev-parse hangs (exec /bin/sleep so the timeout kills the child itself)
+    d13 = sb / "fc-ac13"; d13.mkdir()
+    (d13 / "git").write_text(
+        "#!" + py + "\nimport os\nos.execv('/bin/sleep', ['sleep', '15'])\n",
+        encoding="utf-8")
+    (d13 / "git").chmod(0o755)
+    proc = _fc_audit(sb, path=f"{d13}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC13: first-call timeout → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("timed out" in proc.stdout, "AC13: evidence names the timeout")
+    assert_("Traceback" not in proc.stderr, "AC13: no traceback")
+    # AC15: rev-parse delegates to real git, ls-files hangs
+    d15 = sb / "fc-ac15"; d15.mkdir()
+    (d15 / "git").write_text(
+        "#!" + py + "\n"
+        "import os, subprocess, sys\n"
+        "if 'rev-parse' in sys.argv:\n"
+        "    r = subprocess.run(['/usr/bin/git', *sys.argv[1:]], capture_output=True)\n"
+        "    sys.stdout.buffer.write(r.stdout); sys.stderr.buffer.write(r.stderr)\n"
+        "    sys.exit(r.returncode)\n"
+        "os.execv('/bin/sleep', ['sleep', '15'])\n", encoding="utf-8")
+    (d15 / "git").chmod(0o755)
+    proc = _fc_audit(sb, path=f"{d15}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC15: second-call timeout → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("Traceback" not in proc.stderr, "AC15: no traceback")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_source_contract():
+    print("audit-fc AC14: AST pin — one try over both git calls, literal except, single-return handler, timeout=10")
+    import ast
+    src_path = pathlib.Path("__HOME__/knowledge/bin/kb-doctor").resolve()
+    src = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "seed_content_audit_check"), None)
+    assert_(fn is not None, "AC14: seed_content_audit_check exists")
+
+    def is_sp_run(call):
+        return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "run" and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "_sp")
+
+    git_try = None
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Try):
+            runs = [c for stmt in node.body for c in ast.walk(stmt) if is_sp_run(c)]
+            if len(runs) == 2:
+                git_try = (node, runs)
+    assert_(git_try is not None, "AC14i: a single try spans exactly the two git invocations")
+    node, runs = git_try
+    for i, call in enumerate(runs):
+        tkw = next((k for k in call.keywords if k.arg == "timeout"), None)
+        assert_(tkw is not None and isinstance(tkw.value, ast.Constant) and tkw.value.value == 10,
+                f"AC14iv: call {i + 1} carries the literal timeout=10")
+        ekw = next((k for k in call.keywords if k.arg == "errors"), None)
+        assert_(ekw is not None and isinstance(ekw.value, ast.Constant) and ekw.value.value == "replace",
+                f"AC14: call {i + 1} decodes with errors='replace'")
+    assert_(len(node.handlers) == 1, "AC14ii: exactly one except handler")
+    h = node.handlers[0]
+    ok_header = (isinstance(h.type, ast.Tuple) and len(h.type.elts) == 2
+                 and isinstance(h.type.elts[0], ast.Attribute)
+                 and h.type.elts[0].attr == "SubprocessError"
+                 and isinstance(h.type.elts[0].value, ast.Name)
+                 and h.type.elts[0].value.id == "_sp"
+                 and isinstance(h.type.elts[1], ast.Name)
+                 and h.type.elts[1].id == "OSError")
+    assert_(ok_header, "AC14ii: handler header is literally except (_sp.SubprocessError, OSError)")
+    assert_(len(h.body) == 1 and isinstance(h.body[0], ast.Return),
+            "AC14iii: handler body is a single unconditional return")
+    seg = ast.get_source_segment(src, h.body[0]) or ""
+    assert_("_no_git" in seg, "AC14iii: the handler returns via the _no_git helper")
+    helper = next((n for n in ast.walk(fn)
+                   if isinstance(n, ast.FunctionDef) and n.name == "_no_git"), None)
+    assert_(helper is not None, "AC14iii: the _no_git helper exists in the function")
+    hseg = ast.get_source_segment(src, helper) or ""
+    assert_("seed-content-audit:no-git" in hseg and '"P1"' in hseg,
+            "AC14iii: _no_git builds the P1 seed-content-audit:no-git finding")
+
+
 def main():
     f_decompose_staleness()
     f_report_quality()
@@ -538,6 +888,16 @@ def main():
     f_install_health_optional_feature_opt_out()
     f_install_health_codex_optional()
     f_install_health_runtime_bypass_flags()
+    f_audit_fc_nongit_and_sync_contract()
+    f_audit_fc_nested_parent_repo()
+    f_audit_fc_unicode_filename()
+    f_audit_fc_oserror_family()
+    f_audit_fc_env_sanitization()
+    f_audit_fc_decode_replace()
+    f_audit_fc_newline_filename()
+    f_audit_fc_symlinked_hub()
+    f_audit_fc_timeouts()
+    f_audit_fc_source_contract()
     print("\nAll Phase 8 fixtures PASSED")
 
 
