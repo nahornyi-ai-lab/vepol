@@ -268,7 +268,9 @@ def f_seed_content_audit():
         env={**os.environ, "KB_HUB": str(sb)},
         capture_output=True, text=True,
     )
-    assert_("P1=" in proc.stdout, "registry.md leak → P1 finding")
+    import re as _re_p1
+    assert_(_re_p1.search(r"P1=[1-9]", proc.stdout) is not None,
+            "registry.md leak → P1 finding (P1= alone also matches P1=0 — R1 impl review)")
     assert_("registry.md" in proc.stdout, "specifically registry.md mentioned")
 
     # Case 3: leak personal/ directory
@@ -628,8 +630,8 @@ def f_audit_fc_unicode_filename():
     sb = setup_sandbox()
     _fc_seed_repo(sb, {"knowledge/personal/\u00e9.md": "secret\n"})
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC3: forbidden-tracked fires for personal/é.md (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC3: forbidden-tracked fires at P1 for personal/é.md (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
 
@@ -656,6 +658,55 @@ def f_audit_fc_oserror_family():
     assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
             f"AC4b: ENOEXEC → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("Traceback" not in proc.stderr, "AC4b: no traceback")
+    # (c) ELOOP: a self-referencing git symlink — the R1 implementation
+    # reviewer proved an errno-conditional handler passes every other leg.
+    stubdir_c = sb / "fc-stub-c"; stubdir_c.mkdir()
+    (stubdir_c / "git").symlink_to(stubdir_c / "git")
+    proc = _fc_audit(sb, path=f"{stubdir_c}:{bindir}")
+    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC4c: ELOOP → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
+    assert_("Traceback" not in proc.stderr, "AC4c: no traceback")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_root_fails_before_enumeration():
+    print("audit-fc Decision-1 ordering: failed root proof answers fast, never launches ls-files")
+    import time
+    sb = setup_sandbox()
+    _fc_seed_repo(sb, {"knowledge/registry.md": "x\n"}, git=False)
+    bindir = _fc_clean_bindir(sb)
+    py = str(bindir / "python3")
+    d = sb / "fc-rootfail"; d.mkdir()
+    (d / "git").write_text(
+        "#!" + py + "\n"
+        "import os, sys\n"
+        "if 'rev-parse' in sys.argv:\n"
+        "    sys.stderr.write('fatal-root-first\\n'); sys.exit(128)\n"
+        "os.execv('/bin/sleep', ['sleep', '15'])\n", encoding="utf-8")
+    (d / "git").chmod(0o755)
+    t0 = time.monotonic()
+    proc = _fc_audit(sb, path=f"{d}:{bindir}")
+    elapsed = time.monotonic() - t0
+    assert_("seed-content-audit:no-git" in proc.stdout and "128" in proc.stdout
+            and "fatal-root-first" in proc.stdout,
+            f"root failure reported with ITS rc and stderr (got: {proc.stdout[:200]})")
+    assert_("timed out" not in proc.stdout, "no timeout diagnostic — ls-files never ran")
+    assert_(elapsed < 8, f"answers fast ({elapsed:.1f}s) — the hung ls-files was never launched")
+    shutil.rmtree(sb)
+
+
+def f_audit_fc_quiet_cases():
+    print("audit-fc AC5 quiet legs: absent seed dir and empty proven repo stay silent")
+    sb = setup_sandbox()  # no orchestrator-seed at all
+    proc = _fc_audit(sb)
+    assert_("P0=0 P1=0" in proc.stdout, "absent seed dir → zero findings")
+    shutil.rmtree(sb)
+    sb = setup_sandbox()
+    seed = sb / "orchestrator-seed"; seed.mkdir()
+    _fc_git("init", "-q", cwd=seed)
+    proc = _fc_audit(sb)
+    assert_("P0=0 P1=0" in proc.stdout,
+            f"empty root-proven repo → zero findings (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
 
@@ -677,11 +728,11 @@ def f_audit_fc_env_sanitization():
     }
     # (a) index poison alone, (b) dir/worktree poison alone — direct legs
     proc = _fc_audit(sb, env_extra={"GIT_INDEX_FILE": str(empty_index)})
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC8a: forbidden-tracked fires despite GIT_INDEX_FILE poison (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC8a: forbidden-tracked fires at P1 despite GIT_INDEX_FILE poison (got: {proc.stdout[:200]})")
     proc = _fc_audit(sb, env_extra={"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(seed)})
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC8b: forbidden-tracked fires despite GIT_DIR/GIT_WORK_TREE poison (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC8b: forbidden-tracked fires at P1 despite GIT_DIR/GIT_WORK_TREE poison (got: {proc.stdout[:200]})")
     # (c) recording stub: full-set equality of received env vs filtered caller env
     recdir = sb / "fc-rec"; recdir.mkdir()
     rec_log = recdir / "envs.jsonl"
@@ -708,8 +759,8 @@ def f_audit_fc_env_sanitization():
         [_sys.executable, "__HOME__/knowledge/bin/kb-doctor", "seed-content-audit"],
         env=caller_env, capture_output=True, text=True,
     )
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC8c: audit still finds the tracked forbidden file (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC8c: audit still finds the tracked forbidden file at P1 (got: {proc.stdout[:200]})")
     recorded = [_json.loads(line) for line in rec_log.read_text(encoding="utf-8").splitlines()]
     assert_(len(recorded) == 2, f"AC8c: exactly two git invocations recorded (got {len(recorded)})")
     expected = {k: v for k, v in caller_env.items() if not k.startswith("GIT_")}
@@ -767,8 +818,8 @@ def f_audit_fc_newline_filename():
     sb = setup_sandbox()
     _fc_seed_repo(sb, {"knowledge/migration-secret\n.yaml": "x\n"})
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC11: newline filename detected via NUL split (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC11: newline filename detected at P1 via NUL split (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
 
@@ -781,8 +832,8 @@ def f_audit_fc_symlinked_hub():
         alias.unlink()
     alias.symlink_to(sb)
     proc = _fc_audit(alias)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout,
-            f"AC12: forbidden-tracked fires through the symlinked path (got: {proc.stdout[:200]})")
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+            f"AC12: forbidden-tracked fires at P1 through the symlinked path (got: {proc.stdout[:200]})")
     assert_("seed-content-audit:no-git" not in proc.stdout,
             "AC12: no spurious no-git on a symlinked but healthy seed")
     alias.unlink()
@@ -865,12 +916,17 @@ def f_audit_fc_source_contract():
                  and h.type.elts[1].id == "OSError")
     assert_(ok_header, "AC14ii: handler header is literally except (_sp.SubprocessError, OSError)")
     assert_(len(h.body) == 1 and isinstance(h.body[0], ast.Return),
-            "AC14iii: handler body is a single unconditional return")
-    seg = ast.get_source_segment(src, h.body[0]) or ""
-    assert_("_no_git" in seg, "AC14iii: the handler returns via the _no_git helper")
+            "AC14iii: handler body is a single return statement")
+    ret_val = h.body[0].value
+    assert_(isinstance(ret_val, ast.Call) and isinstance(ret_val.func, ast.Name)
+            and ret_val.func.id == "_no_git",
+            "AC14iii: the return value is a DIRECT _no_git(...) call — a conditional "
+            "expression (x if c else _no_git(...)) is a fail-open in disguise")
     helper = next((n for n in ast.walk(fn)
                    if isinstance(n, ast.FunctionDef) and n.name == "_no_git"), None)
     assert_(helper is not None, "AC14iii: the _no_git helper exists in the function")
+    assert_(not any(isinstance(n, (ast.If, ast.IfExp)) for n in ast.walk(helper)),
+            "AC14iii: _no_git itself is branch-free")
     hseg = ast.get_source_segment(src, helper) or ""
     assert_("seed-content-audit:no-git" in hseg and '"P1"' in hseg,
             "AC14iii: _no_git builds the P1 seed-content-audit:no-git finding")
@@ -898,6 +954,8 @@ def main():
     f_audit_fc_symlinked_hub()
     f_audit_fc_timeouts()
     f_audit_fc_source_contract()
+    f_audit_fc_root_fails_before_enumeration()
+    f_audit_fc_quiet_cases()
     print("\nAll Phase 8 fixtures PASSED")
 
 

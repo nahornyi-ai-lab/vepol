@@ -1162,17 +1162,20 @@ def seed_content_audit_check() -> list[Finding]:
         root = _sp.run(["git", "-C", str(seed), "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True, errors="replace",
                        timeout=10, env=git_env)
+        # Root proof BEFORE enumeration: a failed or foreign root must answer
+        # with ITS diagnostics immediately, never launch ls-files (which could
+        # hang for the full timeout and bury the real cause).
+        if root.returncode != 0:
+            return _no_git(
+                f"`git rev-parse --show-toplevel` exited {root.returncode}: {_first_err_line(root)}")
+        toplevel = root.stdout.strip()
+        if pathlib.Path(toplevel).resolve() != seed.resolve():
+            return _no_git(f"seed dir is not the repository root (toplevel: {toplevel})")
         out = _sp.run(["git", "-C", str(seed), "ls-files", "-z"],
                       capture_output=True, text=True, errors="replace",
                       timeout=10, env=git_env)
     except (_sp.SubprocessError, OSError) as exc:
         return _no_git(f"git failed to run: {type(exc).__name__}: {exc}")
-    if root.returncode != 0:
-        return _no_git(
-            f"`git rev-parse --show-toplevel` exited {root.returncode}: {_first_err_line(root)}")
-    toplevel = root.stdout.strip()
-    if pathlib.Path(toplevel).resolve() != seed.resolve():
-        return _no_git(f"seed dir is not the repository root (toplevel: {toplevel})")
     if out.returncode != 0:
         return _no_git(
             f"`git ls-files -z` exited {out.returncode}: {_first_err_line(out)}")
