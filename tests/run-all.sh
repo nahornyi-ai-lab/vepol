@@ -124,7 +124,7 @@ bash install/agent-modes.sh > /dev/null && pass "install/agent-modes.sh (23 case
 
 echo
 echo "=== Phase 8 kb-doctor periodic checks ==="
-python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (11 fixtures)" || { fail "phase8"; exit 1; }
+python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (23 fixtures)" || { fail "phase8"; exit 1; }
 
 echo
 echo "=== Processes release (processes.yaml gating, 13 acceptance cases) ==="

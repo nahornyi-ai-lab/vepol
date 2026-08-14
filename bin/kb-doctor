@@ -1138,18 +1138,48 @@ def seed_content_audit_check() -> list[Finding]:
         ("knowledge/strategies.md", "live strategies — only _template/ allowed"),
     ]
 
-    # Get git-tracked files
+    # Get git-tracked files — fail closed on ANY inability to enumerate.
+    # The audit must never report clean when it cannot vouch for the seed
+    # (spec: decisions/seed-content-audit-failclosed-2026-08-14.md, contract
+    # 3e4769f8…). Root proof + NUL enumeration + sanitized env + broad P1.
     import subprocess as _sp
-    try:
-        out = _sp.run(["git", "-C", str(seed), "ls-files"],
-                      capture_output=True, text=True, timeout=10)
-        tracked = set(out.stdout.strip().splitlines())
-    except (_sp.SubprocessError, FileNotFoundError):
+
+    def _no_git(detail: str) -> list[Finding]:
         return [finding(
             "seed-content-audit:no-git", "hub", str(seed),
-            "P2", "could not run `git ls-files` in seed dir",
-            evidence="git",
+            "P1", f"cannot enumerate tracked files: {detail} — audit cannot vouch for the seed",
+            evidence=detail,
         )]
+
+    def _first_err_line(res) -> str:
+        return (res.stderr or "").splitlines()[0] if res.stderr else ""
+
+    # Caller-inherited GIT_* (GIT_INDEX_FILE/GIT_DIR/GIT_WORK_TREE/…) can
+    # silently redirect discovery or enumeration away from the seed's real
+    # state; strip the whole family, preserve everything else.
+    git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        root = _sp.run(["git", "-C", str(seed), "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True, errors="replace",
+                       timeout=10, env=git_env)
+        # Root proof BEFORE enumeration: a failed or foreign root must answer
+        # with ITS diagnostics immediately, never launch ls-files (which could
+        # hang for the full timeout and bury the real cause).
+        if root.returncode != 0:
+            return _no_git(
+                f"`git rev-parse --show-toplevel` exited {root.returncode}: {_first_err_line(root)}")
+        toplevel = root.stdout.strip()
+        if pathlib.Path(toplevel).resolve() != seed.resolve():
+            return _no_git(f"seed dir is not the repository root (toplevel: {toplevel})")
+        out = _sp.run(["git", "-C", str(seed), "ls-files", "-z"],
+                      capture_output=True, text=True, errors="replace",
+                      timeout=10, env=git_env)
+    except (_sp.SubprocessError, OSError) as exc:
+        return _no_git(f"git failed to run: {type(exc).__name__}: {exc}")
+    if out.returncode != 0:
+        return _no_git(
+            f"`git ls-files -z` exited {out.returncode}: {_first_err_line(out)}")
+    tracked = set(f for f in out.stdout.split("\0") if f)
 
     # Check each forbidden pattern
     import fnmatch
