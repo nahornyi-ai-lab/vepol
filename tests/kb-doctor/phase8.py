@@ -967,6 +967,11 @@ def f_audit_fc_source_contract():
             and isinstance(hret.elts[0], ast.Call)
             and isinstance(hret.elts[0].func, ast.Name) and hret.elts[0].func.id == "finding",
             "AC14iii: _no_git returns a literal one-element list of a direct finding(...) call")
+    fid = hret.elts[0].args[0] if hret.elts[0].args else None
+    assert_(isinstance(fid, ast.Constant) and fid.value == "seed-content-audit:no-git",
+            "AC14iii: the finding id argument is the literal seed-content-audit:no-git — "
+            "R4 impl review spoofed the id by moving the string into the message text, "
+            "which every stdout grep in the suite happily matched")
     sev = hret.elts[0].args[3] if len(hret.elts[0].args) > 3 else None
     assert_(isinstance(sev, ast.Constant) and sev.value == "P1",
             "AC14iii: the severity argument is the literal string P1 — not computed")
