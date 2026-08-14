@@ -96,7 +96,7 @@ def f_decompose_staleness():
         encoding="utf-8",
     )
     proc = kbd(sb, "decompose-staleness")
-    assert_("P1=1" in proc.stdout, f"P1 finding for 10-day stale marker (got: {proc.stdout[:200]})")
+    assert_(_fc_one_p1(proc.stdout), f"P1 finding for 10-day stale marker (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
 
@@ -556,6 +556,13 @@ def _fc_seed_repo(sb, files, git=True):
     return seed
 
 
+def _fc_one_p1(out):
+    """Exactly one P1: 'P1=1' as a substring also matches 'P1=10' — the R3
+    implementation reviewer shipped a [finding]*10 mutant through the suite."""
+    import re as _re
+    return _re.search(r"P1=1\b", out) is not None
+
+
 def _fc_audit(sb, env_extra=None, path=None):
     env = {**os.environ, "KB_HUB": str(sb)}
     if env_extra:
@@ -592,7 +599,7 @@ def f_audit_fc_nongit_and_sync_contract():
     proc = _fc_audit(sb)
     assert_("seed-content-audit:no-git" in proc.stdout,
             f"AC1: no-git finding on a non-git seed (got: {proc.stdout[:200]})")
-    assert_("P1=1" in proc.stdout, "AC1: exactly one P1")
+    assert_(_fc_one_p1(proc.stdout), "AC1: exactly one P1")
     assert_("128" in proc.stdout, "AC1: finding carries the git rc")
     assert_("fatal" in proc.stdout, "AC1: finding carries the first stderr line")
     import re
@@ -618,7 +625,7 @@ def f_audit_fc_nested_parent_repo():
     _fc_git("commit", "-q", "-m", "parent", cwd=sb)
     _fc_seed_repo(sb, {"knowledge/personal/goals.md": "secret\n"}, git=False)
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC2: no-git finding at P1 when git resolves the PARENT repo (got: {proc.stdout[:200]})")
     assert_(str(pathlib.Path(str(sb)).resolve()) in proc.stdout,
             "AC2: the foreign toplevel path appears in the finding")
@@ -630,7 +637,7 @@ def f_audit_fc_unicode_filename():
     sb = setup_sandbox()
     _fc_seed_repo(sb, {"knowledge/personal/\u00e9.md": "secret\n"})
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC3: forbidden-tracked fires at P1 for personal/é.md (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
@@ -646,7 +653,7 @@ def f_audit_fc_oserror_family():
     stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     stub.chmod(0o000)
     proc = _fc_audit(sb, path=f"{stubdir_a}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC4a: EACCES → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("Traceback" not in proc.stderr, "AC4a: no traceback")
     # (b) ENOEXEC: executable binary garbage
@@ -655,7 +662,7 @@ def f_audit_fc_oserror_family():
     garbage.write_bytes(b"\x00\x01\x02 not an executable format")
     garbage.chmod(0o755)
     proc = _fc_audit(sb, path=f"{stubdir_b}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC4b: ENOEXEC → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("Traceback" not in proc.stderr, "AC4b: no traceback")
     # (c) ELOOP: a self-referencing git symlink — the R1 implementation
@@ -663,7 +670,7 @@ def f_audit_fc_oserror_family():
     stubdir_c = sb / "fc-stub-c"; stubdir_c.mkdir()
     (stubdir_c / "git").symlink_to(stubdir_c / "git")
     proc = _fc_audit(sb, path=f"{stubdir_c}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC4c: ELOOP → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("Traceback" not in proc.stderr, "AC4c: no traceback")
     shutil.rmtree(sb)
@@ -706,7 +713,7 @@ def f_audit_fc_root_fails_before_enumeration():
     t0 = time.monotonic()
     proc = _fc_audit(sb, path=f"{d2}:{bindir}")
     elapsed = time.monotonic() - t0
-    assert_("not the repository root" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("not the repository root" in proc.stdout and _fc_one_p1(proc.stdout),
             f"foreign root reported with its diagnostic (got: {proc.stdout[:200]})")
     assert_("timed out" not in proc.stdout and elapsed < 8,
             f"foreign root answers fast ({elapsed:.1f}s) — ls-files never launched")
@@ -747,10 +754,10 @@ def f_audit_fc_env_sanitization():
     }
     # (a) index poison alone, (b) dir/worktree poison alone — direct legs
     proc = _fc_audit(sb, env_extra={"GIT_INDEX_FILE": str(empty_index)})
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC8a: forbidden-tracked fires at P1 despite GIT_INDEX_FILE poison (got: {proc.stdout[:200]})")
     proc = _fc_audit(sb, env_extra={"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(seed)})
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC8b: forbidden-tracked fires at P1 despite GIT_DIR/GIT_WORK_TREE poison (got: {proc.stdout[:200]})")
     # (c) recording stub: full-set equality of received env vs filtered caller env
     recdir = sb / "fc-rec"; recdir.mkdir()
@@ -778,7 +785,7 @@ def f_audit_fc_env_sanitization():
         [_sys.executable, "__HOME__/knowledge/bin/kb-doctor", "seed-content-audit"],
         env=caller_env, capture_output=True, text=True,
     )
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC8c: audit still finds the tracked forbidden file at P1 (got: {proc.stdout[:200]})")
     recorded = [_json.loads(line) for line in rec_log.read_text(encoding="utf-8").splitlines()]
     assert_(len(recorded) == 2, f"AC8c: exactly two git invocations recorded (got {len(recorded)})")
@@ -806,7 +813,7 @@ def f_audit_fc_decode_replace():
         "sys.exit(128)\n", encoding="utf-8")
     (d9 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d9}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout)
             and "128" in proc.stdout,
             f"AC9: first-call decode failure → P1 no-git with the rc (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("first-\ufffd-line" in proc.stdout,
@@ -824,7 +831,7 @@ def f_audit_fc_decode_replace():
         "sys.exit(128)\n", encoding="utf-8")
     (d10 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d10}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout)
             and "128" in proc.stdout,
             f"AC10: second-call rc 128 → P1 no-git with the rc (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("first-\ufffd-line" in proc.stdout,
@@ -839,7 +846,7 @@ def f_audit_fc_newline_filename():
     sb = setup_sandbox()
     _fc_seed_repo(sb, {"knowledge/migration-secret\n.yaml": "x\n"})
     proc = _fc_audit(sb)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC11: newline filename detected at P1 via NUL split (got: {proc.stdout[:200]})")
     shutil.rmtree(sb)
 
@@ -853,7 +860,7 @@ def f_audit_fc_symlinked_hub():
         alias.unlink()
     alias.symlink_to(sb)
     proc = _fc_audit(alias)
-    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:forbidden-tracked" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC12: forbidden-tracked fires at P1 through the symlinked path (got: {proc.stdout[:200]})")
     assert_("seed-content-audit:no-git" not in proc.stdout,
             "AC12: no spurious no-git on a symlinked but healthy seed")
@@ -874,7 +881,7 @@ def f_audit_fc_timeouts():
         encoding="utf-8")
     (d13 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d13}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC13: first-call timeout → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("timed out" in proc.stdout, "AC13: evidence names the timeout")
     assert_("Traceback" not in proc.stderr, "AC13: no traceback")
@@ -890,7 +897,7 @@ def f_audit_fc_timeouts():
         "os.execv('/bin/sleep', ['sleep', '15'])\n", encoding="utf-8")
     (d15 / "git").chmod(0o755)
     proc = _fc_audit(sb, path=f"{d15}:{bindir}")
-    assert_("seed-content-audit:no-git" in proc.stdout and "P1=1" in proc.stdout,
+    assert_("seed-content-audit:no-git" in proc.stdout and _fc_one_p1(proc.stdout),
             f"AC15: second-call timeout → P1 no-git (got: {(proc.stdout + proc.stderr)[:200]})")
     assert_("Traceback" not in proc.stderr, "AC15: no traceback")
     shutil.rmtree(sb)
@@ -950,6 +957,19 @@ def f_audit_fc_source_contract():
             "AC14iii: _no_git's body is exactly one return statement — no room for "
             "if/match/try or any other branching construct (R2 impl review: an "
             "ast.Match returning [] for BlockingIOError slipped the If/IfExp-only check)")
+    _branchy = (ast.IfExp, ast.BoolOp) + ((ast.Match,) if hasattr(ast, "Match") else ())
+    assert_(not any(isinstance(n, _branchy) for n in ast.walk(helper)),
+            "AC14iii: no expression-level branching anywhere in _no_git — the R3 "
+            "reviewer shipped `return [] if 'FileNotFoundError' in detail else [finding(...)]` "
+            "through the statement-count pin")
+    hret = helper.body[0].value
+    assert_(isinstance(hret, ast.List) and len(hret.elts) == 1
+            and isinstance(hret.elts[0], ast.Call)
+            and isinstance(hret.elts[0].func, ast.Name) and hret.elts[0].func.id == "finding",
+            "AC14iii: _no_git returns a literal one-element list of a direct finding(...) call")
+    sev = hret.elts[0].args[3] if len(hret.elts[0].args) > 3 else None
+    assert_(isinstance(sev, ast.Constant) and sev.value == "P1",
+            "AC14iii: the severity argument is the literal string P1 — not computed")
     hseg = ast.get_source_segment(src, helper) or ""
     assert_("seed-content-audit:no-git" in hseg and '"P1"' in hseg,
             "AC14iii: _no_git builds the P1 seed-content-audit:no-git finding")
