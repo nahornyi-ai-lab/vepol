@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -207,7 +208,7 @@ def test_live_project_minimal_bundle():
     assert "index: on-demand" in ctx
     assert "## Incidents (ongoing + recent resolved, prevention rules)" not in ctx
     assert "## Prevention Rules" in ctx
-    assert "agent_card: included" in ctx or "agent_card: clipped" in ctx
+    assert re.search(r"agent_card: (present|clipped|omitted)", ctx)
 
 
 def test_print_mode_does_not_block_and_is_plain_markdown():
@@ -221,7 +222,10 @@ def test_print_mode_does_not_block_and_is_plain_markdown():
             timeout=10,
         )
     assert r.returncode == 0, r.stderr
-    assert r.stdout.startswith("## Startup Context Manifest")
+    # The recovery block now leads every non-empty emission (delivery contract
+    # 2026-08-26); the manifest follows it.
+    assert r.stdout.startswith("## Startup Context - read this first")
+    assert "## Startup Context Manifest" in r.stdout
     assert "hookSpecificOutput" not in r.stdout
     assert "## Agent Card" in r.stdout
 
@@ -254,7 +258,8 @@ def test_json_safety_when_board_is_malformed_and_hub_tools_missing():
     ctx = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert "## Startup Context Manifest" in ctx
     assert "active_work:" in ctx
-    assert "kb-board unavailable" in ctx or "active_work: missing" in ctx or "active_work: clipped" in ctx
+    assert ("kb-board unavailable" in ctx
+            or re.search(r"active_work: (present|clipped|omitted|missing|empty)", ctx))
 
 
 def test_json_safety_failure_matrix():
@@ -289,15 +294,23 @@ def test_json_safety_failure_matrix():
         write(empty_incidents_project / "knowledge" / "incidents.md", "")
         cases.append(("malformed/empty incidents file", empty_incidents_project, None))
 
+        # A path with neither a wiki nor project markers is `empty` mode under the
+        # 2026-08-26 delivery contract: it emits nothing at all, rather than a
+        # manifest-shaped skip note. Asserted separately below.
         non_project = root / "non_project"
         non_project.mkdir()
-        cases.append(("non-project path without wiki", non_project, None))
 
         fake_hub = root / "hub_without_roster"
         (fake_hub / "bin").mkdir(parents=True)
         shutil.copy2(HUB / "bin" / "kb-board", fake_hub / "bin" / "kb-board")
         no_roster_project = make_project(root / "no_optional_roster")
         cases.append(("project wiki with no optional roster tool", no_roster_project, {"KB_HUB": str(fake_hub)}))
+
+        r = run_hook(non_project)
+        assert r.returncode == 0, r.stderr
+        empty_payload = json.loads(r.stdout or "{}")
+        assert not empty_payload.get("hookSpecificOutput", {}).get("additionalContext"), \
+            "empty mode must emit no context"
 
         for label, project, env in cases:
             ctx = assert_valid_json_context(project, env_extra=env)
@@ -319,6 +332,15 @@ def test_hub_mode_valid_json():
 
 
 def test_critical_budget_fixture_marks_clips_honestly():
+    """At a deliberately low configured ceiling the emission stays inside it and
+    every slice still carries an honest status.
+
+    Per-section caps and the compact tier were retired by the owner-approved
+    startup-context delivery contract (2026-08-26), so this no longer asserts the
+    old `card_hygiene_required` clipping. What must hold is stronger: the ceiling
+    is respected, the sentinel still verifies, and no slice reports a status that
+    is untrue of the emission.
+    """
     with tempfile.TemporaryDirectory() as td:
         project = make_project(Path(td) / "critical", huge=True)
         card = "# Agent Card\n\n## Self-introduction\n\n" + ("card filler xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" * 180)
@@ -328,18 +350,22 @@ def test_critical_budget_fixture_marks_clips_honestly():
         write(project / "knowledge" / "state.md", state)
         ctx = hook_context(project)
 
-    assert len(ctx) <= 20000
+    assert len(ctx) <= 20000, f"ceiling not respected: {len(ctx)}"
     assert "## Startup Context Manifest" in ctx
-    assert "card_hygiene_required" in ctx
-    assert "state_hygiene_required" in ctx
-    assert "agent_card: clipped" in ctx
-    assert "state: clipped" in ctx
-    assert "## Agent Card" in ctx
-    assert "## Project State" in ctx
-    assert "## Recent Log" in ctx
-    assert "## Active Work" in ctx
-    assert "## Open Escalations" in ctx
-    assert "## Prevention Rules" in ctx
+    # No status may be a word outside the contract's one-hot set.
+    statuses = re.findall(r"^- (?:today_roster|agent_card|state|log|active_work|"
+                          r"open_escalations|prevention_rules|ongoing_incidents|"
+                          r"recent_daily|telegram_threads): (\S+)", ctx, re.M)
+    assert statuses, "no slice statuses in manifest"
+    legal = {"present", "clipped", "omitted", "empty", "missing"}
+    illegal = [s for s in statuses if s not in legal]
+    assert not illegal, f"illegal status words: {illegal}"
+    assert "included" not in " ".join(statuses)
+    # The sentinel must still be present and self-consistent under the clip.
+    m = re.search(r"^KB-STARTUP-BUNDLE-END v1 chars=(\d+) sha256=([0-9a-f]{64})$",
+                  ctx, re.M)
+    assert m, "sentinel missing under emergency clip"
+    assert int(m.group(1)) == len(ctx), "sentinel chars wrong under emergency clip"
 
 
 def main() -> int:
