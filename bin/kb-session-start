@@ -56,7 +56,7 @@ emit_json() {
 
 emit_empty() {
   if [[ $PRINT_MODE -eq 1 ]]; then
-    printf '\n'
+    : # C1 empty mode: nothing at all, not even a newline.
   else
     echo '{}'
   fi
@@ -103,25 +103,14 @@ Do NOT run init-kb automatically — wait for the user to ask or indicate they w
 
 $_rt"
     fi
-    if [[ $PRINT_MODE -eq 1 ]]; then
-      printf '%s\n' "$HINT"
-    else
-      emit_json "$HINT"
-    fi
+    # Hand the hint to the assembler, which owns the only implementation of the
+    # recovery block and sentinel. A stub is a real emission, not an empty one.
+    STUB_BODY="$HINT"
+  else
+    # C1 empty mode: no wiki and no project markers -> emit nothing at all.
+    emit_empty
     exit 0
   fi
-  HINT="## Startup Context Manifest
-
-- bundle_version: startup-context-hotfix-2026-06-21
-- cwd: $PROJECT
-- mode: no-project
-- startup_context: skipped, no project wiki or recognized project markers"
-  if [[ $PRINT_MODE -eq 1 ]]; then
-    printf '%s\n' "$HINT"
-  else
-    emit_json "$HINT"
-  fi
-  exit 0
 fi
 
 if [[ "$HUB_MODE" == "1" ]]; then
@@ -133,6 +122,7 @@ if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
   KB_HUB="$KB_HUB_DIR" "$KB_HUB_DIR/bin/kb-cli-roster" --ensure --out "$ROSTER" >/dev/null 2>&1 || true
 fi
 
+KB_STARTUP_STUB_BODY="${STUB_BODY:-}" \
 python3 - "$PROJECT" "$HUB_MODE" "$ROSTER" "$KB_HUB_DIR" "$PRINT_MODE" <<'PY'
 from __future__ import annotations  # keep PEP 604 (Path | None) working on stock macOS python3 (3.9)
 import json
@@ -150,42 +140,37 @@ KB_HUB = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else Path.home()
 PRINT_MODE = len(sys.argv) > 5 and sys.argv[5] == "1"
 K = PROJECT if HUB_MODE else PROJECT / "knowledge"
 
-MAX_CONTEXT = int(os.environ.get("KB_STARTUP_MAX_CONTEXT", "80000"))
-SECTION_CAPS = {
-    "today_roster": 1000,
-    "project_instructions": 30000,
-    "agent_card": 30000,
-    "state": 12000,
-    "log": 12000,
-    "active_work": 5000,
-    "open_escalations": 3000,
-    "prevention_rules": 6000,
-    "ongoing_incidents": 6000,
-}
-if MAX_CONTEXT <= 25000:
-    # Compact hook clients still need every critical startup section. Clip large
-    # prose early instead of emergency-clipping the assembled bundle and
-    # starving active work / escalations / incident rules.
-    SECTION_CAPS.update({
-        "today_roster": 500,
-        "agent_card": 3000,
-        "state": 2000,
-        "log": 3000,
-        "active_work": 2500,
-        "open_escalations": 1500,
-        "prevention_rules": 1500,
-        "ongoing_incidents": 1500,
-    })
+# Owner directive 2026-08-26: stop cutting. Per-section caps and the compact tier
+# are retired; only the ceiling remains, and only as an emergency last resort.
+try:
+    MAX_CONTEXT = int(os.environ.get("KB_STARTUP_MAX_CONTEXT", "250000"))
+except ValueError:
+    # A malformed override must not kill the hook before the error handler exists.
+    MAX_CONTEXT = 250000
+# Unbounded on purpose: per-section caps are retired, so no source is trimmed
+# before assembly. The emergency clip is the only drop path, and it is disclosed.
+# No per-section budget exists. The contract retires them: every slice is
+# assembled whole, and the emergency clip in assemble() is the only place
+# anything is ever dropped - where it is disclosed per slice.
 
 
 class Section:
-    def __init__(self, key, title, body, path=None, status="included", note=""):
+    def __init__(self, key, title, body, path=None, status="present", note="",
+                 source_text=None, readable=True):
         self.key = key
         self.title = title
         self.body = body or ""
         self.path = str(path) if path else ""
+        # Builder-local hint only. The emitted manifest is recomputed after
+        # assembly by slice_status(); nothing reads this, and the word it holds
+        # is not the word that ships.
         self.status = status
         self.note = note
+        # S: the slice extracted from its source, before assembly.
+        self.source_text = self.body if source_text is None else (source_text or "")
+        self.readable = readable
+        # E: what actually survived into the emission; filled post-assembly.
+        self.emitted = ""
 
     def render(self):
         return f"## {self.title}\n\n{self.body}".rstrip()
@@ -198,6 +183,57 @@ manifest = {
 }
 
 
+SENTINEL_PREFIX = "KB-STARTUP-BUNDLE-END v1"
+
+
+def recovery_block(bundle_id: str) -> str:
+    """C2 recovery block. The only implementation: the stub path goes through this
+    assembler too, so there is no second copy to keep in step."""
+    hub = "${KB_HUB:-$HOME/knowledge}"
+    return (
+        "## Startup Context - read this first\n"
+        "\n"
+        "Ends with `" + SENTINEL_PREFIX + "`. BEFORE your first substantive\n"
+        "answer or action, recover if ANY holds: (a) you cannot see that line;\n"
+        "(b) your context shows a truncation or saved-output wrapper; (c) a recovered\n"
+        "bundle holds a different bundle_id; (d) it says assembly failed.\n"
+        "Recover: read the file the runtime saved for this hook, fully and contiguously\n"
+        "from its start; if a read is truncated, continue where it stopped until the\n"
+        "sentinel. A search or tail read is NOT a recovery.\n"
+        "If no path was named, or it is missing, unreadable, or holds another id, run\n"
+        "ONCE: \"" + hub + "/bin/kb-session-start\" --print --cwd \"$PWD\"\n"
+        "and read to its sentinel; it binds to its OWN id. If that fails too - error,\n"
+        "empty, no sentinel, unreadable - do NOT retry. Read <wiki> (= $PWD/knowledge;\n"
+        "in the hub, $PWD), in order: agents/agent-card.md, else\n"
+        "~/knowledge/agents/agent-card.md, else say none exists; state.md; tail of log.md;\n"
+        "active items in backlog.md; escalations.md; BOTH `## Prevention rules` and\n"
+        "`## Ongoing` of incidents.md. Then say in your first answer that startup is\n"
+        "broken.\n"
+        "bundle_id: " + bundle_id + "\n"
+    )
+
+
+def wrap_bundle(body: str) -> str:
+    """Apply the C2 recovery block and the C3 sentinel.
+
+    Self-contained on purpose: resolving a helper module through KB_HUB made the
+    hook die whenever KB_HUB pointed somewhere else, including on the error path
+    that exists precisely to survive failure.
+    """
+    import hashlib as _h
+    import uuid as _u
+    prefix = recovery_block(str(_u.uuid4())) + "\n---\n\n"
+    core = prefix + body.rstrip("\n") + "\n"
+    digest = _h.sha256(core.encode("utf-8")).hexdigest()
+    n = len(core)
+    while True:
+        line = SENTINEL_PREFIX + " chars=" + str(n) + " sha256=" + digest + "\n"
+        total = len(core) + len(line)
+        if total == n:
+            return core + line
+        n = total
+
+
 def read_text(path: Path):
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -207,16 +243,6 @@ def read_text(path: Path):
 
 def count_entries(text: str) -> int:
     return len(re.findall(r"^## \[", text, re.MULTILINE))
-
-
-def clip_text(text: str, cap: int, *, from_end=False):
-    if len(text) <= cap:
-        return text, False
-    marker = "\n...(clipped by startup-context budget)"
-    keep = max(0, cap - len(marker))
-    if from_end:
-        return marker + "\n" + text[-keep:], True
-    return text[:keep] + marker, True
 
 
 def section_between(text: str, heading: str):
@@ -232,7 +258,10 @@ def section_between(text: str, heading: str):
 
 def output_context(context: str):
     if PRINT_MODE:
-        print(context)
+        # Write verbatim: the sentinel's chars= counts the bundle exactly, so an
+        # extra newline here would make the declared length wrong for anyone who
+        # verifies the printed artifact (the C2 fallback reads exactly this).
+        sys.stdout.write(context)
     else:
         print(json.dumps({
             "hookSpecificOutput": {
@@ -242,15 +271,6 @@ def output_context(context: str):
         }))
 
 
-def section_status(path: Path | None, status: str, note: str = ""):
-    val = status
-    if path:
-        val += f" {path}"
-    if note:
-        val += f" {note}"
-    return val
-
-
 def build_today_roster():
     today = datetime.now(timezone.utc).astimezone()
     body = f"{today.strftime('%A, %B %d, %Y')}"
@@ -258,8 +278,7 @@ def build_today_roster():
         roster = read_text(ROSTER) or ""
         if roster.strip():
             body += "\n\n" + roster.strip()
-    body, clipped = clip_text(body, SECTION_CAPS["today_roster"])
-    manifest["today_roster"] = "included" + (" clipped" if clipped else "")
+    clipped = False
     return Section("today_roster", "Today", body, status="clipped" if clipped else "included")
 
 
@@ -273,23 +292,19 @@ def build_agent_card():
     for path in candidates:
         text = read_text(path)
         if text is not None:
-            body, clipped = clip_text(text.strip(), SECTION_CAPS["agent_card"])
+            body, clipped = text.strip(), False
             note = "card_hygiene_required" if clipped else ""
-            manifest["agent_card"] = section_status(path, "clipped" if clipped else "included", note)
             return Section("agent_card", "Agent Card", body, path, "clipped" if clipped else "included", note)
-    manifest["agent_card"] = "missing"
-    return Section("agent_card", "Agent Card", "No agent card found in project or hub fallback.", status="missing")
+    return Section("agent_card", "Agent Card", "", status="missing", readable=False)
 
 
 def build_state():
     path = K / "state.md"
     text = read_text(path)
     if text is None:
-        manifest["state"] = section_status(path, "missing")
-        return Section("state", "Project State", "state.md missing.", path, "missing")
-    body, clipped = clip_text(text.strip(), SECTION_CAPS["state"])
+        return Section("state", "Project State", "", path, "missing", readable=False)
+    body, clipped = text.strip(), False
     note = "state_hygiene_required" if clipped else ""
-    manifest["state"] = section_status(path, "clipped" if clipped else "included", note)
     return Section("state", "Project State", body, path, "clipped" if clipped else "included", note)
 
 
@@ -297,16 +312,14 @@ def build_log():
     path = K / "log.md"
     text = read_text(path)
     if text is None:
-        manifest["log"] = section_status(path, "missing")
-        return Section("log", "Recent Log", "log.md missing.", path, "missing")
+        return Section("log", "Recent Log", "", path, "missing", readable=False)
     lines = text.splitlines()
     requested_n = min(80, len(lines))
     tail = lines[-requested_n:] if requested_n else []
     if count_entries("\n".join(tail)) < 3 and len(lines) > 80:
         requested_n = min(160, len(lines))
         tail = lines[-requested_n:]
-    body, clipped = clip_text("\n".join(tail), SECTION_CAPS["log"], from_end=True)
-    manifest["log"] = f"last {requested_n} physical lines, clipped {'yes' if clipped else 'no'} {path}"
+    body, clipped = "\n".join(tail), False
     return Section("log", "Recent Log", body, path, "clipped" if clipped else "included")
 
 
@@ -334,8 +347,7 @@ def run_kb_board(backlog: Path, status: str):
 def build_active_work():
     path = K / "backlog.md"
     if not path.exists():
-        manifest["active_work"] = section_status(path, "missing")
-        return Section("active_work", "Active Work", "backlog.md missing.", path, "missing")
+        return Section("active_work", "Active Work", "", path, "missing", readable=False)
     statuses = ["Ready", "In Progress", "Blocked", "Review"]
     lines = []
     errors = []
@@ -352,25 +364,22 @@ def build_active_work():
                 extra = f" ({owner})" if owner else ""
                 lines.append(f"- {status}: {pid} — {title}{extra}")
     if errors and not lines:
-        body = f"Active work unavailable: {errors[0]}. Full board on demand: {path}"
-        body, clipped = clip_text(body, SECTION_CAPS["active_work"])
-        manifest["active_work"] = section_status(path, "missing" if "unavailable" in body else "clipped")
-        return Section("active_work", "Active Work", body, path, "missing")
+        # The board could not be read. That is `missing`, and it emits nothing:
+        # a diagnostic sentence in the body would read back as delivered content.
+        return Section("active_work", "Active Work", "", path, "missing",
+                       note=errors[0], readable=False)
     if not lines:
-        body = "No active Ready/In Progress/Blocked/Review items."
-        manifest["active_work"] = section_status(path, "empty")
-        return Section("active_work", "Active Work", body, path, "empty")
-    body, clipped = clip_text("\n".join(lines), SECTION_CAPS["active_work"])
-    manifest["active_work"] = section_status(path, "clipped" if clipped else "included")
-    return Section("active_work", "Active Work", body, path, "clipped" if clipped else "included")
+        return Section("active_work", "Active Work", "", path, "empty")
+    body = "\n".join(lines)
+    return Section("active_work", "Active Work", body, path, "present")
 
 
 def build_escalations():
     path = K / "escalations.md"
     text = read_text(path)
     if text is None:
-        manifest["open_escalations"] = section_status(path, "missing")
-        return Section("open_escalations", "Open Escalations", "escalations.md missing.", path, "missing")
+        return Section("open_escalations", "Open Escalations", "", path, "missing",
+                       readable=False)
     body = section_between(text, "Open")
     if not body:
         # Hygiene fallback: surface obvious dated "needs owner" entries outside
@@ -382,11 +391,8 @@ def build_escalations():
         if fallback:
             body = "Escalations hygiene required: dated owner-decision headings found outside ## Open.\n\n" + "\n\n".join(fallback[:3])
         else:
-            body = "No open escalations."
-            manifest["open_escalations"] = section_status(path, "empty")
-            return Section("open_escalations", "Open Escalations", body, path, "empty")
-    body, clipped = clip_text(body.strip(), SECTION_CAPS["open_escalations"])
-    manifest["open_escalations"] = section_status(path, "clipped" if clipped else "included")
+            return Section("open_escalations", "Open Escalations", "", path, "empty")
+    body, clipped = body.strip(), False
     return Section("open_escalations", "Open Escalations", body, path, "clipped" if clipped else "included")
 
 
@@ -395,35 +401,33 @@ def build_incident_sections():
     text = read_text(path)
     sections = []
     if text is None:
-        manifest["prevention_rules"] = section_status(path, "missing")
-        manifest["ongoing_incidents"] = section_status(path, "missing")
-        sections.append(Section("prevention_rules", "Prevention Rules", "incidents.md missing.", path, "missing"))
+        sections.append(Section("prevention_rules", "Prevention Rules", "", path,
+                                "missing", readable=False))
+        sections.append(Section("ongoing_incidents", "Ongoing Incidents", "", path,
+                                "missing", readable=False))
         return sections
 
     prev = section_between(text, "Prevention rules")
     if prev:
-        body, clipped = clip_text(prev.strip(), SECTION_CAPS["prevention_rules"])
-        manifest["prevention_rules"] = section_status(path, "clipped" if clipped else "included")
+        body, clipped = prev.strip(), False
         sections.append(Section("prevention_rules", "Prevention Rules", body, path, "clipped" if clipped else "included"))
     else:
-        manifest["prevention_rules"] = section_status(path, "missing")
-        sections.append(Section("prevention_rules", "Prevention Rules", "No ## Prevention rules section found.", path, "missing"))
+        # The file is readable and the section simply has nothing in it: that is
+        # `empty`, not `missing`.
+        sections.append(Section("prevention_rules", "Prevention Rules", "", path, "empty"))
 
     ongoing = section_between(text, "Ongoing") or ""
     # Remove HTML comments/templates before checking for real incident headings.
     cleaned = re.sub(r"<!--.*?-->", "", ongoing, flags=re.DOTALL).strip()
     if re.search(r"^###\s+\[", cleaned, re.MULTILINE):
-        body, clipped = clip_text(cleaned, SECTION_CAPS["ongoing_incidents"])
-        manifest["ongoing_incidents"] = section_status(path, "clipped" if clipped else "included")
+        body, clipped = cleaned, False
         sections.append(Section("ongoing_incidents", "Ongoing Incidents", body, path, "clipped" if clipped else "included"))
     else:
-        manifest["ongoing_incidents"] = section_status(path, "empty")
+        sections.append(Section("ongoing_incidents", "Ongoing Incidents", "", path, "empty"))
     return sections
 
 
 def build_optional_continuity(remaining: int):
-    if remaining < 500:
-        return []
     sections = []
     today = datetime.now(timezone.utc).astimezone()
 
@@ -432,7 +436,7 @@ def build_optional_continuity(remaining: int):
             "KB_TG_THREADS_DIR",
             str(Path.home() / "knowledge" / ".orchestrator" / "telegram-threads"),
         ))
-        if threads_dir.exists() and remaining > 500:
+        if threads_dir.exists():
             chunks = []
             used = 0
             for tf in sorted(threads_dir.glob("*.md")):
@@ -455,26 +459,190 @@ def build_optional_continuity(remaining: int):
                     lines.append(txt)
                     lines.append("")
                 chunk = "\n".join(lines).strip()
-                if used + len(chunk) > min(remaining, 1800):
-                    break
                 chunks.append(chunk)
                 used += len(chunk)
-            if chunks:
-                sections.append(Section("telegram_threads", "Telegram thread (recent exchanges across chats)", "\n\n".join(chunks)))
-                remaining -= used
+            sections.append(Section(
+                "telegram_threads", "Telegram thread (recent exchanges across chats)",
+                "\n\n".join(chunks)))
+        else:
+            sections.append(Section(
+                "telegram_threads", "Telegram thread (recent exchanges across chats)",
+                "", threads_dir, "missing", readable=False))
 
     daily_dir = K / "daily"
-    if daily_dir.exists() and remaining > 500:
-        for offset in range(2):
-            d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-            f = daily_dir / f"{d}.md"
-            if f.exists():
-                lines = (read_text(f) or "").splitlines()[-60:]
-                body, _ = clip_text("\n".join(lines), min(remaining, 1500), from_end=True)
-                sections.append(Section("recent_daily", f"Recent Daily ({d})", body, f))
-                break
+    for offset in range(2):
+        d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        f = daily_dir / f"{d}.md"
+        if f.exists():
+            # The last 60 lines are the slice definition, not a truncation, so
+            # they are the extracted source this slice is judged against.
+            tail = "\n".join((read_text(f) or "").splitlines()[-60:])
+            body, clipped = tail, False
+            sections.append(Section("recent_daily", f"Recent Daily ({d})", body, f,
+                                    "clipped" if clipped else "present",
+                                    source_text=tail))
+            break
+    else:
+        sections.append(Section("recent_daily", "Recent Daily", "", daily_dir,
+                                "missing", readable=False))
     return sections
 
+
+EXPECTED_SLICES = {
+    "normal": [
+        "today_roster", "agent_card", "state", "log", "active_work",
+        "open_escalations", "prevention_rules", "ongoing_incidents",
+        "recent_daily",
+    ],
+    "hub": [
+        "today_roster", "agent_card", "state", "log", "active_work",
+        "open_escalations", "prevention_rules", "ongoing_incidents",
+        "recent_daily", "telegram_threads",
+    ],
+}
+
+
+def slice_status(sec, emitted, clip_ran):
+    """One-hot status per the approved contract table.
+
+    Partitions on: source readable, S empty, E vs S. Exactly one row matches;
+    anything else is a defect, surfaced as 'invalid' - a word no reader should
+    ever see, so it names itself in the bundle rather than passing quietly.
+    """
+    S = sec.source_text or ""
+    E = emitted or ""
+    if not sec.readable:
+        return "missing" if not E else "invalid"
+    if not S:
+        return "empty" if not E else "invalid"
+    if E == S:
+        return "present"
+    if not E:
+        return "omitted" if clip_ran else "invalid"
+    if clip_ran and S.startswith(E):
+        return "clipped"
+    return "invalid"
+
+
+def select_sections(sections, inventory_mode):
+    """The body and the manifest are rendered from the SAME list, in the
+    inventory's order.
+
+    Complete accounting used to be a property checked afterwards: the manifest
+    walked the declared inventory while the body took whatever sections it was
+    handed, so a slice nobody declared could ride along in the body, unmentioned.
+    Now it cannot reach the body at all. Anything anomalous is named in the
+    manifest instead of being dropped silently - a slice that vanishes without a
+    word is the same defect as one that lies about its status."""
+    want = EXPECTED_SLICES[inventory_mode]
+    by_key, dupes = {}, []
+    for s in sections:
+        if s.key in by_key:
+            dupes.append(s.key)
+            continue
+        by_key[s.key] = s
+    ordered = [by_key[k] for k in want if k in by_key]
+    anomalies = {
+        "undeclared": sorted(k for k in by_key if k not in want),
+        "duplicate": sorted(set(dupes)),
+    }
+    return ordered, anomalies
+
+
+def render_manifest(sections, inventory_mode, clip_ran, index_path,
+                    over_ceiling=None, anomalies=None):
+    by_key = {s.key: s for s in sections}
+    lines = [
+        "## Startup Context Manifest",
+        "",
+        "- bundle_version: " + str(manifest["bundle_version"]),
+        "- cwd: " + str(manifest["cwd"]),
+        "- mode: " + str(manifest["mode"]),
+        # Exact wording from the contract, em dash included.
+        "- delivery: this manifest describes what the hook wrote, not what you"
+        " received \u2014 see the recovery block",
+    ]
+    for key in EXPECTED_SLICES[inventory_mode]:
+        sec = by_key.get(key)
+        if sec is None:
+            lines.append("- " + key + ": missing (not produced)")
+            continue
+        status = slice_status(sec, sec.emitted, clip_ran)
+        suffix = (" " + sec.path) if sec.path else ""
+        note = (" (" + sec.note + ")") if sec.note else ""
+        lines.append("- " + key + ": " + status + suffix + note)
+    lines.append("- index: on-demand " + str(index_path))
+    for kind in ("undeclared", "duplicate"):
+        keys = (anomalies or {}).get(kind) or []
+        if keys:
+            # Not a slice status: a defect in the hook, said out loud in the one
+            # place the reader is already looking.
+            lines.append("- " + kind + "_slices: " + ", ".join(keys))
+    if over_ceiling is not None:
+        # The recovery block, manifest and sentinel are mandatory, so a small
+        # enough ceiling cannot be met at all. Say so instead of quietly
+        # emitting an over-budget bundle.
+        lines.append(
+            "- budget: EXCEEDED - ceiling " + str(over_ceiling) + " characters is"
+            " below what the recovery block, this manifest and the sentinel need,"
+            " so this emission is larger than the ceiling")
+    return "\n".join(lines)
+
+
+def assemble(sections, body_budget):
+    """Assemble the body within body_budget and record what survived per slice.
+
+    A slice with no extracted source contributes nothing to the body. It is still
+    accounted for in the manifest, as `missing` or `empty` depending on whether
+    its source could be read - which is the contract's whole point: absence is
+    reported, not papered over with a placeholder sentence."""
+    empty_slices = [s for s in sections if not (s.source_text or "")]
+    for sec in empty_slices:
+        sec.emitted = ""
+    rendered = [(s, s.render()) for s in sections if (s.source_text or "")]
+    joiner = "\n\n---\n\n"
+    body = joiner.join(text for _, text in rendered)
+    clip_ran = False
+
+    if len(body) > body_budget:
+        clip_ran = True
+        budget = max(0, body_budget - 80)
+        kept, used = [], 0
+        for sec, text in rendered:
+            if used + len(text) <= budget:
+                kept.append((sec, text))
+                used += len(text) + len(joiner)
+            else:
+                room = max(0, budget - used)
+                if room > 200:
+                    kept.append((sec, text[:room]))
+                    used = budget
+                break
+        body = joiner.join(text for _, text in kept)
+        surviving = dict((id(sec), text) for sec, text in kept)
+    else:
+        surviving = dict((id(sec), text) for sec, text in rendered)
+
+    for sec, text in rendered:
+        got = surviving.get(id(sec), "")
+        if not got:
+            sec.emitted = ""
+            continue
+        head = "## " + sec.title + "\n\n"
+        payload = got[len(head):] if got.startswith(head) else got
+        # E is the source when the whole rendered slice survived; otherwise it is
+        # the fragment that did.
+        sec.emitted = sec.source_text if got == text else payload
+    return body, clip_ran
+
+
+STUB_BODY = os.environ.get("KB_STARTUP_STUB_BODY", "")
+if STUB_BODY:
+    # C1 stub mode: the project has no wiki yet. One hint, wrapped by the same
+    # recovery block and sentinel as everything else, and no manifest - there are
+    # no slices to account for.
+    output_context(wrap_bundle(STUB_BODY))
+    sys.exit(0)
 
 try:
     sections = [
@@ -486,40 +654,40 @@ try:
         build_escalations(),
     ]
     sections.extend(build_incident_sections())
-    manifest["index"] = f"on-demand {K / 'index.md'}"
+    sections.extend(build_optional_continuity(MAX_CONTEXT))
+    sections = [s for s in sections if s is not None]
 
-    # Build manifest after statuses are known.
-    def render_manifest():
-        order = [
-            "bundle_version", "cwd", "mode", "today_roster", "agent_card", "state",
-            "log", "active_work", "open_escalations", "prevention_rules",
-            "ongoing_incidents", "index",
-        ]
-        return "## Startup Context Manifest\n\n" + "\n".join(
-            f"- {key}: {manifest[key]}" for key in order if key in manifest
-        )
-
-    body_sections = [s.render() for s in sections]
-    context = "\n\n---\n\n".join([render_manifest(), *body_sections])
-    remaining = MAX_CONTEXT - len(context) - 20
-    if remaining > 500:
-        optional = [s.render() for s in build_optional_continuity(remaining)]
-        if optional:
-            candidate = "\n\n---\n\n".join([context, *optional])
-            if len(candidate) <= MAX_CONTEXT:
-                context = candidate
-    if len(context) > MAX_CONTEXT:
-        # Last-ditch safety: keep valid output and disclose the emergency clip.
-        context = context[: MAX_CONTEXT - 80] + f"\n\n...(emergency clipped to {MAX_CONTEXT} chars)"
-    output_context(context)
+    # Fit the WHOLE emission - recovery block, manifest, body and sentinel - under
+    # the ceiling. Reserving a guessed constant for the wrapper under-counts the
+    # manifest, so converge on the real wrapped length instead.
+    mode = "hub" if HUB_MODE else "normal"
+    ordered, anomalies = select_sections(sections, mode)
+    reserve = 1800
+    out = None
+    for _ in range(5):
+        body, clip_ran = assemble(ordered, MAX_CONTEXT - reserve)
+        man = render_manifest(ordered, mode, clip_ran, K / "index.md",
+                              anomalies=anomalies)
+        out = wrap_bundle(man + "\n\n---\n\n" + body)
+        if len(out) <= MAX_CONTEXT:
+            break
+        reserve += len(out) - MAX_CONTEXT + 200
+    if len(out) > MAX_CONTEXT:
+        man = render_manifest(ordered, mode, clip_ran, K / "index.md",
+                              over_ceiling=MAX_CONTEXT, anomalies=anomalies)
+        out = wrap_bundle(man + "\n\n---\n\n" + body)
+    output_context(out)
 except Exception as exc:
-    fallback = "\n".join([
-        "## Startup Context Manifest",
+    # C1 error mode: recovery block + plain failure statement + sentinel, no manifest.
+    failure = "\n".join([
+        "## Startup Context - assembly failed",
         "",
-        "- bundle_version: startup-context-hotfix-2026-06-21",
-        f"- cwd: {PROJECT}",
-        f"- mode: {'hub' if HUB_MODE else 'project'}",
-        f"- startup_context_error: {exc}",
+        "cwd: " + str(PROJECT),
+        "mode: " + ("hub" if HUB_MODE else "project"),
+        "error: " + str(exc),
+        "",
+        "This bundle carries no startup context. Recover per the block above, and"
+        " say so in your first answer.",
     ])
-    output_context(fallback)
+    output_context(wrap_bundle(failure))
 PY

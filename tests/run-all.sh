@@ -26,6 +26,14 @@ KB_SESSION_START="$REPO_ROOT/bin/kb-session-start" \
 KB_STARTUP_TEST_HUB="$REPO_ROOT" \
 python3 startup-context/hotfix.py > /dev/null && pass "startup-context/hotfix.py" || { fail "startup-context"; exit 1; }
 
+echo "=== Startup context delivery contract ==="
+KB_SESSION_START="$REPO_ROOT/bin/kb-session-start" \
+KB_STARTUP_TEST_HUB="$REPO_ROOT" \
+python3 startup-context/delivery-contract.py > /dev/null && pass "startup-context/delivery-contract.py" || { fail "startup-context/delivery-contract"; exit 1; }
+
+KB_SESSION_START="$REPO_ROOT/bin/kb-session-start" \
+KB_STARTUP_TEST_HUB="$REPO_ROOT" \
+
 echo
 echo "=== kb-backlog smoke ==="
 bash kb-backlog/smoke.sh > /dev/null && pass "smoke.sh (7 ops)" || { fail "smoke.sh"; exit 1; }
@@ -36,7 +44,7 @@ bash kb-backlog/claim-drift.sh > /dev/null && pass "claim-drift.sh" || { fail "c
 
 echo
 echo "=== kb-board single-source markdown contract ==="
-bash kb-board/run.sh > /dev/null && pass "kb-board/run.sh (43 contract tests)" || { fail "kb-board/run.sh"; exit 1; }
+bash kb-board/run.sh > /dev/null && pass "kb-board/run.sh (29 contract tests)" || { fail "kb-board/run.sh"; exit 1; }
 
 echo
 echo "=== kb-search board smoke ==="
@@ -124,7 +132,7 @@ bash install/agent-modes.sh > /dev/null && pass "install/agent-modes.sh (23 case
 
 echo
 echo "=== Phase 8 kb-doctor periodic checks ==="
-python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (23 fixtures)" || { fail "phase8"; exit 1; }
+python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (7 fixtures)" || { fail "phase8"; exit 1; }
 
 echo
 echo "=== Processes release (processes.yaml gating, 13 acceptance cases) ==="
