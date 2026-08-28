@@ -38,7 +38,7 @@ CLI-capable AI agents**: Claude Code, Codex, Antigravity CLI, or any future
 agent that can read files, run commands, and follow a written protocol.
 
 The agent supplies the reasoning and tool use. Vepol supplies the shared
-filesystem, markdown knowledge base, scheduler, review gates, logs,
+filesystem, markdown knowledge base, scheduler, lightweight spec review, logs,
 incidents, backlog, and handoff rules that let those agents work as one
 long-running partner instead of isolated chat sessions.
 
@@ -176,7 +176,7 @@ unit tests. The list grows release by release; see
 
 The methodology that holds these modules together (the markdown
 substrate, the orchestrator, the vendor-neutral agent interface, the
-cross-agent review gate, the MCP-first source-ingestion principle) is
+one-pass lightweight spec review, the MCP-first source-ingestion principle) is
 documented under
 [`docs/methodology/`](docs/methodology/).
 
@@ -357,13 +357,13 @@ These live in [`docs/methodology/`](docs/methodology/):
 
 ![Vepol methodology — five-step working principle](docs/visuals/vepol-methodology.png)
 
-- **[Development loop](docs/methodology/development-loop.md)** — the single process any agent follows for new work (research-first → TRIZ → spec → ≥2-agent review → tests → write-back → verify)
+- **[Development loop](docs/methodology/development-loop.md)** — the single process any agent follows for new work (research-first → TRIZ → spec → one lightweight review → owner approval → RED/E2E → verify)
 - **[Orchestrated knowledge base](docs/methodology/orchestrated-knowledge-base.md)** — root concept (Karpathy LLM Wiki + 7 extensions)
 - **[KB authoring discipline](docs/methodology/kb-authoring-discipline.md)** — 8 rules to avoid false-canonical content
 - **[KB freshness loop](docs/methodology/kb-freshness-loop.md)** — how reads stay current
 - **[TRIZ for design](docs/methodology/triz-for-design.md)** — contradiction → ideal-final-result → separation
 - **[Spec-driven workflow](docs/methodology/spec-driven-workflow.md)** — spec → tests → code → tests → revisions
-- **[Cross-agent review](docs/methodology/cross-agent-review.md)** — independent agents as a quality gate
+- **[Lightweight spec review](docs/methodology/cross-agent-review.md)** — one independent code-aware pass that returns GO or at most three questions
 - **[Parallel orchestrators](docs/methodology/parallel-orchestrators.md)** — single source of truth for many agents
 
 Read them in order if this is your first time. Skip if you just want
@@ -378,7 +378,7 @@ the tool.
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
-| [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Cross-agent review / alternate orchestrator |
+| [Codex](https://github.com/openai/codex) (macOS app or CLI) | Recommended | Lightweight spec review / alternate orchestrator |
 | [Antigravity CLI](https://google-gemini.github.io/antigravity-cli/docs/get-started/) | Recommended | Third-opinion review / quorum |
 | [NotebookLM CLI](https://github.com/teng-lin/notebooklm-py) | Recommended | On-demand research notebook / Russian audio recap |
 | Telegram bot | Optional | Brief / retro channel |

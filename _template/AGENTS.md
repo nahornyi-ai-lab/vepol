@@ -54,7 +54,7 @@ _(перечислить, какие подпапки в `knowledge/` имеют
 
 ## Owner-approved spec gate
 
-For non-trivial work, the path is mandatory: research -> owner-approved spec -> `knowledge/spec-approvals.md` with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path -> implementation. The owner can approve in chat; the active agent records the decision as scribe. Any material drift after approval returns to spec review and owner approval.
+For non-trivial work, the path is mandatory: research -> one lightweight independent spec review -> owner-approved spec -> `knowledge/spec-approvals.md` with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path -> implementation. The reviewer reads the relevant code/API and returns `GO`, at most three questions, or a proven logical `BLOCK`. A changed hash alone never triggers another review. The owner can approve in chat; the active agent records the decision as scribe. Material scope drift after approval returns to one lightweight review and owner approval.
 
 ## Cross-orchestrator CLI launch
 

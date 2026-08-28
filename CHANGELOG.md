@@ -14,6 +14,15 @@ upgrading.
 
 ## [Unreleased]
 
+### Changed
+- **Specification review is now one lightweight, code-aware pass.** One
+  independent reviewer reads the spec and relevant code/API, then returns
+  `GO`, at most three questions, or a proven logical `BLOCK`. Repeated
+  exact-hash review, Layer 1/Layer 2 passes, mandatory implementation review,
+  and automatic Codex stop-time review have been removed. RED/E2E tests, owner
+  approval, live smoke, evidence, and `kb-doctor` remain mandatory.
+- `new-wiki` no longer enables the Codex stop-review gate in new projects.
+
 ## [0.8.1] — 2026-08-14
 
 ### Fixed

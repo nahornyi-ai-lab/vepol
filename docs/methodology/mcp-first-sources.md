@@ -107,7 +107,7 @@ networking) is permitted only when:
      either retire the exception (move to MCP) or renew with fresh
      justification.
 2. **Listed in the registry** at the bottom of this page.
-3. **Code-reviewed** through the standard cross-agent review gate
+3. **Code-checked** through the standard one-pass lightweight spec review
    (a configured independent reviewer; Codex is the v0.1 default).
 
 If those three conditions are met, the direct adapter is acceptable
@@ -385,7 +385,7 @@ justification doc at
 
 - [Orchestrated Knowledge Base](orchestrated-knowledge-base.md) — the
   substrate philosophy
-- [Cross-Agent Review](cross-agent-review.md) — the review gate that
+- [Lightweight Spec Review](cross-agent-review.md) — the one-pass review that
   exceptions go through
 - [`docs/modules/people.md`](../modules/people.md) — first user of
   this pattern (calendar source)

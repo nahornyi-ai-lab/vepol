@@ -74,7 +74,7 @@ The core product story in one image: how Vepol's autonomy increases day by
 day, week by week. Day 1 (assisted drafting), Week 2 (intelligent filter),
 Month 2 (trusted proxy), Month 6 (autonomous partner — half of operational
 routine runs on its own). Plus the Governance Layer (audit trail +
-cross-agent review gate) and Health & Goal Alignment as a brake on overload.
+one-pass lightweight spec review) and Health & Goal Alignment as a brake on overload.
 
 ![Vepol autonomy growth](vepol-autonomy-growth.png)
 

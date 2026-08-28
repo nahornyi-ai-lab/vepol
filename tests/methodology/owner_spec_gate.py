@@ -70,12 +70,12 @@ def test_development_loop_gate() -> None:
         rel,
         "development-loop documents owner approval gate",
         [
-            "owner-approved specification gate",
+            "Lightweight spec review",
             "knowledge/spec-approvals.md",
             "spec-contract",
-            "post-approval build plan",
-            "mandatory E2E path",
-            "RED tests including E2E",
+            "Build plan",
+            "mandatory E2E",
+            "RED tests",
         ],
     )
     require_order(
@@ -83,10 +83,10 @@ def test_development_loop_gate() -> None:
         "development-loop preserves gate order",
         [
             "**3. Specification.",
-            "**4. Cross-agent review",
+            "**4. Lightweight spec review",
             "**4.5. Owner approval.",
             "**4.6. Build plan.",
-            "**5. Tests -> implementation.",
+            "**5. Tests → implementation.",
         ],
     )
 
@@ -109,17 +109,16 @@ def test_spec_driven_workflow_contract() -> None:
     )
 
 
-def test_cross_agent_review_checks_e2e() -> None:
+def test_lightweight_review_contract() -> None:
     require_all(
         "docs/methodology/cross-agent-review.md",
-        "cross-agent review checks E2E and owner handoff",
+        "lightweight review stays narrow and anti-loop",
         [
-            "mandatory E2E path",
-            "owner approval",
-            "knowledge/spec-approvals.md",
-            "contract hash",
-            "approve-with-nits",
-            "Changes requested",
+            "exactly one pass",
+            "QUESTIONS (maximum 3)",
+            "file:line",
+            "A changed spec hash alone never invalidates the review",
+            "New findings are not accepted during the delta check",
         ],
     )
 
@@ -171,7 +170,7 @@ def test_agent_entrypoints_expose_compact_rule() -> None:
 def main() -> int:
     test_development_loop_gate()
     test_spec_driven_workflow_contract()
-    test_cross_agent_review_checks_e2e()
+    test_lightweight_review_contract()
     test_idea_intake_material_path()
     test_agent_entrypoints_expose_compact_rule()
     print(f"\nowner-spec gate methodology tests: {PASS} passed, {FAIL} failed")
