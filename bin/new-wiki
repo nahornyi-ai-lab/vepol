@@ -109,25 +109,11 @@ else
   echo "  ✓ symlink: $LINK → $PROJECT_PATH/knowledge"
 fi
 
-# 4. Включить Codex review gate для этого проекта (требование: везде, где есть knowledge/).
-# Резолвим companion через glob — версия плагина меняется при upgrade, хардкодить нельзя.
-CODEX_COMPANION=$(ls -1 "$HOME/.claude/plugins/cache/openai-codex/codex/"*/scripts/codex-companion.mjs 2>/dev/null | sort -V | tail -1)
-if [[ -n "$CODEX_COMPANION" && -f "$CODEX_COMPANION" ]]; then
-  if (cd "$PROJECT_PATH" && node "$CODEX_COMPANION" setup --enable-review-gate --json > /tmp/codex-gate-$$.json 2>&1); then
-    echo "  ✓ codex review gate enabled (via $CODEX_COMPANION)"
-  else
-    echo "  ⚠ codex review gate: failed to enable (see /tmp/codex-gate-$$.json) — включи вручную из папки проекта"
-  fi
-  rm -f /tmp/codex-gate-$$.json
-else
-  echo "  ⚠ codex companion не найден в ~/.claude/plugins/cache/openai-codex/codex/*/scripts/ — review gate не включён"
-fi
-
-# 5. Запись в лог хаба
+# 4. Запись в лог хаба
 {
   echo ""
   echo "## [$DATE] hub | $SLUG | Вика заведена через new-wiki ($CATEGORY)"
-  echo "Путь: \`$PROJECT_PATH\`. Симлинк: \`projects/$SLUG → $PROJECT_PATH/knowledge\`. Codex review gate включён."
+  echo "Путь: \`$PROJECT_PATH\`. Симлинк: \`projects/$SLUG → $PROJECT_PATH/knowledge\`."
 } >> "$HUB/log.md"
 
 echo ""

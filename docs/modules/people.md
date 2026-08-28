@@ -38,7 +38,7 @@ A few terms used below:
 - **Knowledge base / wiki** — a folder of plain markdown files (the
   *Karpathy-style LLM wiki* pattern) that Vepol uses as its single
   source of truth. Humans edit it; agents read and propose changes
-  through review gates.
+  through the normal acceptance checks.
 - **Orchestrator** — Vepol's coordination layer. It runs scheduled
   jobs (brief, retro, plan dispatch), spawns task agents in the right
   working directory, and manages a write-ahead audit trail for every

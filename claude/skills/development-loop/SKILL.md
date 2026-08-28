@@ -1,95 +1,75 @@
 ---
 name: development-loop
-description: Use when starting any new development — a feature, a non-trivial or hard-to-undo change, infrastructure, or anything touching security/licensing/public artifacts. Runs Vepol's development loop (v2 quality gates). Skip only for trivial single-file/doc fixes (leave a one-line `research | skipped | trivial` note and still verify) — but security/auth, installers, hooks, board logic, migrations and public-contract docs are NEVER trivial.
+description: Use when starting any new development — a feature, non-trivial or hard-to-undo change, infrastructure, security/licensing work, installers/hooks, migrations, or public-contract docs. Runs Vepol's research -> spec -> one lightweight review -> owner approval -> RED/E2E -> implementation -> verification loop. Skip only truly trivial work.
 ---
 
 # Vepol Development Loop
 
-Thin adapter. The canonical, vendor-neutral process lives in
-`docs/methodology/development-loop.md` (in the Vepol repo / `~/vepol/`) with
-review mechanics in `docs/methodology/cross-agent-review.md`, mirrored compactly
-in `AGENTS.md`. Read the canonical doc for full rationale; this skill is the
-actionable trigger for Claude Code. Codex and Antigravity (`agy`) follow the
-same loop from `AGENTS.md` natively.
+Thin Claude Code adapter. The vendor-neutral canon lives in
+`docs/methodology/development-loop.md`, with the exact reviewer prompt in
+`docs/methodology/cross-agent-review.md`, and a compact copy in `AGENTS.md`.
 
-## Do this, in order
+## Run in this order
 
-0. **Scope + Definition of Done.** Classify and write what "done" means
-   (acceptance criteria + how you'll verify). Trivial → skip phases 1 & 4, note
-   `research | skipped | trivial` in `log.md`, still verify. **Never trivial:**
-   security/auth, licensing, migrations/data deletion, install scripts, hooks,
-   task-board/scheduler logic, user-facing behavior, public docs affecting
-   install/usage/contract/claims/methodology.
+0. **Scope + Definition of Done.** Record acceptance criteria and verification.
+   Trivial work skips research/review but still logs and verifies. Never trivial:
+   security/auth, licensing, migrations/data deletion, installers/hooks,
+   task-board/scheduler logic, user-facing behavior, and public docs affecting
+   install/usage/contracts/claims/methodology.
 
-1. **Research-first (reuse-or-build).** Find what exists to reuse/copy/adapt
-   (KB, other projects, the wild). Record: `candidates / decision:
-   reuse|adapt|build / why`. Don't build what exists.
+1. **Research-first.** Find what can be reused or adapted. Record
+   `candidates / decision: reuse|adapt|build / why`.
 
-2. **Design.** Full TRIZ (contradiction → IFR → separation) only for material
-   decisions or a real trade-off conflict; otherwise "2–3 alternatives + why
-   this one." Don't manufacture contradictions.
+2. **Design.** Use TRIZ only for a real material trade-off; otherwise compare two
+   or three alternatives and choose the smallest suitable one.
 
-3. **Spec** before code into `knowledge/decisions/`, with product context,
-   Place in Vepol, Software 3.0 fit, acceptance criteria, failure modes, test
-   plan, and mandatory E2E path. Reviews and owner approval bind to the
-   `spec-contract` hash.
+3. **Spec before code.** Write `knowledge/decisions/<spec>.md` with scope,
+   acceptance, failure modes, mandatory E2E, and the concrete code/API/schema
+   files the design relies on. Compute `spec-contract` for owner approval.
 
-4. **Spec review — ≥2 independent reviewers (material decisions), before the
-   human.** Reviewers exclude the author. Structured verdict required
-   (`approve | approve-with-nits | block` + mandatory fields per
-   `cross-agent-review.md`); incomplete reviews don't count. A `block` freezes
-   until re-review — no text rebuttals of blockers; security blocks only the
-   human lifts. **Final-version rule:** only verdicts on the exact final hash
-   count; material edits invalidate prior approvals. Reviewer unavailable →
-   `[Single-Agent Fallback]`; blocker unreachable for re-review after ≥2 logged
-   attempts → `[Blocker-Re-Review-Unavailable]`. Never silently proceed.
+4. **One lightweight spec review.** Use exactly one independent reviewer,
+   exactly one pass, before owner approval. The reviewer must read the spec and
+   relevant real code/API. Output is `GO`, maximum three short questions, or
+   `BLOCK` only when a concrete `file:line` or contract citation proves the
+   stated path impossible. Pull toward the simplest working path. Do not expand
+   security hardening, observability, scaling, rollback, future scenarios,
+   style, docs, or tests unless explicitly in scope.
 
-4.5. **Owner approval.** After non-blocking spec review, list the spec in
-   `knowledge/spec-approvals.md`. The owner approves the exact
-   `spec-contract` hash in chat; the active agent records the decision as
-   scribe. No RED tests or implementation before this approval.
+   After `GO` or author answers, review is complete.
+   A changed hash alone never triggers another review. A genuine `BLOCK` permits one delta check of that
+   same blocker (`RESOLVED / STILL BLOCKED`) with no new findings. Reviewer
+   unavailable -> log it and let the owner decide; do not start a replacement
+   cascade.
 
-4.6. **Build plan.** After owner approval, write the HOW layer before coding:
-   ordered steps, file/artifact list, concrete RED tests, mandatory E2E path,
-   and verification commands. If planning changes scope, acceptance, risk,
-   public/security/privacy behavior, migration, or E2E path, return to spec
-   review and owner approval.
+4.5. **Owner approval.** Record the exact approved hash in
+   `knowledge/spec-approvals.md`. No RED tests or implementation before it.
 
-5. **Tests → implementation.** Red first, including E2E/process smoke coverage,
-   green, revisions. Empty/failed output = real failure.
+4.6. **Build plan.** List ordered steps, files, concrete RED tests, mandatory
+   E2E, and verification commands. Material scope drift returns to one
+   lightweight review and owner approval.
 
-5.5. **Implementation review — the diff, not just the spec.** Non-trivial work
-   that produced code/tests/configs: send the diff to ≥1 independent reviewer
-   (≥2 for material), never the author. Handoff: approved spec + hash, diff
-   ref, tests, acceptance criteria, "what I'm unsure about". Checklist lives in
-   `cross-agent-review.md`; verdict binds to `spec:<algo>:<hash> diff:<ref>`.
+5. **Tests -> implementation.** Preserve RED evidence, implement to green, and
+   run the mandatory E2E/process smoke. Empty output is failure.
 
-6. **KB write-back to files, not memory.** Durable pages created before
-   phase 7 carry `status: draft`, flipped to `stable` at close (append-only
-   traces like `log.md` are exempt).
+6. **KB write-back.** Store durable decisions and outcomes in files. Keep
+   long-lived pages `status: draft` until verified close.
 
-7. **Verify + close.** Acceptance matrix: criterion → evidence → verifier →
-   verdict. Material work: verifier = one of the 5.5 reviewers (not the
-   author), re-running key checks. Runtime-touching work needs a real-runtime
-   smoke (clean install, fired hook, dry-run migration). Then `kb-doctor`
-   (no fresh P0/P1) and `kb-board close ... --claim-id`. Evidence before the
-   success claim — always.
+7. **Verify + close.** The author builds the acceptance matrix with reproducible
+   evidence, runs a real smoke for runtime behavior, runs `kb-doctor`, and
+   closes the board claim. There is no mandatory implementation/diff reviewer.
 
-8. **Showcase.** Shipped material user-visible work → NotebookLM video recap
-   ("what/why/how to apply") for socials (TikTok, YouTube). Deliverable =
-   notebook/artifact ID, no local downloads, the human posts. Internal
-   plumbing → `showcase | skipped | internal` in `log.md`.
+8. **Showcase.** User-visible material work gets the configured NotebookLM recap;
+   internal plumbing logs `showcase | skipped | internal`.
 
-## When something shipped breaks
+## When shipped work breaks
 
-Incident entry must include `loop-phase-failed: <0…8|5.5>`, why the gates
-missed it, and a prevention rule. Same phase fails twice → revise the loop.
+Record `loop-phase-failed: <0…8>`, why the spec/lightweight
+review/tests/verification missed it, and the new prevention rule.
 
-## Don't
-- Don't move a task to `In Progress` without a spec (material work: a reviewed one).
-- Don't count a review without the mandatory verdict fields, and don't ship on
-  verdicts from a stale spec/diff version.
-- Don't treat gates as ceremony for tiny tactical choices inside an approved
-  spec — and don't label never-trivial work as trivial.
-- Don't put runtime-specific tricks here — they belong in `solutions/` or an
-  `agent-card.md` `## Operating notes`.
+## Do not
+
+- Do not use multiple reviewers, Layer 1/Layer 2 passes, or repeated full review.
+- Do not restart review for wording or hash churn.
+- Do not turn reviewer questions into new requirements.
+- Do not reintroduce an automatic stop-time review gate.
+- Do not weaken owner approval, RED/E2E, live smoke, evidence, or KB write-back.

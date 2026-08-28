@@ -56,11 +56,11 @@ are `Backlog`, `Ready`, `In Progress`, `Blocked`, `Review`, `Done`,
 and `Cancelled`; `Review` is the verification state.
 
 The owner-approved spec gate is mandatory for non-trivial work. The
-path is: research -> owner-approved spec -> `knowledge/spec-approvals.md`
+path is: research -> one lightweight independent spec review -> owner-approved spec -> `knowledge/spec-approvals.md`
 with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path
 -> implementation. Owner approval can be given in chat; the
-agent records it as scribe. Material drift after approval returns to
-spec review and owner approval.
+agent records it as scribe. A changed hash alone does not restart review;
+material scenario drift after approval returns to one lightweight review and owner approval.
 
 The architecture (which you will install): user's `~/knowledge/`
 holds all knowledge as markdown files; this repo's `bin/` provides
@@ -447,22 +447,23 @@ P1 findings get addressed by the user (with your support); P2
 findings are advisory. Don't auto-resolve P1 content changes
 without user review (per the [freshness-loop methodology](docs/methodology/kb-freshness-loop.md)).
 
-### 3.5 Run cross-agent review on significant work
+### 3.5 Run one lightweight spec review on significant work
 
 For non-trivial plans (architectural changes, migrations, new
-infrastructure) — invoke
+infrastructure), run
 [`cross-agent-review`](docs/methodology/cross-agent-review.md):
 
-- Ask one independent configured agent to review your plan. In the
-  default stack this means Claude Code ↔ Codex; in a richer stack it
-  can include Gemini CLI or another reviewer.
-- If a three-agent quorum is configured, collect votes from the
-  configured reviewers and treat safety/security/data-loss blockers
-  as vetoes even when a simple majority approves.
-- Apply the redlines that survive the user's judgment
+- Ask one lightweight independent spec review agent to read the spec and the
+  concrete code/API/schema files it relies on.
+- Accept `GO` or at most three short questions. `BLOCK` requires a direct
+  `file:line` or contract citation proving that the stated path cannot work.
+- Prefer the smallest working path. Questions do not create new requirements.
+- Do not restart review merely because the spec hash changed. Only a genuine
+  `BLOCK` permits one narrow delta check of that same blocker, with no new
+  findings.
 
-This is not optional ceremony. It's the gate that catches the
-single-agent bias profile from compounding.
+The goal is to catch gross logic mistakes before code without turning review
+into a second design process.
 
 ## Troubleshooting common issues
 
@@ -549,8 +550,8 @@ of consumer tier.
   shallow inspection of known project containers (see Phase 2.1).
 - **Do not write to `~/knowledge/` without telling the user
   what you're writing.** Audit trail matters.
-- **Do not skip the cross-agent review gate** for non-trivial
-  changes. Even when the change "obviously" works.
+- **Do not skip the one lightweight spec review** for non-trivial changes, and
+  do not expand it into multiple reviewers or repeated full passes.
 - **Do not produce false-canonical content** during init. Apply
   [`kb-authoring-discipline`](docs/methodology/kb-authoring-discipline.md)
   rigorously.

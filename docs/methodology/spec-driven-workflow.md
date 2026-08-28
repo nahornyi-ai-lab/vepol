@@ -75,7 +75,7 @@ must contain:
   that, why, residual risk, and the exact manual E2E or process-smoke
   substitute.
 - **Owner approval fields.** Non-trivial development specs enter
-  `knowledge/spec-approvals.md` after cross-agent review. Approval is
+  `knowledge/spec-approvals.md` after one lightweight independent spec review. Approval is
   tied to the exact `spec-contract` hash. The owner can approve,
   request `Changes requested`, reject, or supersede in chat; the active
   agent records the decision as scribe.
@@ -90,7 +90,7 @@ more.
 
 ### 1.5 Owner approval and build plan
 
-After cross-agent review is non-blocking, the owner-approved spec gate
+After the one-pass lightweight spec review, the owner-approved spec gate
 must pass before coding starts. Approval is valid only for the exact
 `spec-contract` hash recorded in `knowledge/spec-approvals.md`.
 
@@ -99,7 +99,7 @@ ordered steps, file/artifact list, concrete RED tests, mandatory E2E
 path, and verification commands. The build plan is HOW; the approved
 spec owns WHAT and DONE. If the build plan changes scope, acceptance,
 risk, public behavior, security/privacy, data migration, or the E2E
-path, return to spec review and owner approval.
+  path, return to one lightweight spec review and owner approval.
 
 ### 2. Tests before code (RED)
 
@@ -178,9 +178,9 @@ automatically for any non-trivial work:
 - They write the spec first when prompted to make a non-trivial
   change
 - They write the tests before the implementation
-- For changes that cross the [cross-agent review](cross-agent-review.md)
-  threshold, the spec is also reviewed by an independent agent
-  before any code is written
+- Every non-trivial spec gets exactly one
+  [lightweight independent review](cross-agent-review.md) against the relevant
+  code/API before any code is written
 - The spec gets versioned in your knowledge base so the next
   session — yours or another agent's — picks up the same context
 
@@ -213,9 +213,9 @@ next actor can audit how the change came together.
 - **At the spec phase**, apply [TRIZ](triz-for-design.md):
   formulate the contradiction explicitly, sketch the IFR, look for
   resolution through separation
-- **For non-trivial specs**, run [cross-agent
-  review](cross-agent-review.md) at the spec stage and again at
-  significant revision points
+- **For non-trivial specs**, run one
+  [lightweight spec review](cross-agent-review.md) at the spec stage. Do not
+  repeat it for wording/hash churn; only a changed scenario returns to one pass.
 - **In the knowledge base**, store the spec as a markdown file so
   future agents and humans can audit the chain: spec → tests →
   code → revisions

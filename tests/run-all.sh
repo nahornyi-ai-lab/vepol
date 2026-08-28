@@ -114,6 +114,9 @@ echo
 echo "=== Owner-approved spec gate methodology contract ==="
 python3 methodology/owner_spec_gate.py > /dev/null && pass "methodology/owner_spec_gate.py" || { fail "owner-spec-gate"; exit 1; }
 
+echo "=== Lightweight one-pass spec review contract ==="
+python3 methodology/lightweight_review_policy.py > /dev/null && pass "methodology/lightweight_review_policy.py" || { fail "lightweight-review-policy"; exit 1; }
+
 echo
 echo "=== Evolution Loop v0-minimal fixtures ==="
 python3 evolution/fixtures.py > /dev/null && pass "evolution/fixtures.py" || { fail "evolution"; exit 1; }
