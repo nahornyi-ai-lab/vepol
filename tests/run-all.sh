@@ -138,6 +138,10 @@ echo "=== Phase 8 kb-doctor periodic checks ==="
 python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (7 fixtures)" || { fail "phase8"; exit 1; }
 
 echo
+echo "=== Runtime capability registry (7 runtimes, tri-state availability, hermetic probes) ==="
+python3 runtime-registry/fixtures.py > /dev/null && pass "runtime-registry/fixtures.py (T1-T14)" || { fail "runtime-registry"; exit 1; }
+
+echo
 echo "=== Processes release (processes.yaml gating, 13 acceptance cases) ==="
 bash processes/run.sh > /dev/null && pass "processes/run.sh (76 assertions)" || { fail "processes/run.sh"; exit 1; }
 

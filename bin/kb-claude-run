@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""CLI entrypoint for the durable unbounded Claude runner."""
+
+from _kb_claude_runner import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
