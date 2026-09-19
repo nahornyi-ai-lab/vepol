@@ -20,7 +20,7 @@ for slug in ("alpha", "beta", "gamma", "delta"):
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
 port = sock.getsockname()[1]
-app = create_app(hub=hub, config=Config(port=port), store_dir=fixture_root / "state")
+app = create_app(hub=hub, config=Config(port=port, desktop=True), store_dir=fixture_root / "state")
 print(json.dumps({"port": port, "token": app.state.auth.token}), flush=True)
 uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, access_log=False,
                              log_level="error")).run(sockets=[sock])

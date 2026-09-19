@@ -53,6 +53,9 @@ class Conversation:
     runs: list[Run] = field(default_factory=list)
     board_stage: str = "queued"
     board_updated_at: str | None = None
+    transport: str = "oneshot"
+    provider_session_id: str | None = None
+    transport_note: str = ""
 
 
 class RunStore:
@@ -84,10 +87,10 @@ class RunStore:
             return current
 
     # -------------------------------------------------------------- write
-    def create_conversation(self, target: str, runtime: str, title: str = "") -> Conversation:
+    def create_conversation(self, target: str, runtime: str, title: str = "", transport: str = "oneshot") -> Conversation:
         conv = Conversation(
             id=uuid.uuid4().hex[:12], target=target, runtime=runtime,
-            seq=self._next_seq(), title=title,
+            seq=self._next_seq(), title=title, transport=transport,
         )
         self._save(conv)
         return conv
@@ -151,6 +154,21 @@ class RunStore:
                     return run
             raise KeyError(run_id)
 
+    def update_transport(self, conv_id: str, *, transport: str | None = None,
+                         provider_session_id: str | None = None, note: str | None = None) -> Conversation:
+        with self._lock:
+            conv = self.get_conversation(conv_id)
+            if conv is None:
+                raise KeyError(conv_id)
+            if transport is not None:
+                conv.transport = transport
+            if provider_session_id is not None:
+                conv.provider_session_id = provider_session_id
+            if note is not None:
+                conv.transport_note = note
+            self._save(conv)
+            return conv
+
     def _save(self, conv: Conversation) -> None:
         path = self._path(conv.id)
         tmp = path.with_suffix(".tmp")
@@ -175,6 +193,9 @@ class RunStore:
             runs=[Run(**r) for r in blob.get("runs", [])],
             board_stage=blob.get("board_stage", "queued"),
             board_updated_at=blob.get("board_updated_at"),
+            transport=blob.get("transport", "oneshot"),
+            provider_session_id=blob.get("provider_session_id"),
+            transport_note=blob.get("transport_note", ""),
         )
 
     def get_run(self, conv_id: str, run_id: str) -> Run | None:

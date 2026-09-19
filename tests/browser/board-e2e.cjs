@@ -59,6 +59,7 @@ async function waitUntil(fn, label, timeout = 10000) {
 
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
+    await context.addInitScript(token => { window.__VEPOL_TOKEN__ = token; }, boot.token);
     let page = await context.newPage();
     const observe = p => {
       p.on('pageerror', e => evidence.pageErrors.push(e.message));
@@ -66,11 +67,15 @@ async function waitUntil(fn, label, timeout = 10000) {
       p.on('request', r => { const pathname = new URL(r.url()).pathname; if (r.method() === 'POST' && /\/(messages|retry|stop)$/.test(pathname)) evidence.runtimeCalls.push(pathname); });
     };
     observe(page);
-    await page.goto(`${base}/?token=${encodeURIComponent(boot.token)}`);
+    await page.goto(base);
     await page.locator('#board-view').waitFor({ state: 'visible' });
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 60, '60 visible cards');
     await page.screenshot({ path: path.join(OUT, 'desktop.png'), fullPage: true });
     evidence.steps.push('Initial board renders 60 real API-backed cards at 1440x1000');
+    await page.reload();
+    await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 60, 'injected authentication survives reload');
+    assert.equal(new URL(page.url()).search, '');
+    evidence.steps.push('Desktop document-start token injection survives reload at a bare URL');
 
     const dragId = records[0].id;
     const dragPatch = page.waitForResponse(r => r.request().method() === 'PATCH' && new URL(r.url()).pathname === `/api/conversations/${dragId}/board`);
@@ -146,7 +151,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     await page.close();
     page = await context.newPage();
     observe(page);
-    await page.goto(`${base}/?token=${encodeURIComponent(boot.token)}`);
+    await page.goto(base);
     await page.locator('#board-view').waitFor({ state: 'visible' });
     await column(page, 'research').locator(`[data-conversation-id="${dragId}"]`).waitFor();
     await column(page, 'completed').locator(`[data-conversation-id="${selectId}"]`).waitFor();

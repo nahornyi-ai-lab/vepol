@@ -1,97 +1,60 @@
-# Vepol Face
+# Vepol Desktop
 
-One screen for talking to Vepol, instead of jumping between Claude, Codex,
-Antigravity, Grok, Telegram and terminal windows.
+A native macOS window for Vepol conversations. The session board keeps manual
+work stages separate from the agent's current activity. Search, project
+filters, stage selection and drag/drop help return to the original conversation.
 
-Local-first: the backend binds `127.0.0.1` only, mints a fresh token in memory
-on every launch, and never persists it.
+## Build and open
 
-## Run it
+The local development build uses the installed Command Line Tools directly:
 
-```bash
-./run.sh
+```sh
+./desktop/build.sh
+open desktop/build/VepolDesktop.app
 ```
 
-It prints one URL with the token embedded and opens your browser. Stop with
-Ctrl-C.
+The bundle points to this checkout and its `.venv/bin/python`; keep both in
+place. It is a local development bundle, not a standalone distribution.
+The backend binds `127.0.0.1:8781` and refuses an existing listener before
+opening the conversation store at `~/.vepol/face/`.
 
-Options:
+The native shell passes its in-memory token through an inherited pipe and
+injects it at document start into a nonpersistent WKWebView. The page uses a
+bare URL; reload does not discard authentication. Cmd-W closes the window
+while preserving work. Reopen from the Dock or Cmd-0. Cmd-Q checks for active
+work and, when idle, closes the owned protocol clients and backend naturally.
 
-```bash
-./run.sh --no-open           # don't open a browser
-./run.sh --port 8790         # different port
-./run.sh --hub ~/knowledge   # different hub
-```
+## Sessions
 
-The launcher refuses to start if the port is taken (it names the process that
-holds it) and refuses any non-loopback bind outright.
+- **Persistent session** is the app default: Claude stream-json or Codex
+  app-server. Consecutive turns reuse the process and provider conversation.
+  Tool activity, streamed text and requests for human input appear in the app.
+  Permission decisions use the runtime's existing policy and explicit UI
+  answers; Vepol does not grant persistent permission rules.
+- **Terminal** uses the canonical tmux session for a project/runtime pair.
+  Open its displayed attach command, complete CLI startup/login/trust, then
+  click the readiness button to send the retained first prompt. Completion is
+  marked by the human, never inferred from terminal output or silence. Closing
+  Vepol leaves that terminal session alive.
+- Existing cards and history are preserved. An old card without a verified
+  provider identity cannot silently become a new session. Failed exact resume
+  is shown as unavailable continuation.
 
-## What the screen shows
+A structured session currently has no same-process terminal takeover. The UI
+states this explicitly; the complete Desktop v2.1 S5 criterion remains open.
+A live session also does not fire SessionEnd after each turn. Use the visible
+save-to-wiki action to request a checkpoint from that same agent.
 
-- **Target** — the hub orchestrator plus every project registered in
-  `~/knowledge/projects/`, with a filter box.
-- **Runtime** — each CLI with a live status dot. A runtime is green only after
-  a **successful observation**. An expired cooldown is not availability; an
-  unobserved runtime shows `unknown`, not `available`.
-- **Conversation** — multi-turn, continued through the broker's stable resume
-  key `vepol-face:<conversation>:<target>:<runtime>`.
-- **Run** — live status, and the failure reason when there is one.
-- **KB write-back** — the files the run actually changed in that target's
-  `knowledge/`, or a plain statement that nothing durable changed.
-- **Interactive** — the canonical `tmux attach` command for full takeover.
+## Legacy browser entry
 
-## The rule that shapes the whole thing
+`./run.sh` keeps the earlier browser/one-shot entry for existing automation.
+It uses tokenized launch URLs and has the historical browser reload/history
+limitations. Use the native entry for the session board experience above.
 
-**A runtime failure is never shown as an answer.** Exit code 0 with empty
-output is a failure. An unclassified error is a failure. A quota-dead runtime
-is visibly dead. This is the one behaviour that separates a trustworthy agent
-surface from one that quietly hands you silence.
+## Verification
 
-## Nested-session containment
-
-A live agent session exports `CLAUDECODE`, ~20 `CLAUDE_CODE_*` variables and
-`ANTHROPIC_BASE_URL`. Any child process inherits them and then behaves as a
-nested session — verified 2026-08-15: an inherited `claude -p` hung
-indefinitely, while the same call with those variables stripped returned in
-seconds.
-
-`vepol_face.broker.clean_env()` strips them from every runtime Vepol Face
-spawns, so it works whether you launch it from your own terminal or from
-inside an agent session.
-
-## Layout
-
-```
-vepol_face/
-  config.py     bind policy — loopback or refuse
-  auth.py       per-launch in-memory token, default-deny origins
-  targets.py    target discovery from the hub's projects/ symlinks
-  runtimes.py   capability read-model over the broker's own state
-  broker.py     kb-orchestrator-run adapter + the "0 is not an answer" rule
-  sessions.py   canonical tmux names, file-backed prompt paste
-  runs.py       conversation/run persistence under ~/.vepol/face/
-  evidence/     KB write-back diffing
-  app.py        FastAPI + WebSocket
-  server.py     launcher
-  static/       the whole UI, one file, no build step
-```
-
-## Tests
-
-```bash
-.venv/bin/python -m pytest tests/ -q
-```
-
-Every test names the spec acceptance criterion it enforces. Written before the
-implementation.
-
-## Spec
-
-`../knowledge/decisions/vepol-face-macos-app-2026-06-24.md`
-(contract `sha256:3c09461b…`).
-
-**Known deviation:** the spec pins TypeScript/React/Vite for the frontend. This
-build ships a single dependency-free HTML file instead, because Node on this
-machine is v17 and modern Vite needs 18+. The backend boundary, the event
-shape and every acceptance criterion are unchanged; only the rendering vehicle
-differs. Flagged for the spec review.
+Reuse the critical board-persistence journey and the complete browser board
+journey; native acceptance additionally exercises the actual `.app`, live
+Claude/Codex conversations, input requests, reload, manual stage persistence
+and shutdown. Acceptance evidence and the approved build plan are in the
+sibling development wiki `../knowledge/`.

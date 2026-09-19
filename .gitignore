@@ -1,3 +1,7 @@
 .server.log
 .venv/
 __pycache__/
+
+desktop/build/
+artifacts/
+.pytest_cache/

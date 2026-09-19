@@ -10,10 +10,10 @@ import secrets
 
 
 class Auth:
-    def __init__(self, port: int = 8781) -> None:
+    def __init__(self, port: int = 8781, token: str | None = None) -> None:
         self.port = int(port)
         # 32 bytes -> 43-char urlsafe string. Memory only: nothing writes it out.
-        self._token = secrets.token_urlsafe(32)
+        self._token = token or secrets.token_urlsafe(32)
 
     @property
     def token(self) -> str:

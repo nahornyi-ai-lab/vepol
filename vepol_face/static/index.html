@@ -217,7 +217,7 @@
     <div class="board-footnote">Этап выбираешь ты. «Агент ответил» показывает окончание ответа, а не завершение задачи.</div>
   </section>
   <div class="col left">
-    <h1>Vepol Face</h1>
+    <h1 id="product-name">Vepol Face</h1>
     <div class="sub" id="bind">local · loopback</div>
 
     <h2>Target</h2>
@@ -226,6 +226,9 @@
 
     <h2>Runtime</h2>
     <div id="runtimes"></div>
+    <div id="native-mode" hidden><h2>Новая сессия</h2>
+      <select id="transport-select" class="filter" aria-label="Режим новой сессии"><option value="session">Постоянная сессия</option><option value="terminal">Терминал · tmux</option></select>
+    </div>
 
     <h2>Conversations</h2>
     <button class="ghost" style="width:100%;margin-bottom:8px" id="newconv">New conversation</button>
@@ -233,15 +236,20 @@
   </div>
 
   <div class="col center">
-    <div class="conversation-heading"><button class="ghost" id="show-board">← Сессии</button><span id="conversation-title"></span></div>
+    <div class="conversation-heading"><button class="ghost" id="show-board">← Сессии</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span></div>
     <div class="thread" id="thread">
       <div class="empty">Pick a target and say something.</div>
     </div>
     <div class="composer">
+      <div id="session-note" class="banner warn" hidden></div>
+      <div id="permissions" style="max-height:36vh;overflow:auto"></div>
+      <pre id="terminal-output" hidden style="white-space:pre-wrap;max-height:30vh;overflow:auto;font-size:12px"></pre>
       <textarea id="prompt" placeholder="Ask Vepol…  (⌘↵ to send)"></textarea>
       <div class="row">
         <button id="send">Send</button>
         <button id="stop" class="ghost" style="display:none">Stop</button>
+        <button id="terminal-ready" class="ghost" hidden>Терминал готов — отправить</button>
+        <button id="terminal-complete" class="ghost" hidden>Работа в терминале закончена</button>
         <span class="hint" id="routing"></span>
       </div>
     </div>
@@ -253,6 +261,10 @@
 
     <h2>KB write-back</h2>
     <div id="evidence" class="card">No run yet.</div>
+    <button id="checkpoint" class="ghost" hidden>Сохранить итог в вики</button>
+    <p class="hint" id="checkpoint-note" hidden>В постоянной сессии итог сохраняется по твоей команде.</p>
+    <h2>Ход работы</h2>
+    <div id="steps" class="card" style="max-height:28vh;overflow:auto;white-space:pre-wrap"></div>
 
     <h2>Interactive</h2>
     <div id="attach" class="card">—</div>
@@ -263,20 +275,21 @@
 (() => {
   "use strict";
 
-  // Token arrives once in the URL and is immediately stripped from history.
+  // Desktop injects on every document load; browser launch stays compatible.
   const url = new URL(window.location.href);
-  const TOKEN = url.searchParams.get("token") || "";
+  const TOKEN = window.__VEPOL_TOKEN__ || url.searchParams.get("token") || "";
   if (url.searchParams.has("token")) {
     url.searchParams.delete("token");
     window.history.replaceState({}, "", url.pathname);
   }
 
   const $ = (id) => document.getElementById(id);
-  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board" };
+  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board", transport: "oneshot", desktop: false, continuation: true };
   const STAGES = [["queued", "Очередь", "#9299a6"], ["research", "Исследование", "#9985d8"],
     ["working", "Работа", "#d5a445"], ["review", "Проверка", "#668ddd"], ["completed", "Завершено", "#62a883"]];
   const ACTIVITY = { idle: "Нет запуска", running: "Агент работает", done: "Агент ответил",
-    failed: "Ошибка", degraded: "Нет полноценного ответа", interrupted: "Запуск прерван", stopped: "Остановлен" };
+    failed: "Ошибка", degraded: "Нет полноценного ответа", interrupted: "Запуск прерван", stopped: "Остановлен", waiting: "Ждёт твоего решения", submitted: "Завершение отмечено тобой" };
+  const MODES = {session: "Постоянная сессия", terminal: "Терминал · tmux", oneshot: "Разовый запуск"};
   let conversations = [];
   let draggingId = null;
   let boardPending = false;
@@ -421,7 +434,8 @@
           const dateText = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString("ru", {day: "numeric", month: "short"}) : "";
           return `<article class="session-card" draggable="true" data-conversation-id="${esc(c.id)}">
             <button class="session-open" data-open-conversation="${esc(c.id)}">${esc(c.title || "Новая сессия")}</button>
-            <div class="session-meta">${esc(c.target)} · ${esc(c.runtime)}</div>
+            <div class="session-meta">${esc(c.target)} · ${esc(c.runtime)} · ${esc(MODES[c.transport] || c.transport || "")}</div>
+            ${c.continuation_available === false ? '<div class="hint">История сохранена · продолжение недоступно</div>' : ''}
             <p class="session-preview">${esc(c.preview || "В этой сессии ещё нет сообщений.")}</p>
             <span class="session-activity ${esc(activity)}">${esc(ACTIVITY[activity] || activity)}</span>
             <div class="session-footer"><time datetime="${esc(c.last_activity_at || "")}" title="${esc(date && !Number.isNaN(date.getTime()) ? date.toLocaleString("ru") : "")}">${esc(dateText)}</time>
@@ -543,7 +557,7 @@
   function renderRun(run) {
     if (!run) { $("runstate").textContent = "idle"; return; }
     if (run.status === "running") {
-      $("runstate").innerHTML = `<span class="spinner"></span>running · one-shot`;
+      $("runstate").innerHTML = `<span class="spinner"></span>Работает · ${esc(MODES[state.transport])}`;
       return;
     }
     const cls = run.status === "done" ? "" : (run.status === "failed" ? "bad" : "warn");
@@ -559,6 +573,77 @@
       ${retryable ? `<button id="retrybtn" class="ghost" style="margin-top:8px">Retry last prompt</button>` : ""}`;
     const rb = document.getElementById("retrybtn");
     if (rb) rb.onclick = retryRun;
+  }
+
+  function renderSession(conv) {
+    state.transport = conv.transport || "oneshot";
+    state.continuation = conv.continuation_available !== false;
+    $("transport-label").textContent = MODES[state.transport] || state.transport;
+    const note = !state.continuation ? "Исходная сессия агента не найдена. История сохранена; продолжение недоступно." : conv.transport_note;
+    $("session-note").hidden = !note;
+    $("session-note").textContent = note || "";
+    $("steps").textContent = (conv.steps || []).filter(e => e.type === "progress").map(e => e.text).join("\n");
+    $("checkpoint").hidden = state.transport !== "session";
+    $("checkpoint-note").hidden = state.transport !== "session";
+    $("checkpoint").disabled = state.running || !state.continuation;
+    $("terminal-complete").hidden = state.transport !== "terminal" || !state.running;
+    const last = conv.runs[conv.runs.length - 1];
+    $("terminal-ready").hidden = state.transport !== "terminal" || conv.terminal_ready || state.running || !last;
+    $("terminal-output").hidden = state.transport !== "terminal";
+    renderPermissions(conv.pending || []);
+    $("send").disabled = state.running || !state.continuation;
+  }
+
+  function renderPermissions(pending) {
+    $("permissions").innerHTML = "";
+    pending.forEach(request => {
+      const box = document.createElement("section"); box.className = "card";
+      const heading = document.createElement("strong"); heading.textContent = request.kind === "questions" ? "Агент ждёт ответа" : (request.title || "Агент ждёт твоего решения"); box.appendChild(heading);
+      heading.style.cssText = "display:block;margin-bottom:8px";
+      const details = document.createElement("pre");
+      details.style.cssText = "white-space:pre-wrap;max-height:160px;overflow:auto;font-size:12px";
+      details.textContent = typeof request.details === "string" ? request.details : JSON.stringify(request.details || {}, null, 2);
+      if (request.kind !== "questions") box.appendChild(details);
+      const answers = [];
+      (request.questions || []).forEach((q, i) => {
+        const label = document.createElement("label");
+        const question = q.question || q.text || q.header || String(i);
+        label.textContent = question;
+        const field = document.createElement("input"); field.className = "filter"; field.placeholder = "Твой ответ";
+        label.appendChild(field); box.appendChild(label);
+        if (q.options && q.options.length) {
+          const choices = document.createElement("div");
+          q.options.forEach(o => {
+            const b = document.createElement("button"); b.className = "ghost";
+            b.textContent = typeof o === "string" ? o : o.label; b.title = o.description || "";
+            b.onclick = () => { field.value = b.textContent; }; choices.appendChild(b);
+          }); box.appendChild(choices);
+        }
+        answers.push([question, field]);
+      });
+      const reply = async decision => {
+        if (!state.conv) return;
+        const id = state.conv;
+        box.querySelectorAll("button").forEach(b => b.disabled = true);
+        try {
+          await api(`/api/conversations/${id}/permissions/${encodeURIComponent(request.id)}`, {method: "POST", body: JSON.stringify({decision, answers: Object.fromEntries(answers.map(([q, f]) => [q, f.value]))})});
+          if (state.conv === id) renderPermissions((await api(`/api/conversations/${id}`)).pending || []);
+        } catch (err) { box.querySelectorAll("button").forEach(b => b.disabled = false); showDegraded({reason: err.message}); }
+      };
+      [["allow", answers.length ? "Ответить" : "Разрешить"], ["deny", "Отклонить"]].forEach(([decision, label]) => {
+        const button = document.createElement("button"); button.textContent = label;
+        button.className = decision === "deny" ? "ghost" : ""; button.onclick = () => reply(decision); box.appendChild(button);
+      });
+      $("permissions").appendChild(box);
+    });
+  }
+
+  function applyConversation(conv) {
+    const last = conv.runs[conv.runs.length - 1];
+    state.running = !!(last && last.status === "running"); state.runId = state.running ? last.id : null;
+    renderSession(conv); renderThread(conv); renderRun(last); renderEvidence(last && last.evidence);
+    $("stop").style.display = state.running ? "" : "none"; $("stop").disabled = false;
+    $("conversation-title").textContent = `${conv.title || "Новая сессия"} · ${conv.target} · ${conv.runtime}`;
   }
 
   async function retryRun() {
@@ -604,6 +689,9 @@
     renderRuntimes(runtimes);
     renderConvs(convs);
     const h = await api("/api/health");
+    state.desktop = !!h.desktop;
+    $("native-mode").hidden = !state.desktop;
+    if (state.desktop) { $("product-name").textContent = "Vepol"; document.title = "Vepol"; }
     $("bind").textContent = `local · ${h.host}:${h.port}`;
   }
 
@@ -613,21 +701,14 @@
     if (version !== openVersion) return;
     state.conv = id;
     showChat();
-    $("conversation-title").textContent = `${conv.title || "Новая сессия"} · ${conv.target} · ${conv.runtime}`;
     state.target = conv.target;
     state.runtime = conv.runtime;
-    renderThread(conv);
-    const last = conv.runs[conv.runs.length - 1];
-    renderRun(last);
-    renderEvidence(last && last.evidence);
-    state.running = !!(last && last.status === "running");
-    state.runId = state.running ? last.id : null;
-    $("stop").style.display = state.running ? "" : "none";
-    $("stop").disabled = false;
-    $("send").disabled = state.running;
+    applyConversation(conv);
     try {
       const at = await api(`/api/conversations/${id}/attach`);
-      if (version === openVersion) $("attach").innerHTML = `<div class="k">attach command</div><code>${esc(at.command)}</code>`;
+      if (version === openVersion) $("attach").innerHTML = at.available === false
+        ? `<span class="hint">${esc(at.reason)}</span>`
+        : `<div class="k">Открыть тот же терминал</div><code>${esc(at.command)}</code>`;
     } catch (_) { if (version === openVersion) $("attach").textContent = "—"; }
     if (version !== openVersion) return;
     connectWs(id);
@@ -652,9 +733,24 @@
         state.running = true; $("send").disabled = true;
         state.runId = ev.run_id;
         $("stop").style.display = ""; $("stop").disabled = false;
+        $("checkpoint").disabled = true;
+        $("terminal-complete").hidden = state.transport !== "terminal";
         renderRun({ status: "running" });
       } else if (ev.type === "progress") {
         $("runstate").innerHTML = `<span class="spinner"></span>${esc(ev.text)}`;
+        $("steps").textContent = ($("steps").textContent + "\n" + ev.text).split("\n").slice(-100).join("\n");
+        $("steps").scrollTop = $("steps").scrollHeight;
+      } else if (ev.type === "text_delta") {
+        let live = $("thread").querySelector(".streaming");
+        if (!live) { live = document.createElement("div"); live.className = "msg assistant streaming"; $("thread").appendChild(live); }
+        live.textContent += ev.text || "";
+        $("thread").scrollTop = $("thread").scrollHeight;
+      } else if (["permission", "permission_resolved"].includes(ev.type)) {
+        const conv = await api(`/api/conversations/${id}`);
+        if (state.ws === ws && state.conv === id) renderPermissions(conv.pending || []);
+      } else if (ev.type === "reattach") {
+        const conv = await api(`/api/conversations/${id}`);
+        if (state.ws === ws && state.conv === id) applyConversation(conv);
       } else if (ev.type === "run_finished") {
         state.running = false; $("send").disabled = false;
         state.runId = null; $("stop").style.display = "none";
@@ -662,10 +758,13 @@
         renderEvidence(ev.evidence);
         const conv = await api(`/api/conversations/${id}`);
         if (state.ws !== ws || state.conv !== id) return;
-        renderThread(conv);
+        applyConversation(conv);
         if (!ev.ok) showDegraded(ev);
         await refreshSidebars();
       }
+    };
+    ws.onclose = () => {
+      if (state.ws === ws && state.conv === id) setTimeout(() => { if (state.ws === ws && state.conv === id) connectWs(id); }, 1500);
     };
   }
 
@@ -680,11 +779,11 @@
 
   async function send() {
     const text = $("prompt").value.trim();
-    if (!text || state.running) return;
+    if (!text || state.running || !state.continuation) return;
     if (!state.conv) {
       const conv = await api("/api/conversations", {
         method: "POST",
-        body: JSON.stringify({ target: state.target, runtime: state.runtime }),
+        body: JSON.stringify({ target: state.target, runtime: state.runtime, transport: state.desktop ? $("transport-select").value : "oneshot" }),
       });
       state.conv = conv.id;
       connectWs(conv.id);
@@ -695,7 +794,7 @@
         method: "POST", body: JSON.stringify({ text }),
       });
       const conv = await api(`/api/conversations/${state.conv}`);
-      renderThread(conv);
+      applyConversation(conv);
     } catch (err) {
       showDegraded({ reason: String(err.message || err) });
     }
@@ -714,13 +813,34 @@
   $("tfilter").addEventListener("input", paintTargets);
   $("send").onclick = send;
   $("stop").onclick = stopRun;
+  $("checkpoint").onclick = () => {
+    if (state.running || !state.continuation) return;
+    $("prompt").value = "Сохрани итог нашей текущей работы в knowledge/ этого проекта по его AGENTS.md: результат, решения и следующие действия. Сообщи, какие файлы обновлены.";
+    send();
+  };
+  $("terminal-complete").onclick = async () => {
+    try { await api(`/api/conversations/${state.conv}/terminal/complete`, {method: "POST"}); }
+    catch (err) { showDegraded({reason: err.message}); }
+  };
+  $("terminal-ready").onclick = async () => {
+    try {
+      await api(`/api/conversations/${state.conv}/terminal/ready`, {method: "POST"});
+      await retryRun();
+    } catch (err) { showDegraded({reason: err.message}); }
+  };
+  setInterval(async () => {
+    if (state.view !== "chat" || state.transport !== "terminal" || !state.conv) return;
+    const id = state.conv;
+    try { const output = await api(`/api/conversations/${id}/terminal`); if (state.conv === id) $("terminal-output").textContent = output.text; }
+    catch (_) {}
+  }, 1500);
   $("prompt").addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
   });
   $("newconv").onclick = async () => {
     try {
       const conv = await api("/api/conversations", {
-        method: "POST", body: JSON.stringify({ target: state.target, runtime: state.runtime }),
+        method: "POST", body: JSON.stringify({ target: state.target, runtime: state.runtime, transport: state.desktop ? $("transport-select").value : "oneshot" }),
       });
       await openConv(conv.id);
     } catch (err) {
@@ -732,9 +852,9 @@
   refreshAll().catch((e) => {
     document.body.innerHTML =
       `<div style="padding:40px;font-family:var(--sans)">
-         <h1>Vepol Face could not start</h1>
+         <h1>Не удалось открыть Vepol</h1>
          <p style="color:var(--ink-dim)">${esc(e.message || e)}</p>
-         <p style="color:var(--ink-dim)">Open the URL printed by <code>run.sh</code>, token included.</p>
+         <p style="color:var(--ink-dim)">${window.__VEPOL_TOKEN__ ? "Перезапусти приложение Vepol." : "Открой ссылку из запуска run.sh."}</p>
        </div>`;
   });
 })();

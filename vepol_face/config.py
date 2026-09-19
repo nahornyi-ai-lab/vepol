@@ -34,6 +34,7 @@ class Config:
     port: int = 8781
     max_body_bytes: int = 64 * 1024
     allowed_runtimes: tuple[str, ...] = field(default=("claude", "codex"))
+    desktop: bool = False
 
     def __post_init__(self) -> None:
         self.host = _normalise_host(self.host)

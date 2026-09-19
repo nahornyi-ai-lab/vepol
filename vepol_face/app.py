@@ -24,6 +24,7 @@ from .config import Config
 from .evidence import diff_kb
 from .runs import Conversation, RunStore
 from .sessions import attach_command, session_name
+from .session_manager import SessionManager
 
 STATIC = pathlib.Path(__file__).parent / "static"
 
@@ -93,6 +94,7 @@ def create_app(
     hub: pathlib.Path | None = None,
     config: Config | None = None,
     store_dir: pathlib.Path | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     cfg = config or Config()
     hub_path = pathlib.Path(hub or targets_mod.HUB)
@@ -106,19 +108,36 @@ def create_app(
     async def lifespan(running: FastAPI):
         running.state.bus.loop = asyncio.get_running_loop()
         yield
+        running.state.sessions.close()
 
     app = FastAPI(
         title="Vepol Face", docs_url=None, redoc_url=None, openapi_url=None,
         lifespan=lifespan,
     )
     app.state.config = cfg
-    app.state.auth = Auth(port=cfg.port)
+    app.state.auth = Auth(port=cfg.port, token=auth_token)
     app.state.hub = hub_path
     app.state.store = RunStore(state_dir)
     # A backend that died mid-turn would otherwise leave the conversation
     # permanently 409-locked. Close those runs out at startup.
     app.state.interrupted = app.state.store.reconcile_interrupted()
     app.state.bus = EventBus()
+    app.state.sessions = SessionManager(app.state.store, app.state.bus, hub_path, cfg.desktop)
+
+    def summary(conv):
+        row = _conversation_summary(conv)
+        details = app.state.sessions.describe(conv)
+        row.update(transport=details["transport"], needs_owner=bool(details["pending"]),
+                   continuation_available=details["continuation_available"])
+        if details["pending"]:
+            row["activity"] = "waiting"
+        return row
+
+    def desktop_status():
+        convs = app.state.store.list_conversations()
+        pending = [f"{c.id}:{p['id']}" for c in convs for p in app.state.sessions.describe(c)["pending"]]
+        return {"busy": app.state.sessions.busy() or any(r.status == "running" for c in convs for r in c.runs),
+                "pending": len(pending), "pending_ids": pending}
 
     # ---------------------------------------------------------- middleware
     @app.middleware("http")
@@ -156,6 +175,7 @@ def create_app(
             "port": cfg.port,
             "hub": str(hub_path),
             "state_dir": str(state_dir),
+            "desktop": cfg.desktop,
         }
 
     @app.get("/api/targets", dependencies=auth_dep)
@@ -170,7 +190,7 @@ def create_app(
     @app.get("/api/conversations", dependencies=auth_dep)
     def api_conversations() -> list[dict]:
         return [
-            _conversation_summary(c)
+            summary(c)
             for c in app.state.store.list_conversations()
         ]
 
@@ -179,13 +199,20 @@ def create_app(
         body = await _json_body(request, cfg.max_body_bytes)
         target = str(body.get("target") or "hub")
         runtime = str(body.get("runtime") or "claude")
+        mode = str(body.get("transport") or ("session" if cfg.desktop else "oneshot"))
+        if mode not in ({"session", "terminal"} if cfg.desktop else {"oneshot", "session", "terminal"}):
+            raise HTTPException(status_code=400, detail="unknown transport")
         if runtime not in cfg.allowed_runtimes:
             raise HTTPException(
                 status_code=400,
                 detail=f"unknown runtime {runtime!r}; allowed: {list(cfg.allowed_runtimes)}",
             )
-        conv = app.state.store.create_conversation(target=target, runtime=runtime)
-        return {"id": conv.id, "target": conv.target, "runtime": conv.runtime}
+        if mode == "terminal":
+            for existing in app.state.store.list_conversations():
+                if existing.target == target and existing.runtime == runtime and existing.transport == "terminal":
+                    return {"id": existing.id, "target": target, "runtime": runtime, "transport": mode}
+        conv = app.state.store.create_conversation(target=target, runtime=runtime, transport=mode)
+        return {"id": conv.id, "target": conv.target, "runtime": conv.runtime, "transport": mode}
 
     @app.get("/api/conversations/{conv_id}", dependencies=auth_dep)
     def api_conversation(conv_id: str) -> dict:
@@ -196,6 +223,7 @@ def create_app(
             "id": conv.id, "target": conv.target, "runtime": conv.runtime,
             "title": conv.title,
             "board_stage": conv.board_stage, "board_updated_at": conv.board_updated_at,
+            **app.state.sessions.describe(conv),
             "messages": [
                 {"role": m.role, "text": m.text, "at": m.at, "meta": m.meta}
                 for m in conv.messages
@@ -219,7 +247,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="no such conversation") from exc
-        return _conversation_summary(conv)
+        return summary(conv)
 
     @app.post("/api/conversations/{conv_id}/messages", dependencies=auth_dep, status_code=202)
     async def api_send(conv_id: str, request: Request) -> dict:
@@ -233,22 +261,28 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such conversation")
         if any(r.status == "running" for r in conv.runs):
             raise HTTPException(status_code=409, detail="a run is already in flight")
+        if not app.state.sessions.continuation_available(conv):
+            raise HTTPException(status_code=409, detail="Исходная сессия агента не найдена. История сохранена; продолжение недоступно.")
 
         target = _resolve_target(hub_path, conv.target)
+        if cfg.desktop and conv.transport == "oneshot" and not conv.messages and not conv.runs:
+            conv = app.state.store.update_transport(conv_id, transport="session")
         app.state.store.append_message(conv_id, role="user", text=prompt)
         run = app.state.store.start_run(conv_id, run_id=broker_mod.new_run_id())
         # Stop intent must be registrable before the worker thread gets around
         # to launching the subprocess (the pre-run KB snapshot takes seconds).
-        broker_mod.begin_face_run(run.id)
+        mode = app.state.sessions.mode(conv)
+        if mode == "oneshot":
+            broker_mod.begin_face_run(run.id)
 
         app.state.bus.publish(conv_id, {
             "type": "run_started", "run_id": run.id,
             "target": conv.target, "runtime": conv.runtime,
-            "mode": "one-shot",
+            "mode": mode,
         })
 
         threading.Thread(
-            target=_execute_run,
+            target=_execute_run if mode == "oneshot" else _execute_session,
             args=(app, conv_id, run.id, prompt, conv.target, conv.runtime, target),
             daemon=True,
         ).start()
@@ -269,7 +303,16 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such run")
         if run.status != "running":
             raise HTTPException(status_code=409, detail=f"run is {run.status}, not running")
-        hit = broker_mod.stop_face_run(run_id)
+        if app.state.sessions.mode(conv) == "oneshot":
+            hit = broker_mod.stop_face_run(run_id)
+        else:
+            client = app.state.sessions.clients.get(conv_id)
+            hit = bool(client)
+            if client:
+                client.interrupt()
+            if conv.transport == "terminal":
+                app.state.store.finish_run(conv_id, run_id, "stopped", reason="Остановлено владельцем")
+                app.state.bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "stopped", "ok": False, "reason": "Остановлено владельцем"})
         return {"run_id": run_id, "stopping": hit}
 
     @app.post("/api/conversations/{conv_id}/retry", dependencies=auth_dep, status_code=202)
@@ -283,17 +326,21 @@ def create_app(
         last_user = next((m for m in reversed(conv.messages) if m.role == "user"), None)
         if last_user is None:
             raise HTTPException(status_code=400, detail="nothing to retry")
+        if not app.state.sessions.continuation_available(conv):
+            raise HTTPException(status_code=409, detail="Исходная сессия недоступна; повтор не создаёт новый разговор.")
 
         target = _resolve_target(hub_path, conv.target)
         run = app.state.store.start_run(conv_id, run_id=broker_mod.new_run_id())
-        broker_mod.begin_face_run(run.id)
+        mode = app.state.sessions.mode(conv)
+        if mode == "oneshot":
+            broker_mod.begin_face_run(run.id)
         app.state.bus.publish(conv_id, {
             "type": "run_started", "run_id": run.id,
             "target": conv.target, "runtime": conv.runtime,
-            "mode": "retry",
+            "mode": mode,
         })
         threading.Thread(
-            target=_execute_run,
+            target=_execute_run if mode == "oneshot" else _execute_session,
             args=(app, conv_id, run.id, last_user.text, conv.target, conv.runtime, target),
             daemon=True,
         ).start()
@@ -310,12 +357,73 @@ def create_app(
                 detail=f"conversation runtime {conv.runtime!r} has no interactive session form",
             )
         runtime = conv.runtime
+        if app.state.sessions.mode(conv) == "session":
+            return {"available": False, "mode": "session", "command": "",
+                    "reason": "Сессия работает в приложении. Перехват того же процесса в терминале пока недоступен."}
         slug = "".join(ch for ch in conv.target.lower() if ch.isalnum() or ch in "-_") or "hub"
         try:
             name = session_name(slug, runtime)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"session": name, "command": attach_command(name), "mode": "interactive"}
+        return {"available": True, "session": name, "command": attach_command(name), "mode": "terminal"}
+
+    @app.get("/api/desktop/status", dependencies=auth_dep)
+    def api_desktop_status():
+        return desktop_status()
+
+    @app.post("/api/desktop/shutdown", dependencies=auth_dep, status_code=202)
+    def api_shutdown():
+        status = desktop_status()
+        if status["busy"] or status["pending"]:
+            raise HTTPException(status_code=409, detail="В сессиях ещё идёт работа. Vepol останется запущенным.")
+        shutdown = getattr(app.state, "shutdown", None)
+        if shutdown is None:
+            raise HTTPException(status_code=409, detail="This backend is not owned by Vepol Desktop")
+        shutdown()
+        return {"stopping": True}
+
+    @app.post("/api/conversations/{conv_id}/permissions/{request_id}", dependencies=auth_dep)
+    async def api_permission(conv_id: str, request_id: str, request: Request):
+        body = await _json_body(request, cfg.max_body_bytes)
+        if body.get("decision") not in {"allow", "deny"}:
+            raise HTTPException(status_code=400, detail="explicit decision required")
+        try:
+            app.state.sessions.respond(conv_id, request_id, body)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"answered": True}
+
+    @app.get("/api/conversations/{conv_id}/terminal", dependencies=auth_dep)
+    def api_terminal(conv_id: str):
+        conv = app.state.store.get_conversation(conv_id)
+        if conv is None or conv.transport != "terminal":
+            raise HTTPException(status_code=404, detail="No terminal session")
+        client = app.state.sessions.clients.get(conv_id)
+        return {"text": client.capture() if client else "Отправь сообщение, чтобы открыть терминал.",
+                "command": attach_command(session_name(conv.target, conv.runtime))}
+
+    @app.post("/api/conversations/{conv_id}/terminal/ready", dependencies=auth_dep)
+    def api_terminal_ready(conv_id: str):
+        conv = app.state.store.get_conversation(conv_id)
+        if conv is None or conv.transport != "terminal":
+            raise HTTPException(status_code=404, detail="No terminal session")
+        client = app.state.sessions.clients.get(conv_id)
+        if client is None:
+            raise HTTPException(status_code=409, detail="Сначала открой терминальную сессию")
+        client.confirm_ready()
+        app.state.store.update_transport(conv_id, note="")
+        return {"ready": True}
+
+    @app.post("/api/conversations/{conv_id}/terminal/complete", dependencies=auth_dep)
+    def api_terminal_complete(conv_id: str):
+        conv = app.state.store.get_conversation(conv_id)
+        if conv is None or conv.transport != "terminal":
+            raise HTTPException(status_code=404, detail="No terminal session")
+        for run in conv.runs:
+            if run.status == "running":
+                app.state.store.finish_run(conv_id, run.id, "submitted", reason="Владелец отметил окончание работы в терминале")
+                app.state.bus.publish(conv_id, {"type": "run_finished", "run_id": run.id, "status": "submitted", "ok": True})
+        return {"confirmed": True}
 
     @app.websocket("/ws/{conv_id}")
     async def ws(websocket: WebSocket, conv_id: str) -> None:
@@ -330,6 +438,8 @@ def create_app(
 
         await websocket.accept()
         q = app.state.bus.subscribe(conv_id)
+        receiving = asyncio.create_task(websocket.receive())
+        event_task = asyncio.create_task(q.get())
         try:
             conv = app.state.store.get_conversation(conv_id)
             if conv is not None:
@@ -339,11 +449,20 @@ def create_app(
                     "messages": len(conv.messages),
                 })
             while True:
-                event = await q.get()
-                await websocket.send_json(event)
-        except WebSocketDisconnect:
+                done, _ = await asyncio.wait({receiving, event_task}, return_when=asyncio.FIRST_COMPLETED)
+                if receiving in done:
+                    if receiving.result()["type"] == "websocket.disconnect":
+                        break
+                    receiving = asyncio.create_task(websocket.receive())
+                if event_task in done:
+                    await websocket.send_json(event_task.result())
+                    event_task = asyncio.create_task(q.get())
+        except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
+            receiving.cancel()
+            event_task.cancel()
+            await asyncio.gather(receiving, event_task, return_exceptions=True)
             app.state.bus.unsubscribe(conv_id, q)
 
     @app.get("/")
@@ -422,3 +541,33 @@ def _execute_run(app, conv_id, run_id, prompt, target_slug, runtime, target) -> 
             "type": "run_finished", "run_id": run_id, "status": "failed",
             "ok": False, "degraded": True, "reason": f"backend error: {exc}",
         })
+
+
+def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target):
+    store, bus = app.state.store, app.state.bus
+    try:
+        conv = store.get_conversation(conv_id)
+        client = app.state.sessions.client(conv, target)
+        before = diff_kb.snapshot(pathlib.Path(target.knowledge))
+        result = client.execute(prompt)
+        if result.get("still_running"):
+            store.update_transport(conv_id, note=result.get("reason") or "Протокол прерван, но процесс ещё работает")
+            bus.publish(conv_id, {"type": "progress", "run_id": run_id, "text": result.get("reason") or "Процесс ещё работает; автоматическое завершение недоступно."})
+            result = client.wait_for_completion()
+        if result.get("submitted"):
+            bus.publish(conv_id, {"type": "progress", "run_id": run_id,
+                                 "text": "Сообщение отправлено в терминал. Окончание работы отмечаешь ты."})
+            return
+        evidence = diff_kb.compare(before, diff_kb.snapshot(pathlib.Path(target.knowledge))).as_dict()
+        status = "done" if result.get("ok") else ("stopped" if result.get("category") == "stopped" else "degraded")
+        store.finish_run(conv_id, run_id, status, text=result.get("text", ""),
+                         reason=result.get("reason", ""), category=result.get("category"),
+                         evidence={**evidence, "pid": result.get("pid"), "provider_session_id": result.get("session_id"), "lane": app.state.sessions.mode(conv)})
+        if not result.get("ok"):
+            store.update_transport(conv_id, note=result.get("reason") or "Session transport failed")
+        bus.publish(conv_id, {**result, "type": "run_finished", "run_id": run_id, "status": status, "evidence": evidence})
+    except Exception as exc:
+        reason = f"Сессия недоступна: {exc}"
+        store.finish_run(conv_id, run_id, "degraded", reason=reason)
+        store.update_transport(conv_id, note=reason)
+        bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "degraded", "ok": False, "reason": reason})
