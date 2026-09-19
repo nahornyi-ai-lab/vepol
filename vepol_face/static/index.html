@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vepol Face</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #fbfbfd;
+    --ink: #16181d;
+    --ink-dim: #5c6270;
+    --line: #e3e6ec;
+    --accent: #3b5bdb;
+    --ok: #2f9e44;
+    --warn: #e8590c;
+    --bad: #c92a2a;
+    --unknown: #868e96;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1b1e24; --panel-2: #21252c;
+      --ink: #e8eaee; --ink-dim: #99a0ad; --line: #2c313a;
+      --accent: #748ffc; --ok: #51cf66; --warn: #ff922b; --bad: #ff6b6b; --unknown: #909296;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: var(--sans); background: var(--bg); color: var(--ink);
+    height: 100vh; overflow: hidden; font-size: 14px;
+  }
+  .app { display: grid; grid-template-columns: 260px 1fr 300px; height: 100vh; }
+  .col { overflow-y: auto; padding: 16px; }
+  .left {
+    border-right: 1px solid var(--line); background: var(--panel-2);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .scroller { overflow-y: auto; min-height: 0; }
+  #targets { max-height: 190px; }
+  #convs { flex: 1; }
+  .filter {
+    width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); color: var(--ink); font-size: 12px; margin-bottom: 6px;
+    font-family: var(--sans);
+  }
+  .filter:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .right { border-left: 1px solid var(--line); background: var(--panel-2); }
+  .center { display: flex; flex-direction: column; padding: 0; background: var(--panel); }
+
+  h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { font-size: 11px; color: var(--ink-dim); margin-bottom: 18px; }
+  h2 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--ink-dim); margin: 20px 0 8px; font-weight: 600;
+  }
+  h2:first-of-type { margin-top: 0; }
+
+  .item {
+    padding: 7px 9px; border-radius: 7px; cursor: pointer; margin-bottom: 2px;
+    border: 1px solid transparent; line-height: 1.35;
+  }
+  .item:hover { background: var(--panel); }
+  .item.active { background: var(--panel); border-color: var(--line); font-weight: 600; }
+  .item .meta { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+
+  .rt { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px; }
+  .rt.pick { cursor: pointer; border: 1px solid transparent; }
+  .rt.pick:hover { background: var(--panel); }
+  .rt.pick.active { background: var(--panel); border-color: var(--accent); }
+  .rt.off { opacity: 0.55; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+  .dot.available { background: var(--ok); }
+  .dot.blocked { background: var(--bad); }
+  .dot.unknown { background: var(--unknown); }
+  .dot.missing { background: var(--line); border: 1px solid var(--unknown); }
+  .rt .name { flex: 1; }
+  .rt .why { font-size: 10px; color: var(--ink-dim); }
+
+  .thread { flex: 1; overflow-y: auto; padding: 22px 26px; }
+  .msg { margin-bottom: 20px; max-width: 780px; }
+  .msg .who {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-dim); margin-bottom: 5px; font-weight: 600;
+  }
+  .msg .body { white-space: pre-wrap; line-height: 1.6; word-wrap: break-word; }
+  .msg.user .body {
+    background: var(--panel-2); padding: 10px 13px; border-radius: 9px;
+    border: 1px solid var(--line); display: inline-block;
+  }
+  .msg.degraded .body {
+    border-left: 3px solid var(--warn); padding-left: 11px; color: var(--ink-dim);
+  }
+
+  .composer { border-top: 1px solid var(--line); padding: 14px 26px 18px; }
+  textarea {
+    width: 100%; min-height: 74px; resize: vertical; padding: 11px 13px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2);
+    color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 9px; align-items: center; margin-top: 9px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; padding: 8px 17px;
+    border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: var(--sans);
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--ink-dim); border: 1px solid var(--line);
+    font-weight: 500;
+  }
+  .hint { font-size: 11px; color: var(--ink-dim); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+    padding: 11px 12px; margin-bottom: 10px; font-size: 12px; line-height: 1.5;
+  }
+  .card .k {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-dim); margin-bottom: 4px; font-weight: 600;
+  }
+  code, .mono { font-family: var(--mono); font-size: 11px; }
+  .files { margin: 5px 0 0; padding-left: 15px; }
+  .files li { margin-bottom: 2px; }
+  .banner {
+    padding: 9px 11px; border-radius: 7px; font-size: 12px; margin-bottom: 10px;
+    border: 1px solid var(--line); line-height: 1.45;
+  }
+  .banner.warn { border-color: var(--warn); color: var(--warn); }
+  .banner.bad { border-color: var(--bad); color: var(--bad); }
+  .spinner {
+    display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite;
+    vertical-align: -1px; margin-right: 5px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .app.board-mode { display: block; }
+  .app.board-mode > .left, .app.board-mode > .center, .app.board-mode > .right { display: none; }
+  #board-view { height: 100%; display: flex; flex-direction: column; padding: 28px 30px 18px; }
+  .board-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .board-heading h1 { font-size: 25px; letter-spacing: -.04em; }
+  .board-description { margin: 7px 0 0; color: var(--ink-dim); line-height: 1.5; font-size: 13px; }
+  .board-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 23px 0 17px; }
+  .board-toolbar .filter { font-size: 13px; padding: 10px 12px; margin: 0; height: 40px; }
+  #board-search { width: 300px; flex: 0 1 300px; }
+  #board-project-filter { width: 210px; }
+  #board-count { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
+  #board-columns { display: flex; gap: 14px; overflow-x: auto; flex: 1; min-height: 0; padding: 2px 2px 12px; }
+  .board-column { flex: 1 0 240px; min-width: 240px; display: flex; flex-direction: column; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line); }
+  .board-column > header { display: flex; align-items: center; gap: 9px; padding: 15px 13px; }
+  .board-column h2 { margin: 0; font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+  .stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--stage-color); }
+  .stage-count { color: var(--ink-dim); font-size: 11px; margin-left: auto; background: var(--bg); padding: 2px 7px; border-radius: 10px; }
+  .board-column.drag-over { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .board-cards { overflow-y: auto; min-height: 0; flex: 1; padding: 0 10px 12px; }
+  .session-card { background: var(--panel); border: 1px solid var(--line); padding: 13px; border-radius: 9px; margin: 0 0 10px; cursor: grab; }
+  .session-card:hover { border-color: var(--accent); }
+  .session-card[aria-busy="true"] { opacity: .6; }
+  .session-card.dragging { opacity: .4; }
+  .session-open { display: block; width: 100%; text-align: left; background: transparent; color: var(--ink); padding: 0; line-height: 1.45; font-size: 13px; overflow-wrap: anywhere; }
+  .session-meta { font-size: 11px; color: var(--ink-dim); margin: 8px 0; overflow-wrap: anywhere; }
+  .session-preview { font-size: 12px; color: var(--ink-dim); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 12px; white-space: pre-line; }
+  .session-activity { display: inline-block; border-radius: 5px; padding: 3px 6px; background: var(--bg); font-size: 10px; margin-bottom: 10px; }
+  .session-activity.running { color: var(--accent); }
+  .session-activity.failed, .session-activity.degraded, .session-activity.interrupted { color: var(--warn); }
+  .session-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .session-footer time { font-size: 10px; color: var(--ink-dim); white-space: nowrap; }
+  select[data-board-stage] { font-family: var(--sans); color: var(--ink-dim); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; font-size: 11px; max-width: 132px; padding: 5px 3px; }
+  .column-empty { text-align: center; color: var(--ink-dim); font-size: 12px; line-height: 1.6; padding: 27px 8px; }
+  #board-feedback { flex-shrink: 0; }
+  #board-feedback button { margin-left: 12px; padding: 4px 8px; }
+  #board-empty { padding: 20px 0; }
+  .conversation-heading { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+  #conversation-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+  .board-footnote { color: var(--ink-dim); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+  @media (max-width: 960px) {
+    .app { grid-template-columns: 210px minmax(0, 1fr); }
+    .right { display: none; }
+    #board-view { padding: 22px 16px 12px; }
+  }
+  @media (max-width: 560px) {
+    .app { grid-template-columns: 1fr; }
+    .left { display: none; }
+    .center { min-width: 0; }
+    .board-heading h1 { font-size: 22px; }
+    .board-heading button { padding: 8px 11px; white-space: nowrap; }
+    #board-search { width: 100%; flex: 1 1 100%; }
+    #board-project-filter { flex: 1; min-width: 0; }
+    #board-count { margin-left: 0; }
+    .board-column { flex-basis: 270px; min-width: 270px; }
+    .thread, .composer { padding-left: 15px; padding-right: 15px; }
+    .conversation-heading { padding: 10px 14px; }
+  }
+  .empty { color: var(--ink-dim); font-size: 13px; padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="app board-mode" id="app">
+  <section id="board-view" aria-label="Доска сессий">
+    <div class="board-heading">
+      <div><h1>Сессии</h1><p class="board-description">Вся работа перед глазами. Переноси карточки по этапам и возвращайся к разговору.</p></div>
+      <button id="board-newconv">+ Новая сессия</button>
+    </div>
+    <div class="board-toolbar">
+      <input type="search" class="filter" id="board-search" aria-label="Поиск сессий" placeholder="Найти сессию…" />
+      <select class="filter" id="board-project-filter" aria-label="Проект"><option value="">Все проекты</option></select>
+      <span id="board-count" role="status" aria-live="polite"></span>
+    </div>
+    <div id="board-feedback" class="banner bad" role="alert" hidden></div>
+    <div id="board-empty" class="empty" hidden></div>
+    <div id="board-columns"></div>
+    <div class="board-footnote">Этап выбираешь ты. «Агент ответил» показывает окончание ответа, а не завершение задачи.</div>
+  </section>
+  <div class="col left">
+    <h1>Vepol Face</h1>
+    <div class="sub" id="bind">local · loopback</div>
+
+    <h2>Target</h2>
+    <input class="filter" id="tfilter" placeholder="filter projects…" />
+    <div id="targets" class="scroller"></div>
+
+    <h2>Runtime</h2>
+    <div id="runtimes"></div>
+
+    <h2>Conversations</h2>
+    <button class="ghost" style="width:100%;margin-bottom:8px" id="newconv">New conversation</button>
+    <div id="convs" class="scroller"></div>
+  </div>
+
+  <div class="col center">
+    <div class="conversation-heading"><button class="ghost" id="show-board">← Сессии</button><span id="conversation-title"></span></div>
+    <div class="thread" id="thread">
+      <div class="empty">Pick a target and say something.</div>
+    </div>
+    <div class="composer">
+      <textarea id="prompt" placeholder="Ask Vepol…  (⌘↵ to send)"></textarea>
+      <div class="row">
+        <button id="send">Send</button>
+        <button id="stop" class="ghost" style="display:none">Stop</button>
+        <span class="hint" id="routing"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="col right">
+    <h2>Run</h2>
+    <div id="runstate" class="card">idle</div>
+
+    <h2>KB write-back</h2>
+    <div id="evidence" class="card">No run yet.</div>
+
+    <h2>Interactive</h2>
+    <div id="attach" class="card">—</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // Token arrives once in the URL and is immediately stripped from history.
+  const url = new URL(window.location.href);
+  const TOKEN = url.searchParams.get("token") || "";
+  if (url.searchParams.has("token")) {
+    url.searchParams.delete("token");
+    window.history.replaceState({}, "", url.pathname);
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board" };
+  const STAGES = [["queued", "Очередь", "#9299a6"], ["research", "Исследование", "#9985d8"],
+    ["working", "Работа", "#d5a445"], ["review", "Проверка", "#668ddd"], ["completed", "Завершено", "#62a883"]];
+  const ACTIVITY = { idle: "Нет запуска", running: "Агент работает", done: "Агент ответил",
+    failed: "Ошибка", degraded: "Нет полноценного ответа", interrupted: "Запуск прерван", stopped: "Остановлен" };
+  let conversations = [];
+  let draggingId = null;
+  let boardPending = false;
+  let mutationVersion = 0;
+  let refreshVersion = 0;
+  let boardSignature = "";
+  let openVersion = 0;
+
+  const api = async (path, opts = {}) => {
+    const res = await fetch(path, {
+      ...opts,
+      headers: { "X-Vepol-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) },
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    return res.status === 204 ? null : res.json();
+  };
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ------------------------------------------------------------ rendering
+  let allTargets = [];
+  let lastRuntimes = [];
+
+  function renderTargets(list) {
+    allTargets = list;
+    paintTargets();
+  }
+
+  function paintTargets() {
+    const q = ($("tfilter").value || "").trim().toLowerCase();
+    // The selected target always stays visible, even when it fails the filter.
+    const shown = allTargets.filter(
+      (t) => !q || t.slug.toLowerCase().includes(q) || t.slug === state.target);
+    $("targets").innerHTML = shown.length ? shown.map((t) => `
+      <div class="item ${t.slug === state.target ? "active" : ""}" data-slug="${esc(t.slug)}">
+        ${esc(t.label)}
+        <div class="meta">${esc(t.kind)}</div>
+      </div>`).join("") : `<div class="hint">no match</div>`;
+    $("targets").querySelectorAll(".item").forEach((el) =>
+      el.onclick = () => {
+        state.target = el.dataset.slug;
+        state.conv = null;
+        paintTargets();
+        updateRouting(lastRuntimes);
+      });
+  }
+
+  function renderRuntimes(list) {
+    lastRuntimes = list;
+    const brokered = list.filter((r) => r.capabilities && r.capabilities.brokered);
+    const other = list.filter((r) => !(r.capabilities && r.capabilities.brokered));
+    const one = (r, pick) => `
+      <div class="rt ${pick ? "pick" : "off"} ${r.name === state.runtime ? "active" : ""}"
+           data-name="${esc(r.name)}" title="${esc(r.reason || "")}">
+        <span class="dot ${esc(r.state)}"></span>
+        <span class="name">${esc(r.name)}</span>
+        <span class="why">${esc(r.state)}</span>
+      </div>`;
+    $("runtimes").innerHTML =
+      brokered.map((r) => one(r, true)).join("") +
+      (other.length ? `<div class="hint" style="margin-top:8px">not brokered yet</div>` : "") +
+      other.map((r) => one(r, false)).join("");
+    $("runtimes").querySelectorAll(".rt.pick").forEach((el) =>
+      el.onclick = () => { state.runtime = el.dataset.name; renderRuntimes(list); updateRouting(list); });
+    updateRouting(list);
+  }
+
+  function updateRouting(list) {
+    const r = list.find((x) => x.name === state.runtime);
+    if (!r) { $("routing").textContent = ""; return; }
+    $("routing").textContent = r.available
+      ? `→ ${r.name} · ${state.target || "hub"}`
+      : `⚠ ${r.name} is ${r.state}: ${r.reason || "no successful observation"}`;
+  }
+
+  function renderConvs(list) {
+    conversations = list;
+    paintBoard();
+    $("convs").innerHTML = list.length ? list.map((c) => `
+      <div class="item ${c.id === state.conv ? "active" : ""}" data-id="${esc(c.id)}">
+        ${esc(c.title || "(new)")}
+        <div class="meta">${esc(c.target)} · ${esc(c.runtime)}${c.running ? " · running" : ""}</div>
+      </div>`).join("") : `<div class="hint">none yet</div>`;
+    $("convs").querySelectorAll(".item").forEach((el) =>
+      el.onclick = () => openConv(el.dataset.id));
+  }
+
+  // Manual stages belong to conversations; runtime activity never accepts a task.
+  function boardError(message, retry) {
+    const el = $("board-feedback");
+    el.textContent = message;
+    el.hidden = false;
+    if (retry) {
+      const button = document.createElement("button");
+      button.textContent = "Повторить";
+      button.onclick = retry;
+      el.appendChild(button);
+    }
+  }
+
+  function paintBoard(force = false, focusId = null) {
+    if (state.view !== "board" || draggingId || boardPending) return;
+    if (!force && document.activeElement.matches("select[data-board-stage]")) return;
+    const projectSelect = $("board-project-filter");
+    const projects = [...new Set(conversations.map((c) => c.target))].sort();
+    const optionsKey = JSON.stringify(projects);
+    if (projectSelect.dataset.options !== optionsKey) {
+      const selected = projectSelect.value;
+      projectSelect.innerHTML = `<option value="">Все проекты</option>` + projects.map((slug) =>
+        `<option value="${esc(slug)}">${esc(slug)}</option>`).join("");
+      projectSelect.value = projects.includes(selected) ? selected : "";
+      projectSelect.dataset.options = optionsKey;
+    }
+    const query = $("board-search").value.trim().toLocaleLowerCase();
+    const filtered = conversations.filter((c) => (!projectSelect.value || c.target === projectSelect.value) &&
+      (!query || [c.title, c.preview, c.target, c.runtime].join(" ").toLocaleLowerCase().includes(query)));
+    filtered.sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
+    $("board-count").textContent = filtered.length === conversations.length
+      ? `Всего: ${conversations.length}` : `Показано: ${filtered.length} из ${conversations.length}`;
+    $("board-empty").hidden = filtered.length > 0;
+    $("board-empty").textContent = conversations.length
+      ? "Ничего не найдено. Измени поиск или выбери другой проект."
+      : "Здесь появятся твои разговоры. Создай первую сессию, чтобы начать.";
+    const signature = JSON.stringify(filtered);
+    if (!force && signature === boardSignature) return;
+    boardSignature = signature;
+    const positions = Object.fromEntries([...$("board-columns").querySelectorAll(".board-column")]
+      .map((el) => [el.dataset.stage, el.querySelector(".board-cards").scrollTop]));
+    const horizontal = $("board-columns").scrollLeft;
+    $("board-columns").innerHTML = STAGES.map(([stage, label, color]) => {
+      const cards = filtered.filter((c) => c.board_stage === stage);
+      return `<section class="board-column" data-stage="${stage}" aria-label="${label}" style="--stage-color:${color}">
+        <header><span class="stage-dot"></span><h2>${label}</h2><span class="stage-count">${cards.length}</span></header>
+        <div class="board-cards">${cards.map((c) => {
+          const activity = c.activity || "idle";
+          const date = c.last_activity_at ? new Date(c.last_activity_at) : null;
+          const dateText = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString("ru", {day: "numeric", month: "short"}) : "";
+          return `<article class="session-card" draggable="true" data-conversation-id="${esc(c.id)}">
+            <button class="session-open" data-open-conversation="${esc(c.id)}">${esc(c.title || "Новая сессия")}</button>
+            <div class="session-meta">${esc(c.target)} · ${esc(c.runtime)}</div>
+            <p class="session-preview">${esc(c.preview || "В этой сессии ещё нет сообщений.")}</p>
+            <span class="session-activity ${esc(activity)}">${esc(ACTIVITY[activity] || activity)}</span>
+            <div class="session-footer"><time datetime="${esc(c.last_activity_at || "")}" title="${esc(date && !Number.isNaN(date.getTime()) ? date.toLocaleString("ru") : "")}">${esc(dateText)}</time>
+              <select data-board-stage aria-label="Этап: ${esc(c.title || "Новая сессия")}">
+                ${STAGES.map(([value, text]) => `<option value="${value}" ${value === stage ? "selected" : ""}>${text}</option>`).join("")}
+              </select>
+            </div>
+          </article>`;
+        }).join("") || `<div class="column-empty">Перенеси сюда сессию</div>`}</div>
+      </section>`;
+    }).join("");
+    $("board-columns").scrollLeft = horizontal;
+    $("board-columns").querySelectorAll(".board-column").forEach((col) => {
+      col.querySelector(".board-cards").scrollTop = positions[col.dataset.stage] || 0;
+      col.ondragover = (event) => {
+        if (!draggingId || boardPending) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        col.classList.add("drag-over");
+      };
+      col.ondragleave = (event) => { if (!col.contains(event.relatedTarget)) col.classList.remove("drag-over"); };
+      col.ondrop = (event) => {
+        event.preventDefault();
+        const id = draggingId;
+        draggingId = null;
+        col.classList.remove("drag-over");
+        if (id) moveSession(id, col.dataset.stage);
+      };
+    });
+    $("board-columns").querySelectorAll(".session-card").forEach((card) => {
+      const id = card.dataset.conversationId;
+      card.ondragstart = (event) => {
+        if (boardPending || event.target.closest("select")) { event.preventDefault(); return; }
+        draggingId = id;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", id);
+        card.classList.add("dragging");
+      };
+      card.ondragend = () => {
+        draggingId = null;
+        card.classList.remove("dragging");
+        $("board-columns").querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
+        paintBoard();
+      };
+      card.querySelector("[data-open-conversation]").onclick = () => openConv(id).catch((err) => boardError(`Не удалось открыть сессию: ${err.message}`, () => openConv(id)));
+      card.querySelector("select").onchange = (event) => moveSession(id, event.target.value, true);
+    });
+    if (focusId) {
+      const card = [...$("board-columns").querySelectorAll(".session-card")].find((el) => el.dataset.conversationId === focusId);
+      if (card) {
+        card.querySelector("select").focus({ preventScroll: true });
+        card.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    }
+  }
+
+  async function moveSession(id, stage, restoreFocus = false) {
+    const existing = conversations.find((c) => c.id === id);
+    if (!existing || boardPending || existing.board_stage === stage) { paintBoard(true); return; }
+    boardPending = true;
+    mutationVersion++;
+    $("board-feedback").hidden = true;
+    const card = [...$("board-columns").querySelectorAll(".session-card")].find((el) => el.dataset.conversationId === id);
+    if (card) { card.setAttribute("aria-busy", "true"); card.querySelector("select").disabled = true; }
+    try {
+      const saved = await api(`/api/conversations/${id}/board`, { method: "PATCH", body: JSON.stringify({ board_stage: stage }) });
+      conversations = conversations.map((c) => c.id === id ? saved : c);
+    } catch (err) {
+      boardError(`Этап не сохранён: ${err.message}`, () => moveSession(id, stage, restoreFocus));
+    } finally {
+      boardPending = false;
+      mutationVersion++;
+      paintBoard(true, restoreFocus ? id : null);
+    }
+  }
+
+  async function refreshBoard() {
+    if (state.view !== "board" || document.hidden || boardPending || draggingId) return;
+    const version = ++refreshVersion;
+    const mutation = mutationVersion;
+    try {
+      const list = await api("/api/conversations");
+      if (version !== refreshVersion || mutation !== mutationVersion || boardPending) return;
+      renderConvs(list);
+    } catch (err) {
+      boardError(`Не удалось обновить сессии: ${err.message}`, refreshBoard);
+    }
+  }
+
+  function showBoard() {
+    state.view = "board";
+    $("app").classList.add("board-mode");
+    $("board-view").hidden = false;
+    paintBoard();
+    refreshBoard();
+  }
+
+  function showChat() {
+    state.view = "chat";
+    $("app").classList.remove("board-mode");
+    $("board-view").hidden = true;
+  }
+
+  function renderThread(conv) {
+    if (!conv || !conv.messages.length) {
+      $("thread").innerHTML = `<div class="empty">Say something.</div>`;
+      return;
+    }
+    $("thread").innerHTML = conv.messages.map((m) => {
+      const degraded = m.meta && m.meta.status && m.meta.status !== "done";
+      return `<div class="msg ${m.role} ${degraded ? "degraded" : ""}">
+        <div class="who">${esc(m.role === "user" ? "you" : conv.runtime)}</div>
+        <div class="body">${esc(m.text)}</div>
+      </div>`;
+    }).join("");
+    $("thread").scrollTop = $("thread").scrollHeight;
+  }
+
+  function renderRun(run) {
+    if (!run) { $("runstate").textContent = "idle"; return; }
+    if (run.status === "running") {
+      $("runstate").innerHTML = `<span class="spinner"></span>running · one-shot`;
+      return;
+    }
+    const cls = run.status === "done" ? "" : (run.status === "failed" ? "bad" : "warn");
+    const lane = run.lane || (run.evidence && run.evidence.lane);
+    const note = run.lane_note || (run.evidence && run.evidence.lane_note);
+    const retryable = ["degraded", "failed", "interrupted", "stopped"].includes(run.status);
+    $("runstate").innerHTML = `
+      <div class="k">${esc(run.status)}</div>
+      ${run.reason ? `<div class="banner ${cls}" style="margin:6px 0 0">${esc(run.reason)}</div>` : ""}
+      ${lane ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">lane: ${esc(lane)}</div>` : ""}
+      ${note ? `<div class="mono" style="margin-top:4px;color:var(--warn)">${esc(note)}</div>` : ""}
+      ${run.category ? `<div class="mono" style="margin-top:4px;color:var(--ink-dim)">category: ${esc(run.category)}</div>` : ""}
+      ${retryable ? `<button id="retrybtn" class="ghost" style="margin-top:8px">Retry last prompt</button>` : ""}`;
+    const rb = document.getElementById("retrybtn");
+    if (rb) rb.onclick = retryRun;
+  }
+
+  async function retryRun() {
+    if (!state.conv || state.running) return;
+    try {
+      await api(`/api/conversations/${state.conv}/retry`, { method: "POST" });
+    } catch (err) {
+      showDegraded({ reason: String(err.message || err) });
+    }
+  }
+
+  async function stopRun() {
+    if (!state.conv || !state.runId) return;
+    try {
+      await api(`/api/conversations/${state.conv}/runs/${state.runId}/stop`, { method: "POST" });
+      $("stop").disabled = true;
+    } catch (err) {
+      showDegraded({ reason: String(err.message || err) });
+    }
+  }
+
+  function renderEvidence(ev) {
+    if (!ev || !ev.summary) { $("evidence").textContent = "No run yet."; return; }
+    const files = (ev.changed || []).slice(0, 40);
+    const capture = (ev.session_capture || []).slice(0, 10);
+    $("evidence").innerHTML = `
+      <div class="k">evidence</div>${esc(ev.summary)}
+      ${files.length ? `<ul class="files mono">${files.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}
+      ${capture.length ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">session capture:</div><ul class="files mono">${capture.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}`;
+  }
+
+  // ------------------------------------------------------------- actions
+  async function refreshAll() {
+    const [targets, runtimes, convs] = await Promise.all([
+      api("/api/targets"), api("/api/runtimes"), api("/api/conversations"),
+    ]);
+    if (!state.target) state.target = targets[0] && targets[0].slug;
+    if (!state.runtime) {
+      const first = runtimes.find((r) => r.capabilities && r.capabilities.brokered);
+      state.runtime = first ? first.name : "claude";
+    }
+    renderTargets(targets);
+    renderRuntimes(runtimes);
+    renderConvs(convs);
+    const h = await api("/api/health");
+    $("bind").textContent = `local · ${h.host}:${h.port}`;
+  }
+
+  async function openConv(id) {
+    const version = ++openVersion;
+    const conv = await api(`/api/conversations/${id}`);
+    if (version !== openVersion) return;
+    state.conv = id;
+    showChat();
+    $("conversation-title").textContent = `${conv.title || "Новая сессия"} · ${conv.target} · ${conv.runtime}`;
+    state.target = conv.target;
+    state.runtime = conv.runtime;
+    renderThread(conv);
+    const last = conv.runs[conv.runs.length - 1];
+    renderRun(last);
+    renderEvidence(last && last.evidence);
+    state.running = !!(last && last.status === "running");
+    state.runId = state.running ? last.id : null;
+    $("stop").style.display = state.running ? "" : "none";
+    $("stop").disabled = false;
+    $("send").disabled = state.running;
+    try {
+      const at = await api(`/api/conversations/${id}/attach`);
+      if (version === openVersion) $("attach").innerHTML = `<div class="k">attach command</div><code>${esc(at.command)}</code>`;
+    } catch (_) { if (version === openVersion) $("attach").textContent = "—"; }
+    if (version !== openVersion) return;
+    connectWs(id);
+    await refreshSidebars();
+  }
+
+  async function refreshSidebars() {
+    const [runtimes, convs] = await Promise.all([api("/api/runtimes"), api("/api/conversations")]);
+    renderRuntimes(runtimes);
+    renderConvs(convs);
+  }
+
+  function connectWs(id) {
+    if (state.ws) { try { state.ws.close(); } catch (_) {} }
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/${id}?token=${encodeURIComponent(TOKEN)}`);
+    state.ws = ws;
+    ws.onmessage = async (e) => {
+      if (state.ws !== ws || state.conv !== id) return;
+      const ev = JSON.parse(e.data);
+      if (ev.type === "run_started") {
+        state.running = true; $("send").disabled = true;
+        state.runId = ev.run_id;
+        $("stop").style.display = ""; $("stop").disabled = false;
+        renderRun({ status: "running" });
+      } else if (ev.type === "progress") {
+        $("runstate").innerHTML = `<span class="spinner"></span>${esc(ev.text)}`;
+      } else if (ev.type === "run_finished") {
+        state.running = false; $("send").disabled = false;
+        state.runId = null; $("stop").style.display = "none";
+        renderRun(ev);
+        renderEvidence(ev.evidence);
+        const conv = await api(`/api/conversations/${id}`);
+        if (state.ws !== ws || state.conv !== id) return;
+        renderThread(conv);
+        if (!ev.ok) showDegraded(ev);
+        await refreshSidebars();
+      }
+    };
+  }
+
+  function showDegraded(ev) {
+    const el = document.createElement("div");
+    el.className = "msg degraded";
+    el.innerHTML = `<div class="who">no answer</div>
+      <div class="body">${esc(ev.reason || "the runtime did not return an answer")}</div>`;
+    $("thread").appendChild(el);
+    $("thread").scrollTop = $("thread").scrollHeight;
+  }
+
+  async function send() {
+    const text = $("prompt").value.trim();
+    if (!text || state.running) return;
+    if (!state.conv) {
+      const conv = await api("/api/conversations", {
+        method: "POST",
+        body: JSON.stringify({ target: state.target, runtime: state.runtime }),
+      });
+      state.conv = conv.id;
+      connectWs(conv.id);
+    }
+    $("prompt").value = "";
+    try {
+      await api(`/api/conversations/${state.conv}/messages`, {
+        method: "POST", body: JSON.stringify({ text }),
+      });
+      const conv = await api(`/api/conversations/${state.conv}`);
+      renderThread(conv);
+    } catch (err) {
+      showDegraded({ reason: String(err.message || err) });
+    }
+  }
+
+  $("board-search").addEventListener("input", () => paintBoard());
+  $("board-project-filter").addEventListener("change", () => paintBoard());
+  $("board-columns").addEventListener("focusout", () => queueMicrotask(() => paintBoard()));
+  $("show-board").onclick = showBoard;
+  $("board-newconv").onclick = () => {
+    if ($("board-project-filter").value) state.target = $("board-project-filter").value;
+    $("newconv").click();
+  };
+  setInterval(refreshBoard, 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshBoard(); });
+  $("tfilter").addEventListener("input", paintTargets);
+  $("send").onclick = send;
+  $("stop").onclick = stopRun;
+  $("prompt").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
+  });
+  $("newconv").onclick = async () => {
+    try {
+      const conv = await api("/api/conversations", {
+        method: "POST", body: JSON.stringify({ target: state.target, runtime: state.runtime }),
+      });
+      await openConv(conv.id);
+    } catch (err) {
+      if (state.view === "board") boardError(`Не удалось создать сессию: ${err.message}`);
+      else showDegraded({reason: err.message});
+    }
+  };
+
+  refreshAll().catch((e) => {
+    document.body.innerHTML =
+      `<div style="padding:40px;font-family:var(--sans)">
+         <h1>Vepol Face could not start</h1>
+         <p style="color:var(--ink-dim)">${esc(e.message || e)}</p>
+         <p style="color:var(--ink-dim)">Open the URL printed by <code>run.sh</code>, token included.</p>
+       </div>`;
+  });
+})();
+</script>
+</body>
+</html>
