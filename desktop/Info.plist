@@ -4,6 +4,8 @@
 <dict>
   <key>CFBundleExecutable</key><string>VepolDesktop</string>
   <key>CFBundleIdentifier</key><string>local.vepol.desktop</string>
+  <key>CFBundleIconFile</key><string>Vepol</string>
+  <key>CFBundleIconName</key><string>Vepol</string>
   <key>CFBundleName</key><string>Vepol</string>
   <key>CFBundleDisplayName</key><string>Vepol</string>
   <key>CFBundlePackageType</key><string>APPL</string>
