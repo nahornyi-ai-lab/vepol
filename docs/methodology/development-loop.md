@@ -48,12 +48,21 @@ why: <one line>
 ideal final result → resolution by separation. Otherwise record two or three
 alternatives and why the smallest suitable one won.
 
-**3. Specification.** Before code, write `knowledge/decisions/<spec>.md` with
-product context, Place in Vepol, Software 3.0 fit, scope, acceptance criteria,
-failure modes, mandatory E2E, and the concrete code/API/schema files the design
-relies on. The `spec-contract` hash binds owner approval and makes later drift
-detectable. The lightweight review is bound to the stated scenario, not to
-byte-identical prose.
+**3. Specification.** Before code, write `knowledge/decisions/<spec>.md`, **at
+most 150 lines**. Headings are yours; the file must answer four questions: what
+we do (visible behaviour, plain language), how it works (the logic structurally
+— input -> steps -> output, every branch named), what is out of scope, and how
+we check it (acceptance one testable line each, what happens on failure, and the
+mandatory E2E path). Name the concrete code/API/schema files the design relies
+on inside those answers.
+
+Review rounds and verdicts, superseded hashes, research retellings, evidence
+dumps, root-cause narrative and restatement of this process do not belong in the
+spec — they live in `sources/`, `reports/`, `log.md` and `incidents.md`, and the
+spec links to them. Over the cap means split it (spec + build plan) or the scope
+is too large for one spec. The `spec-contract` hash binds owner approval and
+makes later drift detectable. The lightweight review is bound to the stated
+scenario, not to byte-identical prose.
 
 **4. Lightweight spec review — exactly one independent reviewer, exactly one
 pass, before the human.** The reviewer excludes the author and reads both the
