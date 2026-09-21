@@ -36,6 +36,7 @@ import uuid
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+from _kb_claude_runner import run_command as run_unbounded_command
 from _kb_codex import CodexUnavailable, codex_bin
 
 
@@ -425,17 +426,14 @@ def run_claude(
 ) -> RunResult:
     cmd = build_claude_command(prompt, add_dirs, session, resume_key)
     try:
-        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        snippet = f"claude timed out after {timeout}s"
-        return RunResult(
-            provider="claude",
-            returncode=124,
-            output="",
-            stderr=snippet,
-            category="timeout",
-            cooldown_until=compute_cooldown("timeout", snippet),
-            snippet=snippet,
+        # Owner contract: --timeout remains a Codex-lane SLA only. Claude is
+        # owned by the detached durable worker and always waits for natural exit.
+        durable = run_unbounded_command(
+            cmd,
+            cwd=cwd,
+            output_mode="text",
+            kind="claude",
+            metadata={"caller": "kb-orchestrator-run", "resume_key": resume_key},
         )
     except OSError as exc:
         # D11 (morning-digest-inputs-rebalance, Phase D): a missing/broken
@@ -445,24 +443,30 @@ def run_claude(
             provider="claude", returncode=127, output="", stderr=snippet,
             category="unavailable", snippet=snippet,
         )
+    except (RuntimeError, ValueError) as exc:
+        snippet = f"claude durable runner failed: {exc}"
+        return RunResult(
+            provider="claude", returncode=70, output="", stderr=snippet,
+            category="crash", snippet=snippet,
+        )
 
-    stderr = proc.stderr or ""
-    if proc.returncode == 0:
+    stderr = durable.stderr or ""
+    if durable.returncode == 0:
         if resume_key:
             session["claude_resume_ready"] = True
         return RunResult(
             provider="claude",
             returncode=0,
-            output=proc.stdout,
+            output=durable.stdout,
             stderr=stderr,
             session_id=session.get("claude_session_id"),
         )
 
-    category = classify_stderr("claude", stderr, proc.returncode)
+    category = classify_stderr("claude", stderr, durable.returncode)
     return RunResult(
         provider="claude",
-        returncode=proc.returncode,
-        output=proc.stdout,
+        returncode=durable.returncode,
+        output=durable.stdout,
         stderr=stderr,
         session_id=session.get("claude_session_id"),
         category=category,
@@ -480,22 +484,24 @@ def build_codex_command(
     resume_key: str | None,
 ) -> list[str]:
     binary = codex_bin()
-    base = [binary, "exec"]
-    if resume_key and session.get("codex_session_id"):
-        base = [binary, "exec", "resume", session["codex_session_id"]]
+    resuming = bool(resume_key and session.get("codex_session_id"))
+    base = [binary, "exec", "resume", session["codex_session_id"]] if resuming else [binary, "exec"]
     cmd = base + [
         prompt,
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
-        "-C",
-        str(cwd),
-        "-o",
-        str(timeout_file),
     ]
+    # `codex exec resume` accepts neither -C/--cd nor --add-dir and exits 1 with
+    # "unexpected argument" if either is passed. The child already runs with the
+    # right cwd, and a resumed session carries its own directory context.
+    if not resuming:
+        cmd += ["-C", str(cwd)]
+    cmd += ["-o", str(timeout_file)]
     if DEFAULT_CODEX_MODEL:
         cmd.extend(["-m", DEFAULT_CODEX_MODEL])
-    for path in add_dirs:
-        cmd.extend(["--add-dir", path])
+    if not resuming:
+        for path in add_dirs:
+            cmd.extend(["--add-dir", path])
     return cmd
 
 

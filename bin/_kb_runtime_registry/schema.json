@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "kb-runtime-registry/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "hub", "nested", "probe", "runtimes"],
+  "properties": {
+    "schema_version": {"const": "kb-runtime-registry/v1"},
+    "generated_at": {"type": "string"},
+    "hub": {"type": "string"},
+    "nested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detected", "markers"],
+      "properties": {
+        "detected": {"type": "boolean"},
+        "markers": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "refused_reason", "results"],
+      "properties": {
+        "requested": {"type": "array", "items": {"type": "string"}},
+        "refused_reason": {"type": ["string", "null"]},
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["runtime", "outcome", "reason", "observed_at"],
+            "properties": {
+              "runtime": {"type": "string"},
+              "outcome": {"enum": ["success", "failure", "skipped"]},
+              "reason": {"type": "string"},
+              "observed_at": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "runtimes": {"type": "array", "items": {"$ref": "#/definitions/runtime"}}
+  },
+  "definitions": {
+    "tristate": {"enum": ["yes", "no", "unknown"]},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "installed", "authenticated", "quota_available", "healthy",
+        "resumable", "interactive", "web_current", "edit_capable",
+        "available", "fallback_of", "capability_source", "provenance", "reasons"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "installed": {"$ref": "#/definitions/tristate"},
+        "authenticated": {"$ref": "#/definitions/tristate"},
+        "quota_available": {"$ref": "#/definitions/tristate"},
+        "healthy": {"$ref": "#/definitions/tristate"},
+        "resumable": {"$ref": "#/definitions/tristate"},
+        "interactive": {"$ref": "#/definitions/tristate"},
+        "web_current": {"$ref": "#/definitions/tristate"},
+        "edit_capable": {"$ref": "#/definitions/tristate"},
+        "available": {"type": "boolean"},
+        "fallback_of": {"type": ["string", "null"]},
+        "capability_source": {"type": "string"},
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "observed_at", "age_seconds", "evidence", "blocked_until", "category"],
+          "properties": {
+            "source": {"enum": ["none", "probe", "broker-state", "broker-state-only"]},
+            "observed_at": {"type": ["string", "null"]},
+            "age_seconds": {"type": ["integer", "null"]},
+            "evidence": {"type": ["string", "null"]},
+            "blocked_until": {"type": ["string", "null"]},
+            "category": {"type": ["string", "null"]}
+          }
+        },
+        "reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

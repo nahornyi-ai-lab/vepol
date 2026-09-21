@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""kb-runtime-registry — which agent CLIs can actually do work right now.
+
+Spec: decision page "Runtime capability registry" (2026-08-15) in the project knowledge base
+(contract sha256 3f323b89…). Modes: --report (default, never probes),
+--probe [RUNTIME ...], --json. Everything derives from KB_HUB.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_runtime_registry.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())
