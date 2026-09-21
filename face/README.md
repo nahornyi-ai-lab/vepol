@@ -56,5 +56,5 @@ limitations. Use the native entry for the session board experience above.
 Reuse the critical board-persistence journey and the complete browser board
 journey; native acceptance additionally exercises the actual `.app`, live
 Claude/Codex conversations, input requests, reload, manual stage persistence
-and shutdown. Acceptance evidence and the approved build plan are in the
-sibling development wiki `../knowledge/`.
+and shutdown. Run the suites from this directory with `.venv/bin/python -m
+pytest tests/`.
