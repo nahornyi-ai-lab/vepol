@@ -48,43 +48,58 @@ change is actually trivial or you've underestimated it.
 ### 1. Specification
 
 A spec lives in a markdown file (in your knowledge base for project-
-specific specs, or in `concepts/` for cross-project concerns). It
-must contain:
+specific specs, or in `concepts/` for cross-project concerns).
 
-- **Product context.** What product/capability is being built, for
-  whom, and why it matters now.
-- **Place in Vepol.** Which process/module/surface it belongs to, what
-  it connects to, and what owns the resulting state.
-- **Software 3.0 fit.** How the change uses or responds to modern
-  agentic workflows while preserving Vepol's deterministic,
-  inspectable, markdown-backed constraints.
-- **What we're building.** One paragraph in plain language.
-- **Scope (in / out).** What's included, what's explicitly excluded.
-  Out-of-scope is as important as in-scope — it constrains the
+**It is at most 150 lines.** Headings and their order are yours. What
+is fixed is that a reader gets four answers from the file alone:
+
+- **What we do.** The visible behaviour, in plain language. Not
+  internals, not motivation, not a product pitch.
+- **How it works.** The logic, structurally: input -> steps -> output,
+  with every branch named ("if X then Y"). This is the section where a
+  reader catches a bug in the logic before it is written, which is the
+  only reason the approval gate exists.
+- **What is out of scope.** What the change explicitly does not touch.
+  Out-of-scope is as load-bearing as in-scope: it constrains the
   surface area.
-- **Acceptance criteria.** Specific, testable conditions for "done."
-  Not "the system is fast" — "operations under 1KB return in <50ms
-  at the p95."
-- **Failure modes.** What could go wrong, and what the system does
-  when it does. (This catches half the bugs before they're written.)
-- **Test plan and mandatory E2E path.** State which tests should be RED
-  before implementation and the end-to-end user/process scenario that
-  proves the change from trigger/input through durable outcome. Runtime
-  or user-facing changes require executable E2E automation unless
-  technically impossible. If technically impossible, record who judged
-  that, why, residual risk, and the exact manual E2E or process-smoke
-  substitute.
-- **Owner approval fields.** Non-trivial development specs enter
-  `knowledge/spec-approvals.md` after one lightweight independent spec review. Approval is
-  tied to the exact `spec-contract` hash. The owner can approve,
-  request `Changes requested`, reject, or supersede in chat; the active
-  agent records the decision as scribe.
-- **Open questions.** Things you didn't decide. Each gets a default
-  position so the spec can move forward; the open question is
-  marked for later resolution.
+- **How we check it.** Acceptance conditions, one testable line each —
+  not "the system is fast" but "operations under 1KB return in <50ms at
+  the p95" — plus what the system does when each one fails, and the
+  end-to-end path that proves the change from real input to durable
+  outcome. Runtime or user-facing changes need executable E2E unless
+  that is technically impossible; if it is, record who judged that, why,
+  the residual risk, and the manual substitute.
 
-If you can't write the spec — if the acceptance criteria are vague
-and the failure modes are "we'll see what happens" — you don't
+Name the concrete code, API and schema files the design relies on
+inside those answers, and add **open questions** when you genuinely did
+not decide something — each with a default position so the work can
+move.
+
+**What a spec is not.** Keep out review rounds and verdicts, superseded
+`spec-contract` hashes, retellings of the research, evidence dumps,
+root-cause narrative, and restatement of this methodology. That
+material is real and it is kept — in `sources/`, `reports/`, `log.md`
+and `incidents.md` — and the spec links to it. A spec that carries its
+own history stops being readable, and an unreadable spec cannot be
+checked for logic bugs by the person approving it.
+
+If the spec does not fit in 150 lines, either split it — spec for
+what/how/done, build plan for the implementation steps — or the scope
+is too large to approve as one spec. The build plan is not a parking
+lot for what the cap removed; the same exclusions apply to it.
+
+The spec is versioned with a `spec-contract` hash, and owner approval
+binds to that exact hash, so material drift is detectable. Non-trivial
+specs enter `knowledge/spec-approvals.md`; the owner approves, requests
+changes, rejects or supersedes in chat, and the active agent records the
+decision as scribe.
+
+The reviewer checks the cap and the four answers **first**. If either
+fails, the spec comes back unreviewed — that is not a `BLOCK` verdict
+and does not consume the single review pass.
+
+If you can't write the spec — if the acceptance conditions are vague
+and the failure behaviour is "we'll see what happens" — you don't
 understand the problem well enough to build it yet. Stop and learn
 more.
 
