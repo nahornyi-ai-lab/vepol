@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""kb-morning-digest — unchanged digest text with selectable audio delivery.
+"""kb-morning-digest — one digest dispatched to independently enabled channels.
 
 Design (owner directive 2026-06-25): every morning, gather the freshest output of
 each orchestrator process (arxiv research, money radar, daily brief, daily
 research, idea digest, project state/board, hub log/escalations) into ONE
 digest file, derive a speech-only text file, render it through the pinned local
-Qwen runtime on demand and send the MP3 to Telegram, or pass the same ready
-digest to NotebookLM. The selected route comes from KB_PROCESS_OUTPUTS.
+Qwen runtime on demand and send the MP3 to Telegram, and/or pass the same ready
+digest to NotebookLM. Every true output flag is dispatched independently.
 
 Synthesis: the digest prose is produced by a headless `claude -p` pass over a
 deterministic context packet. If the synth call fails or returns empty, the
@@ -179,6 +179,10 @@ def digest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
 
 def manifest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
     return ORCH / f"{period}-digest-{date_iso}.json"
+
+
+def notebooklm_manifest_path(date_iso: str, period: str = "morning") -> pathlib.Path:
+    return ORCH / f"{period}-digest-{date_iso}-notebooklm.json"
 
 
 def speech_path(date_iso: str, period: str = "morning") -> pathlib.Path:
@@ -1259,9 +1263,9 @@ def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             return {}
-        # A local-Qwen manifest owns a different counter/state schema. An
-        # explicit route switch starts a fresh NotebookLM adapter state instead
-        # of coercing its attempts dict or treating its completed send as ours.
+        # A local-Qwen manifest owns a different counter/state schema. Ignore it
+        # instead of coercing its attempts dict or treating its completed send
+        # as NotebookLM state.
         if value.get("delivery") == DELIVERY_TAG or isinstance(value.get("attempts"), dict):
             return {}
         return value
@@ -1271,6 +1275,16 @@ def load_notebooklm_manifest(path: pathlib.Path) -> dict[str, Any]:
             "attempts": NBLM_MAX_ATTEMPTS,
             "error": f"manifest parse failed: {exc}",
         }
+
+
+def ensure_notebooklm_manifest(date_iso: str, period: str) -> pathlib.Path:
+    """Give NotebookLM one stable manifest, importing legacy state once."""
+    target = notebooklm_manifest_path(date_iso, period)
+    if not target.is_file():
+        legacy = load_notebooklm_manifest(manifest_path(date_iso, period))
+        if legacy:
+            save_manifest(target, legacy)
+    return target
 
 
 def _ensure_notebook(manifest: dict[str, Any]) -> str:
@@ -1374,7 +1388,7 @@ def push_notebooklm(
         save_manifest(mpath, manifest)
         log(f"{date_iso}: NotebookLM failed softly: {exc}")
         print(f"NotebookLM failed softly (kept file): {exc}")
-        return 0
+        return 1
 
 
 
@@ -1861,12 +1875,11 @@ def acquire_lock(date_iso: str, period: str = "morning"):
 # Background runtime guard (spec D4, defense in depth)
 # ---------------------------------------------------------------------------
 
-# Scheduled runs may reach local TTS/Telegram only as one of these process ids launched
+# Scheduled runs may reach audio handlers only as one of these process ids launched
 # with EXACTLY this argv. kb-tick execs the configured `run` command with no
 # extra argv, so a legitimate scheduled run compares equal after basename
 # normalization of argv[0]. The config validator in _kb_processes is the first
-# gate; this in-process guard also catches a scheduled caller that OMITS
-# telegram_audio from its declared outputs (invisible to that validator).
+# gate; channel selection itself is the independent outputs flag map.
 BACKGROUND_ALLOWLIST = {
     "morning-digest": ["kb-morning-digest"],
     "evening-digest": ["kb-morning-digest", "--period", "evening"],
@@ -1892,34 +1905,27 @@ def background_push_denied() -> str | None:
     argv = [os.path.basename(sys.argv[0])] + sys.argv[1:]
     if argv != allowed_argv:
         return f"argv {argv!r} does not match the allowlisted command for {process_id!r}"
-    outputs = [o.strip() for o in os.environ.get("KB_PROCESS_OUTPUTS", "").split(",")]
-    if outputs not in (
-        ["file", "notebooklm_audio"], ["file", "telegram_audio"],
-    ):
-        return (
-            "KB_PROCESS_OUTPUTS must be exactly file,notebooklm_audio or "
-            "file,telegram_audio"
-        )
     return None
 
 
-def selected_audio_backend() -> str:
-    """Return the delivery adapter after the background guard accepted argv.
+def selected_audio_channels() -> list[str]:
+    """Return every independently enabled audio channel.
 
     Manual test runs keep the already shipped local-Qwen behavior. Production
-    scheduled runs select only through the validated outputs declaration.
+    scheduled runs read the normalized true flags from KB_PROCESS_OUTPUTS.
     """
     if os.environ.get("KB_PROCESS_ID") is None:
-        return "local_qwen"
+        return ["telegram_audio"]
     outputs = [o.strip() for o in os.environ.get("KB_PROCESS_OUTPUTS", "").split(",")]
-    if outputs == ["file", "notebooklm_audio"]:
-        return "notebooklm"
-    return "local_qwen"
+    return [
+        channel for channel in ("telegram_audio", "notebooklm_audio")
+        if channel in outputs
+    ]
 
 
 def build_ready_digest(
     date_iso: str, period: str, digest_file: pathlib.Path | None,
-    morning_input: dict[str, Any] | None = None,
+    morning_input: dict[str, Any] | None = None
 ) -> tuple[dict[str, pathlib.Path], str, str | None]:
     """Generate the report once and freeze the exact text passed to adapters.
 
@@ -1974,19 +1980,26 @@ def build_ready_digest(
 def run_notebooklm_route(
     date_iso: str, period: str, digest_file: pathlib.Path | None,
     out_path: pathlib.Path, mpath: pathlib.Path, force: bool,
+    prepared: bool = False,
 ) -> int:
-    """Build the unchanged current report, then invoke only NotebookLM."""
+    """Send the canonical speech file to NotebookLM, building it when needed."""
     existing = load_notebooklm_manifest(mpath)
     if not force and existing.get("status") == "completed" \
             and existing.get("artifact_id"):
         print(f"already completed for {date_iso}: artifact={existing.get('artifact_id')}")
         return 0
 
-    paths, source, build_error = build_ready_digest(
-        date_iso, period, digest_file,
-    )
+    if prepared:
+        paths = canonical_artifacts(date_iso, period)
+        source, build_error = "shared-build", None
+        if not paths["report"].is_file() or not paths["speech"].is_file():
+            build_error = "shared speech file is unavailable"
+    else:
+        paths, source, build_error = build_ready_digest(
+            date_iso, period, digest_file,
+        )
     if paths["report"] != out_path:
-        raise RuntimeError("NotebookLM selector requires the canonical report path")
+        raise RuntimeError("NotebookLM delivery requires the canonical report path")
     if build_error is not None:
         log(f"{date_iso}: {source} remains report-only: {build_error}")
         return 1
@@ -2011,6 +2024,197 @@ def run_notebooklm_route(
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
+def run_local_route(
+    date_iso: str, period: str, digest_file: pathlib.Path | None,
+    mpath: pathlib.Path, force: bool, background_allowed: bool,
+) -> int:
+    """Run the existing local Qwen → Telegram handler."""
+    morning_input: dict[str, Any] | None = None
+    manifest, blocked = load_local_manifest(mpath, date_iso, period, force)
+    if blocked:
+        _append_failure_log(date_iso, period, manifest)
+        return 0
+
+    if force:
+        # Explicit owner recovery must be able to replace even a locally
+        # corrupted semantic/counter schema.  Reuse only independently
+        # hash-verified canonical speech; never trust attempts/caps/state.
+        reusable_speech = _speech_valid(manifest, date_iso, period)
+        legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
+        manifest = fresh_manifest(date_iso, period, legacy)
+        if reusable_speech:
+            paths = canonical_artifacts(date_iso, period)
+            manifest.update({
+                "status": "report_ready",
+                "speech_sha256": file_sha256(paths["speech"]),
+                "updated_at": now_iso(),
+            })
+            save_manifest(mpath, manifest)
+            return render_and_send(date_iso, period, mpath, manifest, True)
+    else:
+        # Exact schema/caps are persisted invariants, not ambient
+        # configuration.  Without explicit force, corruption fails closed
+        # before gather, TTS or Telegram.
+        attempts = manifest.get("attempts")
+        caps = manifest.get("caps")
+        if (not isinstance(attempts, dict) or caps != ATTEMPT_CAPS
+                or not _manifest_semantics_valid(manifest) or any(
+            isinstance(attempts.get(key), bool)
+            or not isinstance(attempts.get(key), int) or attempts.get(key) < 0
+            for key in ("build", "tts", "telegram", "total")
+        )):
+            return _set_integrity_failure(
+                mpath, manifest, date_iso, period,
+                "invalid attempts/caps manifest schema",
+            )
+
+        status = manifest.get("status")
+        disposition = manifest.get("retry_disposition")
+        if status == "telegram_sending":
+            manifest.update({
+                "status": "telegram_ambiguous", "failed_stage": "telegram",
+                "retry_disposition": "force_required",
+                "error": "previous run stopped after Telegram transmission may have begun",
+                "updated_at": now_iso(),
+            })
+            save_manifest(mpath, manifest)
+            _append_failure_log(date_iso, period, manifest)
+            return 0
+        if status == "completed":
+            message_id = (manifest.get("telegram") or {}).get("message_id")
+            if not message_id:
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "completed manifest is missing telegram.message_id",
+                )
+            if period != "morning":
+                print(f"already completed for {date_iso}: message_id={message_id}")
+                return 0
+
+            stored_snapshot = manifest.get("upstream_snapshot")
+            if (
+                isinstance(stored_snapshot, dict)
+                and stored_snapshot.get("schema") == "morning-input/v1"
+            ):
+                # Input-contract upgrade (EXACTLY v1→v2, D13: mail/board
+                # left the roster): a completed delivery built under the
+                # known previous contract is NOT corrupt — treat it exactly
+                # like the pre-v0.6 no-provenance case below (manual no-op;
+                # the exact scheduler caller upgrades the manifest once).
+                # Any OTHER schema (malformed, future) falls through to
+                # snapshot_valid and fails closed as integrity corruption.
+                stored_snapshot = None
+            exact_scheduled = bool(
+                os.environ.get("KB_PROCESS_BACKGROUND")
+                and os.environ.get("KB_PROCESS_ID") == "morning-digest"
+                and background_allowed
+            )
+            if stored_snapshot is None and not exact_scheduled:
+                # Compatibility: an old/local manifest without v0.6 input
+                # provenance remains a manual no-op.  The exact scheduler
+                # caller upgrades it once so a pre-chain smoke cannot occupy
+                # the real post-chain slot.
+                print(f"already completed for {date_iso}: message_id={message_id}")
+                return 0
+            if stored_snapshot is not None and not snapshot_valid(stored_snapshot):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    f"invalid {SNAPSHOT_SCHEMA} upstream_snapshot",
+                )
+
+            morning_input = capture_morning_input(date_iso)
+            current_snapshot = morning_input["upstream_snapshot"]
+            if (
+                stored_snapshot is not None
+                and stored_snapshot["semantic_sha256"]
+                == current_snapshot["semantic_sha256"]
+            ):
+                print(f"already completed for {date_iso}: message_id={message_id}")
+                return 0
+
+            previous = {
+                "message_id": message_id,
+                "semantic_sha256": (
+                    stored_snapshot.get("semantic_sha256")
+                    if isinstance(stored_snapshot, dict) else None
+                ),
+                "completed_at": manifest.get("updated_at"),
+            }
+            legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
+            manifest = fresh_manifest(date_iso, period, legacy)
+            manifest.update({
+                "upstream_snapshot": current_snapshot,
+                "superseded_delivery": previous,
+                "updated_at": now_iso(),
+            })
+            save_manifest(mpath, manifest)
+            status = manifest["status"]
+            disposition = manifest["retry_disposition"]
+            log(f"{date_iso}: completed morning delivery superseded by newer semantic input")
+        if disposition in ("terminal", "force_required") or status in (
+            "unavailable", "telegram_ambiguous",
+        ):
+            print(f"delivery state {status}/{disposition}; --force required for recovery")
+            return 0
+        failed_stage = manifest.get("failed_stage")
+        if status == "failed" and failed_stage in ("build", "tts", "telegram"):
+            if _block_at_cap(mpath, manifest, failed_stage, date_iso, period):
+                return 0
+        if status == "report_ready" or (status == "failed" and failed_stage == "tts"):
+            if not _speech_valid(manifest, date_iso, period):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "stored report/speech path or speech hash failed validation",
+                )
+            return render_and_send(date_iso, period, mpath, manifest, True)
+        if status in ("tts_rendered", "telegram_failed") or (
+            status == "failed" and failed_stage == "telegram"
+        ):
+            if not _speech_valid(manifest, date_iso, period):
+                return _set_integrity_failure(
+                    mpath, manifest, date_iso, period,
+                    "stored report/speech path or speech hash failed validation",
+                )
+            return render_and_send(
+                date_iso, period, mpath, manifest, not _audio_valid(manifest, date_iso, period)
+            )
+
+    if period == "morning" and morning_input is None:
+        morning_input = capture_morning_input(date_iso)
+    if morning_input is not None:
+        manifest["upstream_snapshot"] = morning_input["upstream_snapshot"]
+
+    if _block_at_cap(mpath, manifest, "build", date_iso, period):
+        return 0
+    _begin_attempt(mpath, manifest, "build", "started")
+
+    paths = canonical_artifacts(date_iso, period)
+    for stale in (paths["speech"], paths["audio"]):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    paths, source, build_error = build_ready_digest(
+        date_iso, period, digest_file, morning_input,
+    )
+    if build_error is not None:
+        return _stage_failed(
+            mpath, manifest, "build", date_iso, period, build_error,
+        )
+    manifest.update({
+        "status": "report_ready", "retry_disposition": "retryable",
+        "failed_stage": None, "speech_sha256": file_sha256(paths["speech"]),
+        "audio_sha256": None, "telegram": None, "error": None,
+        "updated_at": now_iso(),
+    })
+    save_manifest(mpath, manifest)
+    rc = render_and_send(date_iso, period, mpath, manifest, True)
+    if manifest.get("status") == "completed":
+        append_hub_log(date_iso, paths["report"], manifest, period)
+    return rc
+
 
 def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
         out: pathlib.Path | None, no_push: bool, force: bool) -> int:
@@ -2053,8 +2257,8 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
 
     try:
         denied = background_push_denied()
-        delivery_enabled = not no_push and out is None and denied is None
-        backend = selected_audio_backend() if delivery_enabled else None
+        channels = selected_audio_channels() if not no_push and out is None else []
+        delivery_enabled = not no_push and out is None and denied is None and bool(channels)
         morning_input: dict[str, Any] | None = None
 
         # Compatibility/file-only paths deliberately do not inspect or mutate
@@ -2093,194 +2297,21 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
                 print("skipped local audio delivery (--no-push/--out)")
             return 0
 
-        if backend == "notebooklm":
-            return run_notebooklm_route(
-                date_iso, period, digest_file, out_path, mpath, force,
-            )
-
-        manifest, blocked = load_local_manifest(mpath, date_iso, period, force)
-        if blocked:
-            _append_failure_log(date_iso, period, manifest)
-            return 0
-
-        if force:
-            # Explicit owner recovery must be able to replace even a locally
-            # corrupted semantic/counter schema.  Reuse only independently
-            # hash-verified canonical speech; never trust attempts/caps/state.
-            reusable_speech = _speech_valid(manifest, date_iso, period)
-            legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
-            manifest = fresh_manifest(date_iso, period, legacy)
-            if reusable_speech:
-                paths = canonical_artifacts(date_iso, period)
-                manifest.update({
-                    "status": "report_ready",
-                    "speech_sha256": file_sha256(paths["speech"]),
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                return render_and_send(date_iso, period, mpath, manifest, True)
-        else:
-            # Exact schema/caps are persisted invariants, not ambient
-            # configuration.  Without explicit force, corruption fails closed
-            # before gather, TTS or Telegram.
-            attempts = manifest.get("attempts")
-            caps = manifest.get("caps")
-            if (not isinstance(attempts, dict) or caps != ATTEMPT_CAPS
-                    or not _manifest_semantics_valid(manifest) or any(
-                isinstance(attempts.get(key), bool)
-                or not isinstance(attempts.get(key), int) or attempts.get(key) < 0
-                for key in ("build", "tts", "telegram", "total")
-            )):
-                return _set_integrity_failure(
-                    mpath, manifest, date_iso, period,
-                    "invalid attempts/caps manifest schema",
-                )
-
-            status = manifest.get("status")
-            disposition = manifest.get("retry_disposition")
-            if status == "telegram_sending":
-                manifest.update({
-                    "status": "telegram_ambiguous", "failed_stage": "telegram",
-                    "retry_disposition": "force_required",
-                    "error": "previous run stopped after Telegram transmission may have begun",
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                _append_failure_log(date_iso, period, manifest)
-                return 0
-            if status == "completed":
-                message_id = (manifest.get("telegram") or {}).get("message_id")
-                if not message_id:
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "completed manifest is missing telegram.message_id",
-                    )
-                if period != "morning":
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-
-                stored_snapshot = manifest.get("upstream_snapshot")
-                if (
-                    isinstance(stored_snapshot, dict)
-                    and stored_snapshot.get("schema") == "morning-input/v1"
-                ):
-                    # Input-contract upgrade (EXACTLY v1→v2, D13: mail/board
-                    # left the roster): a completed delivery built under the
-                    # known previous contract is NOT corrupt — treat it exactly
-                    # like the pre-v0.6 no-provenance case below (manual no-op;
-                    # the exact scheduler caller upgrades the manifest once).
-                    # Any OTHER schema (malformed, future) falls through to
-                    # snapshot_valid and fails closed as integrity corruption.
-                    stored_snapshot = None
-                exact_scheduled = bool(
-                    os.environ.get("KB_PROCESS_BACKGROUND")
-                    and os.environ.get("KB_PROCESS_ID") == "morning-digest"
-                    and denied is None
-                )
-                if stored_snapshot is None and not exact_scheduled:
-                    # Compatibility: an old/local manifest without v0.6 input
-                    # provenance remains a manual no-op.  The exact scheduler
-                    # caller upgrades it once so a pre-chain smoke cannot occupy
-                    # the real post-chain slot.
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-                if stored_snapshot is not None and not snapshot_valid(stored_snapshot):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        f"invalid {SNAPSHOT_SCHEMA} upstream_snapshot",
-                    )
-
-                morning_input = capture_morning_input(date_iso)
-                current_snapshot = morning_input["upstream_snapshot"]
-                if (
-                    stored_snapshot is not None
-                    and stored_snapshot["semantic_sha256"]
-                    == current_snapshot["semantic_sha256"]
-                ):
-                    print(f"already completed for {date_iso}: message_id={message_id}")
-                    return 0
-
-                previous = {
-                    "message_id": message_id,
-                    "semantic_sha256": (
-                        stored_snapshot.get("semantic_sha256")
-                        if isinstance(stored_snapshot, dict) else None
-                    ),
-                    "completed_at": manifest.get("updated_at"),
-                }
-                legacy = manifest.get("legacy") if isinstance(manifest.get("legacy"), dict) else None
-                manifest = fresh_manifest(date_iso, period, legacy)
-                manifest.update({
-                    "upstream_snapshot": current_snapshot,
-                    "superseded_delivery": previous,
-                    "updated_at": now_iso(),
-                })
-                save_manifest(mpath, manifest)
-                status = manifest["status"]
-                disposition = manifest["retry_disposition"]
-                log(f"{date_iso}: completed morning delivery superseded by newer semantic input")
-            if disposition in ("terminal", "force_required") or status in (
-                "unavailable", "telegram_ambiguous",
-            ):
-                print(f"delivery state {status}/{disposition}; --force required for recovery")
-                return 0
-            failed_stage = manifest.get("failed_stage")
-            if status == "failed" and failed_stage in ("build", "tts", "telegram"):
-                if _block_at_cap(mpath, manifest, failed_stage, date_iso, period):
-                    return 0
-            if status == "report_ready" or (status == "failed" and failed_stage == "tts"):
-                if not _speech_valid(manifest, date_iso, period):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "stored report/speech path or speech hash failed validation",
-                    )
-                return render_and_send(date_iso, period, mpath, manifest, True)
-            if status in ("tts_rendered", "telegram_failed") or (
-                status == "failed" and failed_stage == "telegram"
-            ):
-                if not _speech_valid(manifest, date_iso, period):
-                    return _set_integrity_failure(
-                        mpath, manifest, date_iso, period,
-                        "stored report/speech path or speech hash failed validation",
-                    )
-                return render_and_send(
-                    date_iso, period, mpath, manifest, not _audio_valid(manifest, date_iso, period)
-                )
-
-        if period == "morning" and morning_input is None:
-            morning_input = capture_morning_input(date_iso)
-        if morning_input is not None:
-            manifest["upstream_snapshot"] = morning_input["upstream_snapshot"]
-
-        if _block_at_cap(mpath, manifest, "build", date_iso, period):
-            return 0
-        _begin_attempt(mpath, manifest, "build", "started")
-
-        paths = canonical_artifacts(date_iso, period)
-        for stale in (paths["speech"], paths["audio"]):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-
-        paths, source, build_error = build_ready_digest(
-            date_iso, period, digest_file, morning_input,
-        )
-        if build_error is not None:
-            return _stage_failed(
-                mpath, manifest, "build", date_iso, period, build_error,
-            )
-        manifest.update({
-            "status": "report_ready", "retry_disposition": "retryable",
-            "failed_stage": None, "speech_sha256": file_sha256(paths["speech"]),
-            "audio_sha256": None, "telegram": None, "error": None,
-            "updated_at": now_iso(),
-        })
-        save_manifest(mpath, manifest)
-        rc = render_and_send(date_iso, period, mpath, manifest, True)
-        if manifest.get("status") == "completed":
-            append_hub_log(date_iso, paths["report"], manifest, period)
-        return rc
+        notebook_mpath = ensure_notebooklm_manifest(date_iso, period)
+        handlers = {
+            "telegram_audio": lambda: run_local_route(
+                date_iso, period, digest_file, mpath, force, denied is None,
+            ),
+            "notebooklm_audio": lambda: run_notebooklm_route(
+                date_iso, period, digest_file, out_path, notebook_mpath, force,
+                prepared=out_path.is_file() and speech_path(date_iso, period).is_file(),
+            ),
+        }
+        retry = False
+        for channel in channels:
+            if handlers[channel]() != 0:
+                retry = True
+        return 1 if retry else 0
     finally:
         if lock_fh is not None:
             lock_fh.close()
@@ -2288,7 +2319,7 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Morning/evening digest -> selected NotebookLM or local-Qwen audio route."
+        description="Morning/evening digest -> enabled audio channels."
     )
     parser.add_argument("--period", choices=("morning", "evening"), default="morning",
                         help="Which digest to build (default morning).")

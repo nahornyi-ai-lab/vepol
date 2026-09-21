@@ -16,7 +16,7 @@ Spec: decisions/local-tts-v0-6-dual-backend-addendum-2026-07-11.md
       (spec-contract:sha256:64c99d1d0e31cc701bcedcbe371b603ef179991db5ab508a17abb31ea8d99062)
 
 Usage:
-  kb-digest-migrate --file <path> [--audio-backend notebooklm|local_qwen] [--revert]
+  kb-digest-migrate --file <path> [--revert]
 """
 from __future__ import annotations
 
@@ -62,11 +62,6 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--file", required=True, help="path to processes.yaml")
     ap.add_argument("--revert", action="store_true",
                     help="undo the migration (remove both digest blocks)")
-    ap.add_argument(
-        "--audio-backend", choices=("notebooklm", "local_qwen"),
-        help=("selected managed digest route; omitted preserves existing managed "
-              "routes and defaults newly created blocks to notebooklm"),
-    )
     args = ap.parse_args(argv)
 
     try:
@@ -82,9 +77,7 @@ def main(argv: list[str]) -> int:
         if args.revert:
             result = revert_processes(text)
         else:
-            result, notices = migrate_processes(
-                text, audio_backend=args.audio_backend,
-            )
+            result, notices = migrate_processes(text)
     except (ProcessConfigError, DigestMigrationError) as exc:
         verb = "revert" if args.revert else "migrate"
         print(

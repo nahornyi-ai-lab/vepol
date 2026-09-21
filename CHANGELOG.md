@@ -14,6 +14,13 @@ upgrading.
 
 ## [Unreleased]
 
+### Changed
+- **Digest audio uses independent channel flags.** `outputs` is now one boolean
+  map. Every `true` channel receives the same frozen speech text; `false` means
+  no call. Telegram and NotebookLM can run together, and adding a future channel
+  no longer requires a whitelist of backend combinations. The old
+  `--audio-backend` selector is removed.
+
 ## [0.7.0] — 2026-07-14
 
 ### Added
