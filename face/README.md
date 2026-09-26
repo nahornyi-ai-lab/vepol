@@ -7,8 +7,11 @@ scheduled Vepol process.
 
 ## Build and open
 
-Create the app's Python environment once, then build with the installed
-Command Line Tools:
+Vepol Desktop runs on Apple Silicon Macs. It needs Python 3.11 or later (for
+example from `brew install python`) and the Command Line Tools. Create the
+app's Python environment once with that Python, then build (the build uses the
+Command Line Tools' macOS SDK; pass `SDK=<path>` to `./desktop/build.sh` to use
+another):
 
 ```sh
 python3 -m venv .venv
@@ -71,8 +74,8 @@ runs keep their history and still open in the app.
   dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
   read-only explorer of the project's `knowledge/` folder (folders collapse, a
   name filter searches all of them, files open as plain text up to 512 KB).
-- **Usage bar** along the bottom: `Claude 5h · 7d` and `Codex 7d` used
-  percentages with «as of» times, grey when older than 6 hours, «no data» when
+- **Usage bar** along the bottom: `Claude 5h · 7d` and Codex's current
+  windows as used percentages with «as of» times, grey when older than 6 hours, «no data» when
   there is none. Codex numbers come from its own rollout files under
   `$CODEX_HOME/sessions` (default `~/.codex`). Claude numbers come from a small
   file your Claude Code status line writes; add this line to your statusLine

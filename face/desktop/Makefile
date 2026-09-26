@@ -1,6 +1,6 @@
 CLT := /Library/Developer/CommandLineTools
 SWIFTC := $(CLT)/usr/bin/swiftc
-SDK ?= $(CLT)/SDKs/MacOSX15.5.sdk
+SDK ?= $(CLT)/SDKs/MacOSX.sdk
 BUILD := $(CURDIR)/build
 APP := $(BUILD)/VepolDesktop.app
 BACKEND := $(abspath $(CURDIR)/..)
