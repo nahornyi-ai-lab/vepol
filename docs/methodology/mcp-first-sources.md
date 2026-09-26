@@ -108,7 +108,7 @@ networking) is permitted only when:
      justification.
 2. **Listed in the registry** at the bottom of this page.
 3. **Code-checked** through the standard one-pass lightweight spec review
-   (a configured independent reviewer; Codex is the v0.1 default).
+   (a configured independent reviewer; Codex is the default).
 
 If those three conditions are met, the direct adapter is acceptable
 under the exception. If any are missing, the rule applies and the

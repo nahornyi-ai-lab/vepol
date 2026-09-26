@@ -51,7 +51,7 @@ sends a short text notice and contributes no arXiv audio block.
 
 - `~/knowledge/AGENTS.md` — the canonical hub contract (how the field is organized).
 - `docs/modules/idea-intake.md` — how event-driven idea capture works.
-- `docs/methodology/` — the principles (TRIZ, spec-driven, cross-agent review) — read when curious.
+- `docs/methodology/` — the principles (TRIZ, spec-driven, lightweight spec review) — read when curious.
 - Start a wiki in a real project: `cd <project> && claude -p "/init-kb"`.
 
 ## Prerequisites & safety

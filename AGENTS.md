@@ -115,7 +115,7 @@ is OK (it preserves their content above/below the block).
 
 Run prerequisite detection. Required:
 
-- macOS 13 or later (only platform supported in v0.1)
+- macOS 13 or later (the only supported platform)
 - Claude Code (macOS app or CLI binary `claude`)
 - Node 18 or later
 - Bun 1.0 or later

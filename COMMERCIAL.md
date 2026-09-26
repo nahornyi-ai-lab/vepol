@@ -3,8 +3,7 @@
 > **Note:** This document explains common scenarios under the
 > [FSL-1.1-MIT license](LICENSE) in plain English. The legal text in
 > `LICENSE` is authoritative — if there is any conflict, the legal text
-> wins. This document has not yet been reviewed by counsel for v0.1.0;
-> a professional review is planned before v1.0.0. **For high-stakes
+> wins. This FAQ has not been reviewed by counsel. **For high-stakes
 > commercial scenarios, consult your own lawyer.**
 
 ## TL;DR

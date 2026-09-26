@@ -353,7 +353,7 @@ say "Step 1 · Checking prerequisites (detect-only — no auto-install)"
 
 # Platform
 if [[ "$(uname)" != "Darwin" ]]; then
-  die "Vepol v0.1 supports macOS only. Linux support is on the roadmap."
+  die "Vepol supports macOS only. Linux support is on the roadmap."
 fi
 OS_VER="$(sw_vers -productVersion 2>/dev/null || echo 'unknown')"
 OS_MAJ="${OS_VER%%.*}"
@@ -1213,7 +1213,7 @@ ${C_INFO}━━━ Stay in touch ━━━${C_OFF}
   Discussions:         https://github.com/nahornyi-ai-lab/vepol/discussions
   Sponsor:             https://github.com/sponsors/nahornyi-ai-lab
 
-  Vepol is alpha (v0.x). Your feedback shapes the API.
+  Your feedback shapes Vepol: open an issue or a discussion.
 
 NEXT
 

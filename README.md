@@ -6,7 +6,7 @@
 
 [![License: FSL-1.1-MIT](https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg)](LICENSE)
 [![Source-available](https://img.shields.io/badge/Source-available-orange.svg)](LICENSE-FUTURE.md)
-[![Status: alpha](https://img.shields.io/badge/Status-alpha-yellow.svg)](#status)
+[![Status: stable](https://img.shields.io/badge/Status-stable-brightgreen.svg)](#status)
 
 > 📊 **Quick visual overview:** [docs/visuals/](docs/visuals/) — architecture, license model, methodology infographic, mind map, and briefing doc.
 >
@@ -109,6 +109,17 @@ The behaviour above is delivered through a small set of modules. Each
 ships a CLI, a markdown schema agents read natively, and at minimum
 unit tests. The list grows release by release; see
 [`CHANGELOG.md`](CHANGELOG.md) for per-release history.
+
+- **Vepol Desktop** — a native macOS app in [`face/`](face/README.md). Your
+  agent runs in a real terminal inside the window, next to a session board
+  with manual stages, every project's tasks, every scheduled routine with its
+  state and history, and a read-only view of each project's knowledge. Local
+  only; for Apple Silicon Macs, built from source with the Command Line Tools
+  (needs `tmux` and Python 3.11 or later — see the app's README).
+
+- **Runtime registry** — `kb-runtime-registry` shows which of your agent CLIs
+  can actually work right now (installed, logged in, within quota,
+  answering), from a fresh known-answer check; `--report` never spends quota.
 
 - **Background processes runtime** — the routine processes
   (daily brief, evening retro, learning digest, people extraction,
@@ -215,10 +226,9 @@ that you can read, edit, override, or `grep` six months later.
 - **Strategy gets re-examined.** Each project carries `strategies.md`. Once
   a week Vepol re-reads its own log, checks which assumptions held, updates
   the file. You see the diff.
-- **Plans go through cross-agent review.** Before any non-trivial
-  implementation, Vepol writes a spec, has another configured AI agent
-  check it, and only proceeds after concerns are addressed. You don't
-  get one-shot answers for things that matter.
+- **Plans get one independent review.** Before any non-trivial
+  implementation, Vepol writes a short spec, has another configured AI
+  agent check it once against the code, and proceeds after your approval.
 - **Every event → log entry.** Not "I did something" in a chat — a dated
   line in `log.md`. Six months later, `grep "decision"` returns every
   significant call you made, with context.
@@ -237,7 +247,7 @@ The full breakdown:
 | **Decisions and lessons** | dissolve in chat history | auto-extracted into the log |
 | **Autonomy** | reactive (answers prompts) | proactive (initiates work) |
 | **Transparency** | "magic" inside the model | every step is text on disk |
-| **Quality of plans** | one answer from one model | plan goes through cross-review by independent AI agents |
+| **Quality of plans** | one answer from one model | plan gets one independent, code-aware review before you approve it |
 | **Growth over time** | each chat starts blank | each day, takes on more of your routine |
 | **Health/goal alignment** | absent | in progress (devices feed in as plan constraints) |
 
@@ -275,7 +285,7 @@ managers — that decision stays with you.
 > data, but you should review what's there first. The agent path
 > (above) handles this conflict-check automatically; if you're
 > running `install.sh` manually, back up `~/knowledge/` first.
-> (Installing into a non-default hub is not supported yet in v1 — the
+> (Installing into a non-default hub is not supported yet — the
 > installer uses `~/knowledge`; `VEPOL_HUB` is honored only by the
 > read-only `--probe`/`--dry-run`/`--verify` modes.)
 
@@ -318,22 +328,26 @@ the existing route. The default research topic is automatic; use
 
 ## Status
 
-**Vepol is in alpha (0.2.x).** What that means:
+**Vepol 1.0 is the first stable release.** What that means:
 
-- ✅ The knowledge schema is stable and proven on the maintainer's
-  daily-driver setup (16+ projects)
-- ✅ Vepol runs unattended in production on the maintainer's machine —
-  daily brief, evening retro, and the other scheduled routines fire
-  via tick (orchestrator pulse), gated by the declarative
-  `processes.yaml`
+- ✅ The core is stable: the knowledge folder layout, the `kb-board` task
+  board (its file format and commands) and install/upgrade change
+  incompatibly only in a new major version
+- ✅ The schema is proven on the maintainer's daily-driver setup (16+
+  projects), and Vepol runs unattended there — daily brief, evening retro,
+  and the other scheduled routines fire via tick (orchestrator pulse), gated
+  by the declarative `processes.yaml`
 - ✅ Privacy layers (4 of them) are in place and tested
+- ✅ Vepol Desktop, the native macOS app, ships in [`face/`](face/README.md)
+- ⚠️ Other `kb-*` commands and the background-process settings in
+  `processes.yaml` may still change within 1.x; every such change is noted
+  in [`CHANGELOG.md`](CHANGELOG.md)
 - ⚠️ macOS 13+ only — Linux support is a Phase 2 candidate
+- ⚠️ Vepol Desktop runs on Apple Silicon Macs and is built from source; it is
+  not notarized or packaged yet
 - ⚠️ Pro-tier features (cloud-sync, advanced templates) not built yet
-- ⚠️ Documentation is still being filled in during active alpha use
-- ❌ Breaking changes in any 0.x → 0.(x+1) bump are possible
 
-If you adopt now, expect to participate in shaping the API. We treat your
-feedback as design input.
+We treat your feedback as design input — open an issue.
 
 ## Architecture in three sentences
 
@@ -373,8 +387,8 @@ the tool.
 
 | Tool | Required | Why |
 |---|---|---|
-| macOS 13+ | Yes (0.2.x) | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | 0.2.x MCP/setup host and default orchestrator |
+| macOS 13+ | Yes | launchd, paths, brew defaults |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |
@@ -425,9 +439,9 @@ We accept PRs. Before opening one, please:
 
 1. Read [`docs/methodology/spec-driven-workflow.md`](docs/methodology/spec-driven-workflow.md)
    for non-trivial changes — write the spec before the code
-2. For architectural changes, ask for cross-agent review (we will run
-   the spec through configured independent agents such as Claude Code,
-   Codex, and Antigravity CLI)
+2. For architectural changes, expect one independent review of the spec:
+   another configured AI agent checks it once against the code before
+   implementation starts
 3. Use the issue templates in `.github/ISSUE_TEMPLATE/`
 
 See `CONTRIBUTING.md` (when published) for the full process.
