@@ -133,8 +133,8 @@ def read_codex(codex_home: str | os.PathLike | None, now: dt.datetime) -> dict |
                     recent.append((mtime, path))
     if not recent:
         return None
-    # Owner decision 2026-09-26: background Codex runs start new files every few
-    # minutes, so the newest file often has no numbers yet; use the newest that does.
+    # Background Codex runs start new files every few minutes, so the newest
+    # file often has no numbers yet; use the newest that does.
     for mtime, path in sorted(recent, reverse=True)[:MAX_ROLLOUTS]:
         found = _last_codex_event(path)
         if found:

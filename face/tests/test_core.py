@@ -722,11 +722,10 @@ def test_a_conversation_is_sendable_again_after_a_crash(tmp_path, monkeypatch):
 
 
 # =====================================================================
-# Fix round 2026-08-20 — review blockers from codex + agy
-# (reports/vepol-face-review-codex-2026-08-20.md, -agy-2026-08-20.md)
+# Stop, retry, token logging and session-capture guards
 # =====================================================================
 
-# ---------------------------------------------- MVP-10 stop (codex blocker 1)
+# ------------------------------------------------------------ MVP-10 stop
 
 def test_stop_terminates_a_live_subprocess_quickly():
     """MVP-10: a running turn can be stopped; verdict category is `stopped`."""
@@ -821,7 +820,7 @@ def test_api_stop_unknown_run_is_404(client):
     assert r.status_code == 404
 
 
-# --------------------------------------------- MVP-10 retry (codex blocker 1)
+# ----------------------------------------------------------- MVP-10 retry
 
 def test_api_retry_reruns_last_user_prompt_without_duplicating_it(client, monkeypatch):
     import time
@@ -898,7 +897,7 @@ def test_api_retry_while_running_is_409(client, monkeypatch):
     gate.set()
 
 
-# ------------------------------- MVP-8 token TTY guard (codex+agy blocker 2)
+# -------------------------------------------------- MVP-8 token TTY guard
 
 def test_banner_omits_token_when_stdout_is_not_a_tty():
     """MVP-8: the token must never land in a redirected log file."""
@@ -913,7 +912,7 @@ def test_banner_omits_token_when_stdout_is_not_a_tty():
         "piped banner must say how to get the tokenized URL"
 
 
-# ------------------------------ MVP-11 daily session capture (agy blocker 1)
+# -------------------------------------------- MVP-11 daily session capture
 
 def test_daily_writes_are_reported_as_session_capture_not_dropped(tmp_path):
     """MVP-11: a write under knowledge/daily/ must never be invisible."""
@@ -1007,8 +1006,8 @@ def test_websocket_bad_token_is_closed_with_auth_code(client):
 # ------------------------------------------------------------ Automations view
 
 def test_automations_states_come_from_scheduler_files_without_writing(tmp_path, monkeypatch):
-    """Automations spec 2026-09-24, "How we check": the state rules are the whole
-    value of the view; a wrong one shows green for a broken process."""
+    """The state rules are the whole value of the view; a wrong one shows green
+    for a broken process."""
     import datetime as dt
     import shutil
 

@@ -165,9 +165,9 @@ def new_run_id() -> str:
 
 
 # --------------------------------------------------------------- stop support
-# MVP-10 (review blocker 2026-08-20, codex #1): a running turn must be
-# stoppable. Every lane subprocess is registered under the Face run id while it
-# runs; `stop_face_run` terminates its whole process group.
+# MVP-10: a running turn must be stoppable. Every lane subprocess is
+# registered under the Face run id while it runs; `stop_face_run` terminates
+# its whole process group.
 
 @dataclass
 class _Active:
