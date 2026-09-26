@@ -327,13 +327,17 @@ def _calendar_text(interval) -> str:
     return ", ".join(parts) or "—"
 
 
-def _backup_row() -> dict:
+def _backup_row() -> dict | None:
+    """None when the backup job is neither loaded nor installed: Vepol does not install it."""
+    plist_path = LAUNCH_AGENTS / f"{BACKUP_LABEL}.plist"
+    job = _launchd(BACKUP_LABEL)
+    if job["loaded"] is not True and not plist_path.exists():
+        return None
     try:
-        with open(LAUNCH_AGENTS / f"{BACKUP_LABEL}.plist", "rb") as fh:
+        with open(plist_path, "rb") as fh:
             plist = plistlib.load(fh)
     except Exception:  # missing or malformed plist: no schedule to show
         plist = {}
-    job = _launchd(BACKUP_LABEL)
     if job["loaded"] is None:
         state, text, reason = "unknown", "Unknown", "State unknown"
     elif job["loaded"] is False:
@@ -693,7 +697,8 @@ def build_automations(hub: pathlib.Path, now: datetime | None = None) -> dict:
         notes.insert(0, {"level": "error",
                          "text": f"{model.error} — the scheduler is not running any process right now"})
     processes = [model.row(p["id"]) for p in model.procs] if not model.error else []
-    other = [_backup_row(), *_hermes_rows(notes)]
+    backup = _backup_row()
+    other = [*([backup] if backup else []), *_hermes_rows(notes)]
     return {
         "scheduler": _scheduler(), "processes": processes, "other": other,
         "notes": notes, "generated_at": _iso(model.now),

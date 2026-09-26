@@ -1,0 +1,6 @@
+# Runtime dependencies of the Vepol Desktop backend. Needs Python 3.11 or later
+# (websockets 17 requires it).
+# websockets serves the in-app terminal's WebSocket through uvicorn.
+fastapi>=0.141.1
+uvicorn>=0.52.3
+websockets>=17.0.1

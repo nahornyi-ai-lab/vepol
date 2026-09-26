@@ -16,8 +16,8 @@ SKIP_DIRS = {
     ".orchestrator", "logs", ".venv", ".worktrees",
 }
 # Auto-captured session extracts. Not durable knowledge, but never invisible
-# either: review blocker 2026-08-20 (agy #1) — dropping them made the UI claim
-# "nothing changed" while a session capture had landed. They are reported in
+# either: dropping them would make the UI claim "nothing changed" while a
+# session capture had landed. They are reported in
 # their own bucket instead.
 SESSION_CAPTURE_DIRS = {"daily"}
 MAX_FILES = 20_000

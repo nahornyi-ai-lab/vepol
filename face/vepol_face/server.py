@@ -48,9 +48,8 @@ def _describe_holder(port: int) -> str:
 def banner_lines(host: str, port: int, token: str, tty: bool) -> list[str]:
     """Startup banner. The tokenized URL is shown only on an interactive TTY.
 
-    Review blocker 2026-08-20 (codex #2 / agy #2): with stdout redirected
-    (`nohup ./run.sh > log &`) an unconditional print would persist the token
-    to disk, breaking MVP-8. Redirected launches still work — the browser is
+    With stdout redirected (`nohup ./run.sh > log &`) an unconditional print
+    would persist the token to disk, and the token must stay in memory only. Redirected launches still work — the browser is
     opened directly with the token in memory — they just never log it.
     """
     lines = ["", "  Vepol Face is up.", ""]

@@ -61,9 +61,8 @@ def _conversation_summary(conv: Conversation) -> dict:
 class EventBus:
     """Per-conversation fan-out so a refreshed browser can reattach.
 
-    Queues are bounded (review nit 2026-08-20, codex #5): a subscriber that
-    stopped draining loses newest events instead of growing the process
-    without limit. A reconnecting client reloads state via /api anyway.
+    Queues are bounded: a subscriber that stopped draining loses newest
+    events instead of growing the process without limit. A reconnecting client reloads state via /api anyway.
     """
 
     QUEUE_MAX = 1024
@@ -276,7 +275,7 @@ def create_app(
             for existing in app.state.store.list_conversations():
                 if existing.target == target and existing.runtime == runtime and existing.transport == "terminal":
                     # One terminal per (target, runtime): an existing terminal keeps its title and
-                    # board stage (owner decision 2026-09-26); the page shows a note.
+                    # board stage, so its place on the board is not lost; the page shows a note.
                     return {"id": existing.id, "target": target, "runtime": runtime, "transport": mode,
                             "existing": True}
         conv = app.state.store.create_conversation(target=target, runtime=runtime, title=title, transport=mode)

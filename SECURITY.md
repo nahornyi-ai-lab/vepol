@@ -66,13 +66,11 @@ anonymous.
 
 | Version | Status | Security fixes |
 |---|---|---|
-| 0.1.x | Current | Yes |
-| <0.1 | Not released | N/A |
+| 1.0.x | Current | Yes |
+| 0.x | Superseded by 1.0 | No — upgrade to 1.0 |
 
-Older versions stop receiving security fixes one minor version after a
-new minor release ships (e.g. when 0.2 ships, 0.0 stops; when 0.3
-ships, 0.1 stops). Major versions promise longer support windows once
-we reach 1.0.
+Security fixes ship in the latest release. If you run an older version,
+upgrade to receive them.
 
 ## Disclosure policy
 

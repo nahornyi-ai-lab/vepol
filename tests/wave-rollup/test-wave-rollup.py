@@ -211,8 +211,14 @@ def setup_sandbox(*, escalation_count_for: dict[str, int] | None = None) -> path
 def run_cycle(sb: pathlib.Path, *, run_id_override: str | None = None,
               fail_slugs: str = "", escalations: dict[str, int] | None = None,
               extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    # Isolation (mandatory, not hygiene): the durable runner's dedup index is
+    # NOT hub-scoped and a *succeeded* managed run keeps its
+    # `cycle-node:<slug>:<date>:retro` reservation forever. On the shared root
+    # this suite attaches to runs left by an earlier sandbox, so its stub
+    # broker never executes and every node lands `partial` instead of `done`.
     env = {**os.environ, "KB_HUB": str(sb), "STUB_FAIL_SLUGS": fail_slugs,
-           "KB_TEST_MODE": "1"}
+           "KB_TEST_MODE": "1",
+           "KB_CLAUDE_RUN_ROOT": str(sb / ".orchestrator" / "claude-runs")}
     if run_id_override:
         env["KB_CYCLE_RUN_ID_OVERRIDE"] = run_id_override
     for slug, n in (escalations or {}).items():

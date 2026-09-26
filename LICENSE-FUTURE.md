@@ -34,7 +34,8 @@ open source forever.
 
 This means:
 
-- Vepol 0.1.0 (released April 2026) → MIT in April 2028
+- Vepol 0.1.0 (released May 2026) → MIT in May 2028
+- Vepol 1.0.0 (released September 2026) → MIT in September 2028
 - Every subsequent release follows the same 2-year schedule
 - The conversion is **irrevocable** and built into the license itself
 

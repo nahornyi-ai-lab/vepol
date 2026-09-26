@@ -39,6 +39,24 @@ SEED_BIN = REPO_ROOT / "bin"
 SEED_TEMPLATE = REPO_ROOT / "_template"
 
 
+def sandbox_env(hub: pathlib.Path) -> dict:
+    """Environment for a cycle invocation against the synthetic hub.
+
+    Isolation (mandatory, not hygiene): the durable runner's dedup index lives
+    at `KB_CLAUDE_RUN_ROOT` (default `~/knowledge/.orchestrator/claude-runs`)
+    and is NOT hub-scoped, while the cycle's per-node key is only
+    `cycle-node:<slug>:<date>:retro`. A *succeeded* managed run keeps its
+    reservation forever, so without an own run root this suite (a) attaches to
+    whatever run any earlier sandbox left under the same slug/date and never
+    executes its own stub broker, and (b) writes its runs into the real hub.
+    """
+    return {
+        **os.environ,
+        "KB_HUB": str(hub),
+        "KB_CLAUDE_RUN_ROOT": str(hub / ".orchestrator" / "claude-runs"),
+    }
+
+
 def setup_fresh_hub():
     """Build a from-scratch hub: bin/, _template/, projects/, daily/, .orchestrator/."""
     sb = tempfile.mkdtemp(prefix="kb-bootstrap-")
@@ -222,7 +240,7 @@ def main():
     proc = subprocess.run(
         [str(hub / "bin" / "kb-rebuild-registry"), "apply",
          "--migration", str(hub / f"migration-{today}.yaml")],
-        env={**os.environ, "KB_HUB": str(hub)},
+        env=sandbox_env(hub),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 0,
@@ -233,7 +251,7 @@ def main():
     proc = subprocess.run(
         [str(hub / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro"],
-        env={**os.environ, "KB_HUB": str(hub)},
+        env=sandbox_env(hub),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 0,

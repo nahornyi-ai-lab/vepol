@@ -1,8 +1,7 @@
 # Scanner signatures ledger — hub-level
 
-Authority record for `catalogue-revision` entries per
-[`/Users/macbook/vepol-dev/knowledge/decisions/context-injection-scanner-v2.md`](/Users/macbook/vepol-dev/knowledge/decisions/context-injection-scanner-v2.md)
-§ Catalogue location and protocol.
+Authority record for `catalogue-revision` entries of the context-injection
+scanner's signature catalogue (`security/scanner-signatures/`).
 
 This is a **peer ledger** to `~/knowledge/promotions.md` — same append-only
 YAML-block structure, same multi-party authorization, but its own

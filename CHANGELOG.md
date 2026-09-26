@@ -4,24 +4,107 @@ All notable changes to Vepol will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`):
 
-- **MAJOR** — incompatible API changes (after 1.0)
-- **MINOR** — backwards-compatible feature additions; **may be breaking in 0.x series**
-- **PATCH** — backwards-compatible bug fixes
+- **MAJOR** — an incompatible change to the stable core (below)
+- **MINOR** — backwards-compatible additions to the core; other `kb-*`
+  commands and `processes.yaml` may change (see below)
+- **PATCH** — backwards-compatible fixes
 
-While in `0.x`, expect that any minor version bump may include breaking changes
-to scripts, manifest format, or directory layout. Read this changelog before
-upgrading.
+The stable core, from 1.0.0 on:
+
+- the knowledge folder layout (`~/knowledge/` and each project's `knowledge/`)
+- the task-board file format (`backlog.md`) and the `kb-board` commands
+- installing and upgrading (`install.sh`, `upgrade.sh`)
+
+Other `kb-*` commands and the background-process settings in `processes.yaml`
+may still change in a minor release within 1.x; every such change is called out
+in that release's entry below.
+
+Releases before 1.0.0 were in the `0.x` series, where a minor bump could include
+breaking changes to scripts, manifest format, or directory layout. If you are
+upgrading from an older `0.x` install, read the entries between your version and
+this one.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-26
+
+### Added
+- **Vepol Desktop** — a native macOS app under `face/`. Your agent runs as an
+  ordinary interactive session in a real terminal inside the window (xterm.js
+  over a local bridge to a per-project tmux session, one per project and
+  runtime); the agent starts only on your click, opening a session only
+  attaches, and closing the window or quitting the app leaves the agent running
+  for the app to re-attach. Around the terminal: a session board with five
+  manual stages (drag and drop, search, project filter, «+» per column), a
+  **Tasks** view of every project's `backlog.md` read through `kb-board` with
+  «Start session», an **Automations** view of every scheduled process with
+  state, reason, last and next run, 14-day history and output tails (plus Hermes
+  cron jobs, and the `com.knowledge.backup` launchd job when it is loaded or
+  installed), a project → sessions tree with a read-only **Knowledge**
+  explorer, and a status bar with Claude and Codex plan usage from local files
+  only. Loopback-only backend; the per-launch token stays in memory. English UI.
+  Built from source with the Command Line Tools; ad-hoc signed, not notarized.
+  Python dependencies in `face/requirements.txt`.
+  ([v1.0.0](docs/releases/v1.0.0.md))
+- **`kb-runtime-registry`** — shows which agent CLIs can actually work right
+  now. Eight tri-state fields per runtime (`installed`, `authenticated`,
+  `quota_available`, `healthy`, `resumable`, `interactive`, `web_current`,
+  `edit_capable`); `available` only after a successful known-answer probe or
+  orchestrator run in the last 24 hours with no active cooldown; `unknown`
+  renders as degraded.
+  `--report` never spends quota, `--probe [<runtime>…]` records one known-token
+  check and refuses to run inside an agent session (exit 3), `--json` validates
+  against the shipped schema. Hermetic `runtime-registry` leg in
+  `tests/run-all.sh`; live smoke in `tests/runtime-registry/live-smoke.sh`.
+- `hermes` (Nous Research Hermes Agent) joins the agent roster in
+  `bin/cli-tools.tsv` — seven runtimes in total.
+- The durable Claude launcher `bin/kb-claude-run` ships with the package.
+
 ### Changed
+- **The startup context arrives whole.** `kb-session-start` drops the
+  per-section caps; the bundle budget is 250,000 characters and content is
+  trimmed only above it, with the trimmed slice named. The bundle opens with a
+  short recovery block and ends with
+  `KB-STARTUP-BUNDLE-END v1 chars=<N> sha256=<H>`, so a complete bundle can be
+  told from a cut one. Each slice reports `present`, `clipped`, `omitted`,
+  `empty` or `missing`, computed after assembly; the old `included` status is
+  gone. New `tests/startup-context/delivery-contract.py`.
+- **`kb-doctor seed-content-audit` fails closed.** It proves the seed directory
+  is its own git repository root, enumerates tracked files NUL-separated with
+  inherited `GIT_*` variables removed, and turns any failure to enumerate
+  (non-zero exit, timeout, launch error, undecodable output) into a blocking
+  P1 `no-git` finding that names the cause. A missing seed directory and an
+  empty but proven repository stay silent.
 - **Specification review is now one lightweight, code-aware pass.** One
   independent reviewer reads the spec and relevant code/API, then returns
   `GO`, at most three questions, or a proven logical `BLOCK`. Repeated
   exact-hash review, Layer 1/Layer 2 passes, mandatory implementation review,
   and automatic Codex stop-time review have been removed. RED/E2E tests, owner
   approval, live smoke, evidence, and `kb-doctor` remain mandatory.
+- **Specs are capped at 150 lines** and must answer four questions — what we do,
+  how it works (every branch named), what is out of scope, how we check it.
+  Review rounds, superseded hashes and research live in the knowledge base and
+  are linked, not kept in the spec. The old mandatory section list is retired.
 - `new-wiki` no longer enables the Codex stop-review gate in new projects.
+- `kb-orchestrator-run` runs its Claude lane through the durable runner and
+  waits for natural exit, with no wall-clock timeout.
+- Versioning: from 1.0.0 on, incompatible changes to the stable core — the
+  knowledge folder layout, the `kb-board` file format and commands, and
+  install/upgrade — come only with a major version. Other `kb-*` commands and
+  `processes.yaml` may change within 1.x with a note here (see the preamble
+  above).
+
+### Fixed
+- Resumed Codex sessions no longer exit on the second turn
+  (`codex exec resume` is no longer passed `-C`).
+- `tests/run-all.sh` no longer sends prompts to installed agent CLIs or writes
+  to the user's run history: `broker-race.py` runs `kb-orchestrator-run`
+  against fake `claude`/`codex` programs, and the cycle suites keep their
+  durable runs inside their sandboxes (`KB_CLAUDE_RUN_ROOT`). The install legs
+  still ask the installed `codex` for its version.
+
+### License
+Vepol 1.0.0 converts to MIT on **2028-09-26**.
 
 ## [0.8.1] — 2026-08-14
 
@@ -41,7 +124,7 @@ upgrading.
   **Behavior change:** mutations on a non-canonical board now refuse instead
   of quietly canonicalizing it — run `kb-board fmt <path>` (dry run first) or
   `kb-board migrate <path>` to canonicalize deliberately.
-  ([v0.8.1](releases/v0.8.1.md))
+  ([v0.8.1](docs/releases/v0.8.1.md))
 - `kb-board` reports structured mutation failures instead of a Python
   traceback: `{"ok": false, "code", "message"}` with `--json`, or
   `kb-board: <code>: <message>` on stderr, exit 1.
@@ -92,7 +175,7 @@ upgrading.
   acceptance, `idea_id` backlink, optional `--context` body) atomically under
   the board lock, idempotently, and mirrors the `plan_item_id` back to the
   card. The v0.6.0 acceptance test now passes as written.
-  ([v0.7.2](releases/v0.7.2.md))
+  ([v0.7.2](docs/releases/v0.7.2.md))
 
 ## [0.7.1] — 2026-08-07
 
@@ -107,7 +190,7 @@ upgrading.
   the People Notebook pipeline could not be imported. Each file gains one
   `from __future__ import annotations` line; an AST sweep of all 106 Python
   files, 39 Python executables and 124 embedded Python heredocs under `bin/`
-  confirms no other file has the same problem. ([v0.7.1](releases/v0.7.1.md))
+  confirms no other file has the same problem. ([v0.7.1](docs/releases/v0.7.1.md))
 
 ## [0.7.0] — 2026-07-14
 
@@ -545,7 +628,14 @@ v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
 **2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.1...v1.0.0
+[0.8.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.3.0...v0.3.1

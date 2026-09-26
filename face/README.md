@@ -7,9 +7,15 @@ scheduled Vepol process.
 
 ## Build and open
 
-The local development build uses the installed Command Line Tools directly:
+Vepol Desktop runs on Apple Silicon Macs. It needs Python 3.11 or later (for
+example from `brew install python`) and the Command Line Tools. Create the
+app's Python environment once with that Python, then build (the build uses the
+Command Line Tools' macOS SDK; pass `SDK=<path>` to `./desktop/build.sh` to use
+another):
 
 ```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ./desktop/build.sh
 open desktop/build/VepolDesktop.app
 ```
@@ -60,15 +66,16 @@ runs keep their history and still open in the app.
   never writes a board.
 - **Automations** — every process in `personal/processes.yaml` with its
   schedule, dependency, state and reason, last and next run, 14-day history and
-  output tails, plus the backup job and Hermes cron jobs. Read-only; states come
-  from the files the scheduler already writes, and «Unknown» means there is no
-  evidence.
+  output tails, plus Hermes cron jobs and, when it is loaded or installed in
+  `~/Library/LaunchAgents`, the `com.knowledge.backup` launchd job. Read-only;
+  states come from the files the scheduler already writes, and «Unknown» means
+  there is no evidence.
 - **Session view** — a project → sessions tree on the left with the same state
   dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
   read-only explorer of the project's `knowledge/` folder (folders collapse, a
   name filter searches all of them, files open as plain text up to 512 KB).
-- **Usage bar** along the bottom: `Claude 5h · 7d` and `Codex 7d` used
-  percentages with «as of» times, grey when older than 6 hours, «no data» when
+- **Usage bar** along the bottom: `Claude 5h · 7d` and Codex's current
+  windows as used percentages with «as of» times, grey when older than 6 hours, «no data» when
   there is none. Codex numbers come from its own rollout files under
   `$CODEX_HOME/sessions` (default `~/.codex`). Claude numbers come from a small
   file your Claude Code status line writes; add this line to your statusLine
@@ -88,13 +95,15 @@ limitations. Use the native entry for the experience above.
 
 ## Verification
 
-Tests use Python with fastapi, uvicorn, httpx, websockets and pytest (the
-app's `.venv`), and Node with Playwright for the browser journeys. The Tasks and
-Automations journeys read the hub's `~/knowledge/bin/kb-board`,
-`~/knowledge/bin/_kb_processes.py` and `~/knowledge/_template/knowledge/backlog.md`
-(read-only; fixtures run on temporary copies). Nothing touches your real
-conversations, your tmux server or a real agent: each run uses its own state
-directory, its own tmux server and `/bin/cat` in place of the agent.
+Tests need `pytest` and `httpx` in the app's `.venv` on top of
+`requirements.txt` (`.venv/bin/pip install -r requirements.txt pytest httpx`),
+and Node with Playwright for the browser journeys. The Tasks and Automations
+journeys read `bin/kb-board`, `bin/_kb_processes.py` and
+`_template/knowledge/backlog.md` from `VEPOL_FIXTURE_KB_ROOT` if set, else from
+the Vepol repository this folder sits in, else from `~/knowledge` (read-only;
+fixtures run on temporary copies). Nothing touches your real conversations,
+your tmux server or a real agent: each run uses its own state directory, its own
+tmux server and `/bin/cat` in place of the agent.
 
 From this directory, outside tmux:
 

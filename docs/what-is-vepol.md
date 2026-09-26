@@ -28,7 +28,7 @@ Think of it as the local coordination layer around those agents:
 - plain markdown files as the shared source of truth
 - a durable project/person/task graph
 - scripts and schedules that wake agents up for routine work
-- cross-agent review so one model can challenge another
+- one independent review of each plan, so a second model checks it against the code
 - incidents, logs, backlog, and handoff notes that survive across sessions
 
 The model provider is replaceable. The knowledge base is not. If Claude,
@@ -165,12 +165,13 @@ retired hypotheses. Once a week (or after a pivot), Vepol re-reads its log,
 checks which assumptions held, and updates the strategy file. You see the
 diff. You can revert.
 
-### Plans go through cross-agent review
+### Plans get one independent review
 
-Before any non-trivial implementation, Vepol writes a specification, has
-**an independent configured AI agent** check it, and only proceeds after
-concerns are addressed. You never get a one-shot answer for something that
-matters — you get something that survived independent scrutiny.
+Before any non-trivial implementation, Vepol writes a short specification,
+has **another configured AI agent** check it once against the code, and
+proceeds after your approval. For something that matters you never get a
+one-shot answer from a single model — you get a plan a second model has
+checked.
 
 ### Every meaningful event → log entry
 
@@ -189,7 +190,7 @@ chronicle; you both refer to the same record.
 | **Decisions and lessons** | dissolve in chat history | auto-extracted into the log |
 | **Autonomy** | reactive (answers your prompts) | proactive (initiates work) |
 | **Transparency** | "magic" inside the model | every step is text on disk |
-| **Quality of plans** | one answer from one model | plan goes through cross-review by independent AI agents |
+| **Quality of plans** | one answer from one model | plan gets one independent, code-aware review before you approve it |
 | **Growth over time** | each chat starts blank | each day, takes on more of your routine |
 | **Health/goal alignment** | absent | present (devices feed in; pace adapts) |
 

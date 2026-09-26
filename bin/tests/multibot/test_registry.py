@@ -57,10 +57,10 @@ class AgentRegistryTests(unittest.TestCase):
     def _registry(self) -> AgentRegistry:
         return load_from_specs([
             _make_spec("hub"),
-            _make_spec("leadgen", parent="hub"),
-            _make_spec("leadgen-leads", parent="leadgen"),
-            _make_spec("nailab-ailab-landing", parent="leadgen",
-                       bot_username="nailab_landing_bot"),
+            _make_spec("sales", parent="hub"),
+            _make_spec("sales-leads", parent="sales"),
+            _make_spec("sales-landing", parent="sales",
+                       bot_username="demo_landing_bot"),
             _make_spec("family", parent="hub"),
             _make_spec("auto", parent="family"),
         ])
@@ -84,13 +84,13 @@ class AgentRegistryTests(unittest.TestCase):
 
     def test_by_username_short_form(self) -> None:
         r = self._registry()
-        spec = r.by_username("nailab_landing_bot")
-        self.assertEqual(spec.slug, "nailab-ailab-landing")
+        spec = r.by_username("demo_landing_bot")
+        self.assertEqual(spec.slug, "sales-landing")
 
     def test_known_bot_usernames(self) -> None:
         names = self._registry().known_bot_usernames()
         self.assertIn("demo_hub_bot", names)
-        self.assertIn("nailab_landing_bot", names)
+        self.assertIn("demo_landing_bot", names)
         # all lowercase
         for n in names:
             self.assertEqual(n, n.lower())
@@ -99,11 +99,11 @@ class AgentRegistryTests(unittest.TestCase):
         r = self._registry()
         hub_children = r.children_of("hub")
         slugs = sorted(c.slug for c in hub_children)
-        self.assertEqual(slugs, ["family", "leadgen"])
+        self.assertEqual(slugs, ["family", "sales"])
 
-        leadgen_children = r.children_of("leadgen")
-        slugs2 = sorted(c.slug for c in leadgen_children)
-        self.assertEqual(slugs2, ["leadgen-leads", "nailab-ailab-landing"])
+        sales_children = r.children_of("sales")
+        slugs2 = sorted(c.slug for c in sales_children)
+        self.assertEqual(slugs2, ["sales-landing", "sales-leads"])
 
     def test_root_agents(self) -> None:
         r = self._registry()

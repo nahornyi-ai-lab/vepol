@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Owner-approved specification gate documentation contract tests.
 
-Spec: vepol-dev/knowledge/decisions/owner-spec-approval-gate-2026-06-21.md
-Build plan: vepol-dev/knowledge/decisions/owner-spec-approval-gate-build-plan-2026-06-21.md
-
 These tests exercise the methodology/docs rollout as a process contract:
 material work must flow through research -> reviewed spec -> owner approval ->
 build plan -> RED/E2E tests -> implementation.
@@ -96,15 +93,17 @@ def test_spec_driven_workflow_contract() -> None:
         "docs/methodology/spec-driven-workflow.md",
         "spec-driven workflow lists required spec contents",
         [
-            "Product context",
-            "Place in Vepol",
-            "Software 3.0",
+            "at most 150 lines",
+            "What we do.",
+            "How it works.",
+            "What is out of scope.",
+            "How we check it.",
             "owner approval",
             "spec-contract",
-            "mandatory E2E path",
+            "mandatory E2E",
             "technically impossible",
             "build plan",
-            "Changes requested",
+            "rejects or supersedes",
         ],
     )
 

@@ -191,7 +191,13 @@ def main():
     print("Phase 3 acceptance: kb-orchestrator-cycle retro on 3-node hierarchy")
     sb = setup_sandbox()
 
-    env = {**os.environ, "KB_HUB": str(sb)}
+    # Isolation (mandatory, not hygiene): the durable runner's dedup index is
+    # NOT hub-scoped and a *succeeded* managed run keeps its
+    # `cycle-node:<slug>:<date>:retro` reservation forever. Sharing the real
+    # run root makes this suite attach to a previous sandbox's run instead of
+    # spawning its own stub broker, and leaks its runs into the live hub.
+    env = {**os.environ, "KB_HUB": str(sb),
+           "KB_CLAUDE_RUN_ROOT": str(sb / ".orchestrator" / "claude-runs")}
     cli = sb / "bin" / "kb-orchestrator-cycle"
 
     # Step 1: dry-run prints BFS plan

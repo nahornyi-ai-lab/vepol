@@ -10,7 +10,7 @@
 .vscode/
 .idea/
 
-# Build artifacts (none yet for v0.1)
+# Build artifacts
 node_modules/
 __pycache__/
 *.pyc

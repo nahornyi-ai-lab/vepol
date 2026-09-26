@@ -24,6 +24,77 @@ import uuid
 
 N_PARALLEL = 6
 
+# --- Fake CLI sandbox -------------------------------------------------------
+#
+# kb-orchestrator-run resolves its two backends differently:
+#   - claude: build_claude_command() hardcodes argv[0]="claude" and lets the
+#     durable runner (_kb_claude_runner.run_command, env=None) exec it via a
+#     bare-name PATH search — so it is redirected by putting a fake "claude"
+#     first on PATH.
+#   - codex: build_codex_command() calls _kb_codex.codex_bin(), which returns
+#     $KB_CODEX_BIN verbatim if set (else ~/.local/bin/codex) — so it is
+#     redirected by pointing KB_CODEX_BIN at the fake "codex" directly.
+# Both fakes just log their invocation (argv, pid, cwd) and exit 0 fast, so
+# this suite can never start a real claude/codex process while still
+# exercising the real save_state race in kb-orchestrator-run.
+
+FAKE_CLAUDE_SRC = """#!/usr/bin/env python3
+import json, os, sys, time
+log_path = os.environ.get("FAKE_CLI_CALL_LOG")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "bin": "claude", "argv": sys.argv, "pid": os.getpid(),
+            "cwd": os.getcwd(), "ts": time.time(),
+        }) + "\\n")
+print("fake claude: ok")
+sys.exit(0)
+"""
+
+FAKE_CODEX_SRC = """#!/usr/bin/env python3
+import json, os, sys, time
+log_path = os.environ.get("FAKE_CLI_CALL_LOG")
+if log_path:
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "bin": "codex", "argv": sys.argv, "pid": os.getpid(),
+            "cwd": os.getcwd(), "ts": time.time(),
+        }) + "\\n")
+# kb-orchestrator-run's codex lane passes -o <path> and reads that file back
+# as the run's output payload.
+out_path = None
+for i, a in enumerate(sys.argv):
+    if a == "-o" and i + 1 < len(sys.argv):
+        out_path = sys.argv[i + 1]
+        break
+if out_path:
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("fake codex: ok\\n")
+print("fake codex: ok")
+sys.exit(0)
+"""
+
+
+def make_fake_cli_bin(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """Write fake claude/codex executables + an empty call log under root.
+
+    Returns (fake_bin_dir, call_log_path).
+    """
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir()
+    # Resolve: macOS's tempfile sandbox lives under /var/folders/... which is
+    # itself a symlink to /private/var/folders/...; the kernel's shebang
+    # re-exec records the canonical (resolved) path as argv[0], so compare
+    # against that same resolved form later instead of the symlinked one.
+    fake_bin = fake_bin.resolve()
+    call_log = root / "fake-cli-calls.jsonl"
+    call_log.touch()
+    for name, src in (("claude", FAKE_CLAUDE_SRC), ("codex", FAKE_CODEX_SRC)):
+        script = fake_bin / name
+        script.write_text(src, encoding="utf-8")
+        script.chmod(0o755)
+    return fake_bin, call_log
+
 
 def assert_(cond, msg):
     if not cond:
@@ -41,18 +112,29 @@ def main():
     workdir = p / "workdir"
     workdir.mkdir()
 
-    env = {**os.environ, "KB_HUB": str(p)}
+    # Isolation (mandatory, not hygiene): see fixture.py — the runner dedup
+    # index is machine-global, so without an own run root this suite both
+    # writes into the live hub and can attach to a prior sandbox's runs.
+    fake_bin, call_log = make_fake_cli_bin(p)
+    env = {**os.environ, "KB_HUB": str(p),
+           "KB_CLAUDE_RUN_ROOT": str(p / ".orchestrator" / "claude-runs"),
+           # claude: build_claude_command() hardcodes argv[0]="claude" and
+           # resolves it via a bare-name PATH search — put the fake first.
+           "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+           # codex: codex_bin() returns KB_CODEX_BIN verbatim when set —
+           # point it straight at the fake, no PATH search involved.
+           "KB_CODEX_BIN": str(fake_bin / "codex"),
+           "FAKE_CLI_CALL_LOG": str(call_log)}
     procs = []
     run_ids = []
     for i in range(N_PARALLEL):
         rid = str(uuid.uuid4())
         run_ids.append(rid)
-        # Use a no-op prompt that exits quickly. The broker will try to spawn
-        # claude/codex which may fail — that's OK; what matters is that the
-        # state-write goroutines don't race. Set a tight timeout to avoid
-        # actually invoking the LLMs.
-        # NOTE: actual claude/codex CLI may not respond inside 3s; broker will
-        # mark as timeout. That's a valid run path that exercises save_state.
+        # Use a no-op prompt that exits quickly. The broker will spawn the
+        # fake claude/codex from fake_bin (never a real LLM CLI — see
+        # make_fake_cli_bin above); what matters here is that the
+        # parallel state writes don't race. --timeout applies to the Codex
+        # lane only; the Claude lane waits for its (instant) fake to exit.
         cmd = [
             "__HOME__/knowledge/bin/kb-orchestrator-run",
             "echo only",
@@ -72,6 +154,17 @@ def main():
 
     assert_(not failed_with_oserror,
             f"no FileNotFoundError race on state.tmp (failed: {len(failed_with_oserror)})")
+
+    # Structural proof that only the fake CLIs ran: each logged argv[0] is a
+    # path under fake_bin, not a bare "claude"/"codex" resolved elsewhere.
+    # (Bare argv[0] survives PATH search — see make_fake_cli_bin's docstring
+    # comment above — so this also rules out an unintended real-binary hit.)
+    log_lines = [ln for ln in call_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    entries = [json.loads(ln) for ln in log_lines]
+    assert_(len(entries) > 0, "fake CLI call log is non-empty (fake was actually invoked)")
+    bad = [e for e in entries if not str(e.get("argv", [""])[0]).startswith(str(fake_bin))]
+    assert_(not bad,
+            f"every recorded invocation argv[0] points at fake_bin ({len(bad)} did not)")
 
     # state.json should be valid JSON after the storm.
     state_file = p / ".orchestrator" / "state.json"
@@ -152,7 +245,8 @@ def cr6_b2_nested_preservation():
             _update(mut)
         """)
         proc = subprocess.Popen(["python3", "-c", worker_code],
-                                env={**os.environ, "KB_HUB": str(p)},
+                                env={**os.environ, "KB_HUB": str(p),
+                                     "KB_CLAUDE_RUN_ROOT": str(p / ".orchestrator" / "claude-runs")},
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.PIPE)
         workers.append((k, proc))
