@@ -12,17 +12,17 @@ private struct LaunchConfiguration {
     init(arguments: [String]) throws {
         guard let index = arguments.firstIndex(of: "--test-config") else { return }
         guard arguments.indices.contains(index + 1) else {
-            throw ShellError.message("После --test-config требуется путь к файлу.")
+            throw ShellError.message("--test-config needs a file path.")
         }
         let data = try Data(contentsOf: URL(fileURLWithPath: arguments[index + 1]))
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ShellError.message("Не удалось прочитать конфигурацию проверки.")
+            throw ShellError.message("Could not read the test configuration.")
         }
         if let value = object["port"] as? Int { port = value }
         hub = object["hub"] as? String
         stateDirectory = object["state_dir"] as? String
         guard (1...65535).contains(port), stateDirectory != nil else {
-            throw ShellError.message("Проверке нужны отдельное state_dir и допустимый порт.")
+            throw ShellError.message("The test run needs a separate state_dir and a valid port.")
         }
     }
 
@@ -90,27 +90,27 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "О Vepol", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About Vepol", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Скрыть Vepol", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide Vepol", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Завершить Vepol", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Vepol", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Правка")
-        for (title, selector, key) in [("Отменить", "undo:", "z"), ("Вырезать", "cut:", "x"), ("Копировать", "copy:", "c"), ("Вставить", "paste:", "v"), ("Выделить всё", "selectAll:", "a")] {
+        let edit = NSMenu(title: "Edit")
+        for (title, selector, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
             edit.addItem(withTitle: title, action: NSSelectorFromString(selector), keyEquivalent: key)
         }
         editItem.submenu = edit
         menu.addItem(editItem)
         let windowItem = NSMenuItem()
-        let windowMenu = NSMenu(title: "Окно")
-        let reopen = windowMenu.addItem(withTitle: "Открыть Vepol", action: #selector(showWindow), keyEquivalent: "0")
+        let windowMenu = NSMenu(title: "Window")
+        let reopen = windowMenu.addItem(withTitle: "Show Vepol", action: #selector(showWindow), keyEquivalent: "0")
         reopen.target = self
-        let reload = windowMenu.addItem(withTitle: "Обновить", action: #selector(reloadPage), keyEquivalent: "r")
+        let reload = windowMenu.addItem(withTitle: "Reload", action: #selector(reloadPage), keyEquivalent: "r")
         reload.target = self
-        windowMenu.addItem(withTitle: "Закрыть окно", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windowMenu
         menu.addItem(windowItem)
         NSApp.mainMenu = menu
@@ -139,7 +139,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         stack.orientation = .vertical
         stack.spacing = 20
         if retry {
-            stack.addArrangedSubview(NSButton(title: "Повторить", target: self, action: #selector(retryBackend)))
+            stack.addArrangedSubview(NSButton(title: "Retry", target: self, action: #selector(retryBackend)))
         }
         let container = NSView()
         container.addSubview(stack)
@@ -155,8 +155,8 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
     }
 
     private func showFailure(_ message: String) {
-        let safeMessage = token.isEmpty ? message : message.replacingOccurrences(of: token, with: "[скрыто]")
-        statusView("Vepol не удалось запустить.\n\n\(safeMessage)", retry: configuration != nil)
+        let safeMessage = token.isEmpty ? message : message.replacingOccurrences(of: token, with: "[hidden]")
+        statusView("Vepol could not start.\n\n\(safeMessage)", retry: configuration != nil)
     }
 
     @objc private func retryBackend() {
@@ -166,12 +166,12 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
 
     private func backendDirectory() throws -> URL {
         guard let resource = Bundle.main.url(forResource: "backend-path", withExtension: "txt") else {
-            throw ShellError.message("В сборке отсутствует путь к backend. Пересоберите приложение через desktop/build.sh.")
+            throw ShellError.message("The build has no backend path. Rebuild the app with desktop/build.sh.")
         }
         let path = try String(contentsOf: resource, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let directory = URL(fileURLWithPath: path, isDirectory: true)
         guard FileManager.default.isExecutableFile(atPath: directory.appendingPathComponent(".venv/bin/python").path) else {
-            throw ShellError.message("Не найден Python окружения Vepol. Восстановите .venv в каталоге backend и нажмите «Повторить».")
+            throw ShellError.message("Vepol's Python environment was not found. Restore .venv in the backend folder and press Retry.")
         }
         return directory
     }
@@ -198,12 +198,12 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         outputBuffer = Data()
         lastError = ""
         webView = nil
-        statusView("Запускаю Vepol…")
+        statusView("Starting Vepol…")
         do {
             let directory = try backendDirectory()
             var randomBytes = [UInt8](repeating: 0, count: 32)
             guard SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes) == errSecSuccess else {
-                throw ShellError.message("Не удалось создать защищённый ключ запуска.")
+                throw ShellError.message("Could not create the secure launch key.")
             }
             token = Data(randomBytes).base64EncodedString().replacingOccurrences(of: "+", with: "-")
                 .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -273,7 +273,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
                 bootstrapFailed = true
                 let holder = object["holder"] as? String
                 let pid = (object["pid"] as? Int).map { " (PID \($0))" } ?? ""
-                let detail = holder.map { "\nПорт занимает \($0)\(pid)." } ?? ""
+                let detail = holder.map { "\nThe port is held by \($0)\(pid)." } ?? ""
                 showFailure(message + detail)
                 return
             }
@@ -347,13 +347,13 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
     }
 
     private func request(_ path: String, method: String = "GET") async throws -> [String: Any] {
-        guard let configuration else { throw ShellError.message("Vepol ещё не настроен.") }
+        guard let configuration else { throw ShellError.message("Vepol is not configured yet.") }
         var request = URLRequest(url: URL(string: configuration.origin + path)!)
         request.httpMethod = method
         request.setValue(token, forHTTPHeaderField: "X-Vepol-Token")
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
-            throw ShellError.message("Backend пока не подтвердил состояние сессий.")
+            throw ShellError.message("The backend has not confirmed the session state yet.")
         }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
     }
@@ -379,8 +379,8 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
                 _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
             }
             let content = UNMutableNotificationContent()
-            content.title = "Vepol ждёт вашего ответа"
-            content.body = count == 1 ? "Одна сессия требует вашего решения." : "Сессий, ожидающих решения: \(count)."
+            content.title = "Vepol is waiting for you"
+            content.body = count == 1 ? "One session needs your decision." : "Sessions waiting for your decision: \(count)."
             content.sound = .default
             try? await center.add(UNNotificationRequest(identifier: "vepol-owner-attention", content: content, trigger: nil))
         }
@@ -408,10 +408,10 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         shuttingDown = false
         NSApp.reply(toApplicationShouldTerminate: false)
         let alert = NSAlert()
-        alert.messageText = "Vepol продолжает работу"
+        alert.messageText = "Vepol keeps working"
         alert.informativeText = message
-        alert.addButton(withTitle: "Продолжить работу")
-        alert.addButton(withTitle: "Открыть Vepol")
+        alert.addButton(withTitle: "Keep Working")
+        alert.addButton(withTitle: "Show Vepol")
         if alert.runModal() == .alertSecondButtonReturn { showWindow() }
     }
 
@@ -419,7 +419,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         do {
             let status = try await request("/api/desktop/status")
             guard status["busy"] as? Bool == false else {
-                cancelQuit(message: "Есть активные сессии или запросы на решение. Они останутся запущенными. Дождитесь завершения работы или остановите нужную сессию в приложении.")
+                cancelQuit(message: "Some sessions are still working or waiting for a decision. They will keep running. Wait for them to finish or stop the session in the app.")
                 return
             }
             shuttingDown = true
@@ -430,7 +430,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
             if backend?.isRunning != true {
                 NSApp.reply(toApplicationShouldTerminate: true)
             } else {
-                cancelQuit(message: "Не удалось подтвердить безопасное завершение backend. Сессии сохранены. Повторите завершение, когда связь восстановится.")
+                cancelQuit(message: "Could not confirm a safe backend shutdown. Sessions are kept. Quit again once the connection is back.")
             }
         }
     }
@@ -446,7 +446,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         if terminationPending && shuttingDown {
             NSApp.reply(toApplicationShouldTerminate: true)
         } else if !bootstrapFailed {
-            showFailure("Backend завершился (код \(status)).\n\(lastError)")
+            showFailure("The backend exited (code \(status)).\n\(lastError)")
         }
     }
 }

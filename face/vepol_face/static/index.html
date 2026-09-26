@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Vepol Face</title>
+<link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+<script src="/vendor/xterm/xterm.js"></script>
+<script src="/vendor/xterm/addon-fit.js"></script>
 <style>
   :root {
     --bg: #f6f7f9;
@@ -19,6 +22,7 @@
     --unknown: #868e96;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --bar-h: 26px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -32,15 +36,27 @@
     margin: 0; font-family: var(--sans); background: var(--bg); color: var(--ink);
     height: 100vh; overflow: hidden; font-size: 14px;
   }
-  .app { display: grid; grid-template-columns: 260px 1fr 300px; height: 100vh; }
+  /* The usage bar is fixed at the bottom; the app keeps its height free. */
+  .app { display: grid; grid-template-columns: 260px 1fr 300px; height: calc(100vh - var(--bar-h)); }
   .col { overflow-y: auto; padding: 16px; }
   .left {
     border-right: 1px solid var(--line); background: var(--panel-2);
     display: flex; flex-direction: column; overflow: hidden;
   }
   .scroller { overflow-y: auto; min-height: 0; }
-  #targets { max-height: 190px; }
-  #convs { flex: 1; }
+  #tree { flex: 1; margin-bottom: 4px; }
+  .tree-project { display: flex; align-items: center; gap: 6px; }
+  .tree-project .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tree-project .count { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+  .item.tree-project.active { border-color: var(--accent); }
+  .tree-sessions { margin: 0 0 6px 10px; padding-left: 4px; border-left: 1px solid var(--line); }
+  .tree-session { display: flex; align-items: flex-start; gap: 7px; padding: 5px 8px; font-size: 13px; }
+  .tree-session .dot { margin-top: 5px; }
+  .tree-session .nodot { width: 8px; flex: 0 0 8px; }
+  .tree-session .t { min-width: 0; overflow-wrap: anywhere; }
+  .dot.agent-alive { background: var(--ok); }
+  .dot.agent-not_running { background: var(--unknown); }
+  .dot.agent-unknown { background: var(--warn); }
   .filter {
     width: 100%; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
     background: var(--panel); color: var(--ink); font-size: 12px; margin-bottom: 6px;
@@ -156,9 +172,11 @@
   .board-column h2 { margin: 0; font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--ink); }
   .stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--stage-color); }
   .stage-count { color: var(--ink-dim); font-size: 11px; margin-left: auto; background: var(--bg); padding: 2px 7px; border-radius: 10px; }
+  .column-add { background: transparent; color: var(--ink-dim); border: 1px solid transparent; padding: 0 7px; font-size: 16px; line-height: 20px; font-weight: 500; border-radius: 6px; }
+  .column-add:hover { color: var(--accent); border-color: var(--line); }
   .board-column.drag-over { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .board-cards { overflow-y: auto; min-height: 0; flex: 1; padding: 0 10px 12px; }
-  .session-card { background: var(--panel); border: 1px solid var(--line); padding: 13px; border-radius: 9px; margin: 0 0 10px; cursor: grab; }
+  .session-card { background: var(--panel); border: 1px solid var(--line); padding: 13px; border-radius: 9px; margin: 0 0 10px; cursor: pointer; }
   .session-card:hover { border-color: var(--accent); }
   .session-card[aria-busy="true"] { opacity: .6; }
   .session-card.dragging { opacity: .4; }
@@ -178,10 +196,95 @@
   .conversation-heading { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
   #conversation-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
   .board-footnote { color: var(--ink-dim); font-size: 11px; margin-top: 8px; line-height: 1.5; }
+  .project-path { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board-project-path { margin-top: 6px; }
+  .session-path { margin: -4px 0 8px; }
+  #terminal { flex: 1; min-height: 0; padding: 10px 12px 4px; background: #000; }
+  #terminal .xterm { height: 100%; }
+  .agent-state.alive { color: var(--ok); }
+  .agent-state.not_running { color: var(--ink-dim); }
+  .agent-state.unknown { color: var(--warn); }
+  .session-activity.alive { color: var(--ok); }
+  .session-activity.not_running { color: var(--ink-dim); }
+  .session-activity.unknown { color: var(--warn); }
+  #terminal-start { padding: 4px 10px; font-size: 12px; }
+  .conversation-heading { flex-wrap: wrap; }
+  #conversation-path { flex-basis: 100%; }
+  .view-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; margin-bottom: 12px; background: var(--panel-2); }
+  .view-switch button { background: transparent; color: var(--ink-dim); padding: 5px 13px; font-weight: 500; border-radius: 6px; }
+  .view-switch button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 0 0 1px var(--line); font-weight: 600; }
+  .board-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+  .chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .chips button { background: transparent; color: var(--ink-dim); border: 1px solid var(--line); padding: 6px 11px; font-weight: 500; }
+  .chips button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  #tasks-search { width: 240px; flex: 0 1 240px; }
+  #tasks-project { width: 210px; }
+  #tasks-count { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
+  .table-wrap { overflow: auto; min-height: 0; min-width: 0; }
+  #tasks-pane .table-wrap { flex: 0 1 auto; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .data-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  .data-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.45; }
+  .data-table td.nowrap { white-space: nowrap; }
+  .data-table tr.error-row td { color: var(--bad); }
+  .data-table tr.clickable { cursor: pointer; }
+  .data-table tr.clickable:hover td, .data-table tr.selected td { background: var(--panel-2); }
+  .data-table button { padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+  .status-word { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .dot.st-active { background: var(--accent); }
+  .dot.st-ok { background: var(--ok); }
+  .dot.st-warn { background: var(--warn); }
+  .dot.st-bad { background: var(--bad); }
+  .dot.st-idle { background: var(--unknown); }
+  .reason { font-size: 11px; color: var(--ink-dim); margin-top: 2px; overflow-wrap: anywhere; }
+  .tone-bad { color: var(--bad); }
+  .tone-warn { color: var(--warn); }
+  .tone-ok { color: var(--ok); }
+  .grey-line { color: var(--ink-dim); font-size: 12px; margin-top: 10px; }
+  #automations-pane { overflow-y: auto; }
+  .strip { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; margin: 18px 0 12px; font-size: 13px; }
+  .auto-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
+  .auto-layout.with-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 440px); }
+  #auto-detail { border: 1px solid var(--line); border-radius: 9px; padding: 14px; background: var(--panel-2); min-width: 0; }
+  #auto-detail h3 { margin: 0; font-size: 15px; }
+  #auto-detail h4 { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); margin: 16px 0 6px; }
+  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .detail-head button { padding: 4px 10px; }
+  pre.output { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; margin: 0 0 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .paths { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 11px; }
+  .paths li { margin-bottom: 4px; overflow-wrap: anywhere; user-select: all; }
+  .paths .k { font-family: var(--sans); user-select: none; }
+  h2.section { font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 24px 0 8px; }
+  .right .view-switch { display: flex; }
+  .right .view-switch button { flex: 1; }
+  #kb-root { margin-bottom: 8px; }
+  .kb-tree { max-height: 42vh; overflow: auto; font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); padding: 4px 0; }
+  .kb-entry { padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kb-entry.dir { color: var(--ink-dim); }
+  .kb-entry.dir[data-kb-dir] { cursor: pointer; }
+  .kb-entry.dir[data-kb-dir]:hover { background: var(--panel-2); }
+  .kb-chevron { display: inline-block; width: 12px; }
+  .kb-entry.file { cursor: pointer; }
+  .kb-entry.file:hover, .kb-entry.selected { background: var(--panel-2); }
+  .kb-entry.selected { color: var(--accent); }
+  .kb-size { color: var(--ink-dim); font-size: 10px; margin-left: 6px; }
+  #kb-file { margin-top: 12px; }
+  #kb-file-path { margin-bottom: 6px; overflow-wrap: anywhere; }
+  #kb-file-text { max-height: 50vh; }
+  .usage-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; height: var(--bar-h); z-index: 5;
+    display: flex; align-items: center; gap: 10px; padding: 0 14px; overflow: hidden;
+    border-top: 1px solid var(--line); background: var(--panel-2); font-size: 11px; white-space: nowrap;
+  }
+  .usage-part { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .usage-part.stale { color: var(--ink-dim); }
+  .usage-sep { color: var(--ink-dim); }
+  #usage-error { color: var(--warn); flex: none; }
   @media (max-width: 960px) {
     .app { grid-template-columns: 210px minmax(0, 1fr); }
     .right { display: none; }
     #board-view { padding: 22px 16px 12px; }
+    .auto-layout.with-detail { grid-template-columns: minmax(0, 1fr); }
   }
   @media (max-width: 560px) {
     .app { grid-template-columns: 1fr; }
@@ -193,83 +296,143 @@
     #board-project-filter { flex: 1; min-width: 0; }
     #board-count { margin-left: 0; }
     .board-column { flex-basis: 270px; min-width: 270px; }
+    #tasks-search { width: 100%; flex: 1 1 100%; }
+    #tasks-project { flex: 1; min-width: 0; }
+    #tasks-count { margin-left: 0; }
+    .board-heading { flex-wrap: wrap; }
+    .board-heading > div { min-width: 0; max-width: 100%; }
     .thread, .composer { padding-left: 15px; padding-right: 15px; }
     .conversation-heading { padding: 10px 14px; }
+    /* Two lines: Claude on the first, Codex (and a refresh error) on the second. */
+    :root { --bar-h: 38px; }
+    .usage-bar { flex-wrap: wrap; align-content: center; row-gap: 1px; column-gap: 8px; }
+    #usage-claude { flex: 1 1 100%; }
+    #usage-codex { flex: 1 1 0; }
+    .usage-sep { display: none; }
   }
   .empty { color: var(--ink-dim); font-size: 13px; padding: 40px 0; text-align: center; }
 </style>
 </head>
 <body>
 <div class="app board-mode" id="app">
-  <section id="board-view" aria-label="Доска сессий">
+  <section id="board-view" aria-label="Session board">
     <div class="board-heading">
-      <div><h1>Сессии</h1><p class="board-description">Вся работа перед глазами. Переноси карточки по этапам и возвращайся к разговору.</p></div>
-      <button id="board-newconv">+ Новая сессия</button>
+      <div>
+        <div class="view-switch" role="tablist" aria-label="View">
+          <button role="tab" data-board-view="sessions" aria-selected="true">Sessions</button><button role="tab" data-board-view="tasks" aria-selected="false">Tasks</button><button role="tab" data-board-view="automations" aria-selected="false">Automations</button>
+        </div>
+        <h1 id="board-title">Sessions</h1><p class="board-description" id="board-description">All your work in one place. Move cards between stages and jump back into any conversation.</p><div class="project-path" id="board-project-path" hidden></div></div>
+      <button id="board-newconv">+ New session</button>
     </div>
-    <div class="board-toolbar">
-      <input type="search" class="filter" id="board-search" aria-label="Поиск сессий" placeholder="Найти сессию…" />
-      <select class="filter" id="board-project-filter" aria-label="Проект"><option value="">Все проекты</option></select>
-      <span id="board-count" role="status" aria-live="polite"></span>
+    <div class="board-pane" id="sessions-pane">
+      <div class="board-toolbar">
+        <input type="search" class="filter" id="board-search" aria-label="Search sessions" placeholder="Find a session…" />
+        <select class="filter" id="board-project-filter" aria-label="Project"><option value="">All projects</option></select>
+        <span id="board-count" role="status" aria-live="polite"></span>
+      </div>
+      <div id="board-feedback" class="banner bad" role="alert" hidden></div>
+      <div id="board-empty" class="empty" hidden></div>
+      <div id="board-columns"></div>
+      <div class="board-footnote">You choose the stage. “Agent replied” means the reply has ended, not that the task is done.</div>
     </div>
-    <div id="board-feedback" class="banner bad" role="alert" hidden></div>
-    <div id="board-empty" class="empty" hidden></div>
-    <div id="board-columns"></div>
-    <div class="board-footnote">Этап выбираешь ты. «Агент ответил» показывает окончание ответа, а не завершение задачи.</div>
+    <div class="board-pane" id="tasks-pane" hidden>
+      <div class="board-toolbar">
+        <select class="filter" id="tasks-project" aria-label="Project"><option value="">All projects</option></select>
+        <div class="chips" role="group" aria-label="Status">
+          <button data-task-chip="active" aria-pressed="true">Active</button><button data-task-chip="backlog" aria-pressed="false">Backlog</button><button data-task-chip="closed" aria-pressed="false">Closed</button><button data-task-chip="all" aria-pressed="false">All</button>
+        </div>
+        <input type="search" class="filter" id="tasks-search" aria-label="Search tasks" placeholder="Find a task…" />
+        <button class="ghost" id="tasks-refresh">Refresh</button>
+        <span id="tasks-count" role="status" aria-live="polite"></span>
+      </div>
+      <div id="tasks-feedback" class="banner bad" role="alert" hidden></div>
+      <div class="table-wrap" id="tasks-table"></div>
+      <div id="tasks-empty" class="empty" hidden></div>
+      <div id="tasks-none" class="grey-line" hidden></div>
+      <div class="board-footnote">Read only. Status, claims and new tasks stay with kb-board and the agents.</div>
+    </div>
+    <div class="board-pane" id="automations-pane" hidden>
+      <div id="auto-feedback" class="banner bad" role="alert" hidden></div>
+      <div id="auto-strip" class="strip" hidden></div>
+      <div id="auto-notes"></div>
+      <div class="auto-layout" id="auto-layout">
+        <div>
+          <div class="table-wrap" id="auto-table"></div>
+          <h2 class="section" id="auto-other-title" hidden>Other schedules</h2>
+          <div class="table-wrap" id="auto-other"></div>
+        </div>
+        <aside id="auto-detail" aria-label="Process detail" hidden></aside>
+      </div>
+      <div class="board-footnote">Read only. The scheduler runs every process whether the app is open or not.</div>
+    </div>
   </section>
   <div class="col left">
     <h1 id="product-name">Vepol Face</h1>
     <div class="sub" id="bind">local · loopback</div>
 
-    <h2>Target</h2>
-    <input class="filter" id="tfilter" placeholder="filter projects…" />
-    <div id="targets" class="scroller"></div>
+    <h2>Projects</h2>
+    <input class="filter" id="tfilter" placeholder="filter projects…" aria-label="Filter projects" />
+    <div id="tree" class="scroller" aria-label="Projects and sessions"></div>
+    <div id="tree-error" class="hint tone-warn" role="status" hidden>Could not refresh</div>
 
     <h2>Runtime</h2>
     <div id="runtimes"></div>
-    <div id="native-mode" hidden><h2>Новая сессия</h2>
-      <select id="transport-select" class="filter" aria-label="Режим новой сессии"><option value="session">Постоянная сессия</option><option value="terminal">Терминал · tmux</option></select>
+    <div id="native-mode" hidden><h2>New session</h2>
+      <select id="transport-select" class="filter" aria-label="New session mode"><option value="terminal">Terminal · tmux</option></select>
     </div>
-
-    <h2>Conversations</h2>
-    <button class="ghost" style="width:100%;margin-bottom:8px" id="newconv">New conversation</button>
-    <div id="convs" class="scroller"></div>
+    <button class="ghost" style="width:100%;margin-top:10px" id="newconv">New conversation</button>
   </div>
 
   <div class="col center">
-    <div class="conversation-heading"><button class="ghost" id="show-board">← Сессии</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span></div>
+    <div class="conversation-heading"><button class="ghost" id="show-board">← Sessions</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button class="ghost" id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
+    <div id="terminal" hidden></div>
     <div class="thread" id="thread">
       <div class="empty">Pick a target and say something.</div>
     </div>
     <div class="composer">
       <div id="session-note" class="banner warn" hidden></div>
       <div id="permissions" style="max-height:36vh;overflow:auto"></div>
-      <pre id="terminal-output" hidden style="white-space:pre-wrap;max-height:30vh;overflow:auto;font-size:12px"></pre>
       <textarea id="prompt" placeholder="Ask Vepol…  (⌘↵ to send)"></textarea>
       <div class="row">
         <button id="send">Send</button>
         <button id="stop" class="ghost" style="display:none">Stop</button>
-        <button id="terminal-ready" class="ghost" hidden>Терминал готов — отправить</button>
-        <button id="terminal-complete" class="ghost" hidden>Работа в терминале закончена</button>
+        <button id="terminal-ready" class="ghost" hidden>Terminal ready — send</button>
         <span class="hint" id="routing"></span>
       </div>
     </div>
   </div>
 
   <div class="col right">
-    <h2>Run</h2>
-    <div id="runstate" class="card">idle</div>
+    <div class="view-switch" role="tablist" aria-label="Panel">
+      <button role="tab" data-panel="session" aria-selected="true">Session</button><button role="tab" data-panel="knowledge" aria-selected="false">Knowledge</button>
+    </div>
+    <div id="panel-session">
+      <h2>Run</h2>
+      <div id="runstate" class="card">idle</div>
 
-    <h2>KB write-back</h2>
-    <div id="evidence" class="card">No run yet.</div>
-    <button id="checkpoint" class="ghost" hidden>Сохранить итог в вики</button>
-    <p class="hint" id="checkpoint-note" hidden>В постоянной сессии итог сохраняется по твоей команде.</p>
-    <h2>Ход работы</h2>
-    <div id="steps" class="card" style="max-height:28vh;overflow:auto;white-space:pre-wrap"></div>
+      <h2>KB write-back</h2>
+      <div id="evidence" class="card">No run yet.</div>
+      <button id="checkpoint" class="ghost" hidden>Save summary to wiki</button>
+      <p class="hint" id="checkpoint-note" hidden>In a persistent session the summary is saved when you ask for it.</p>
+      <h2>Progress</h2>
+      <div id="steps" class="card" style="max-height:28vh;overflow:auto;white-space:pre-wrap"></div>
 
-    <h2>Interactive</h2>
-    <div id="attach" class="card">—</div>
+      <h2>Interactive</h2>
+      <div id="attach" class="card">—</div>
+    </div>
+    <div id="panel-knowledge" hidden>
+      <div class="project-path" id="kb-root"></div>
+      <input type="search" class="filter" id="kb-filter" aria-label="Filter knowledge files" placeholder="filter files…" />
+      <div id="kb-feedback" class="banner bad" role="alert" hidden></div>
+      <div id="kb-tree" class="kb-tree" hidden></div>
+      <div id="kb-note" class="grey-line" hidden></div>
+      <div id="kb-file" hidden><div class="mono" id="kb-file-path"></div><pre class="output" id="kb-file-text"></pre></div>
+    </div>
   </div>
 </div>
+<footer class="usage-bar" id="usage-bar" aria-label="Usage limits">
+  <span class="usage-part" id="usage-claude"></span><span class="usage-sep" id="usage-sep" hidden>|</span><span class="usage-part" id="usage-codex"></span><span id="usage-error" hidden>Could not refresh</span>
+</footer>
 
 <script>
 (() => {
@@ -284,12 +447,13 @@
   }
 
   const $ = (id) => document.getElementById(id);
-  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board", transport: "oneshot", desktop: false, continuation: true };
-  const STAGES = [["queued", "Очередь", "#9299a6"], ["research", "Исследование", "#9985d8"],
-    ["working", "Работа", "#d5a445"], ["review", "Проверка", "#668ddd"], ["completed", "Завершено", "#62a883"]];
-  const ACTIVITY = { idle: "Нет запуска", running: "Агент работает", done: "Агент ответил",
-    failed: "Ошибка", degraded: "Нет полноценного ответа", interrupted: "Запуск прерван", stopped: "Остановлен", waiting: "Ждёт твоего решения", submitted: "Завершение отмечено тобой" };
-  const MODES = {session: "Постоянная сессия", terminal: "Терминал · tmux", oneshot: "Разовый запуск"};
+  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board", boardView: "sessions", transport: "oneshot", desktop: false, continuation: true };
+  const STAGES = [["queued", "Queue", "#9299a6"], ["research", "Research", "#9985d8"],
+    ["working", "Working", "#d5a445"], ["review", "Review", "#668ddd"], ["completed", "Done", "#62a883"]];
+  const ACTIVITY = { idle: "Not started", running: "Agent working", done: "Agent replied",
+    failed: "Error", degraded: "No full answer", interrupted: "Run interrupted", stopped: "Stopped", waiting: "Waiting for you", submitted: "Sent to terminal",
+    alive: "Agent running", not_running: "Agent not running", unknown: "State unknown" };
+  const MODES = {session: "Persistent session", terminal: "Terminal · tmux", oneshot: "One-shot run"};
   let conversations = [];
   let draggingId = null;
   let boardPending = false;
@@ -306,7 +470,9 @@
     if (!res.ok) {
       let detail = res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (_) {}
-      throw new Error(detail);
+      const err = new Error(detail);
+      err.status = res.status;
+      throw err;
     }
     return res.status === 204 ? null : res.json();
   };
@@ -320,26 +486,67 @@
 
   function renderTargets(list) {
     allTargets = list;
-    paintTargets();
+    paintTree();
   }
 
-  function paintTargets() {
+  // Owner (2026-09-25): the top of the window names the folder, the project and its path on disk.
+  function projectPath(slug) {
+    const t = allTargets.find((x) => x.slug === slug);
+    if (!t) return null;
+    const folder = t.cwd.split("/").filter(Boolean).pop() || t.cwd;
+    return { text: `${folder} · ${t.slug} · ${t.cwd}`, cwd: t.cwd };
+  }
+
+  function renderProjectPath(el, slug) {
+    const p = projectPath(slug);
+    el.hidden = !p;
+    if (!p) return;
+    el.textContent = p.text;
+    el.title = p.cwd;
+  }
+
+  // Project → sessions tree, built from /api/conversations and /api/targets. Projects without
+  // sessions appear only while the filter matches them, so a new project can still be picked.
+  const AGENT_DOT = { alive: "alive", not_running: "not_running" };
+  let treeHtml = "";
+
+  function paintTree() {
     const q = ($("tfilter").value || "").trim().toLowerCase();
-    // The selected target always stays visible, even when it fails the filter.
-    const shown = allTargets.filter(
-      (t) => !q || t.slug.toLowerCase().includes(q) || t.slug === state.target);
-    $("targets").innerHTML = shown.length ? shown.map((t) => `
-      <div class="item ${t.slug === state.target ? "active" : ""}" data-slug="${esc(t.slug)}">
-        ${esc(t.label)}
-        <div class="meta">${esc(t.kind)}</div>
-      </div>`).join("") : `<div class="hint">no match</div>`;
-    $("targets").querySelectorAll(".item").forEach((el) =>
-      el.onclick = () => {
-        state.target = el.dataset.slug;
-        state.conv = null;
-        paintTargets();
-        updateRouting(lastRuntimes);
-      });
+    const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
+    const bySlug = new Map();
+    conversations.forEach((c) => { if (!bySlug.has(c.target)) bySlug.set(c.target, []); bySlug.get(c.target).push(c); });
+    const matches = (slug) => !q || slug.toLowerCase().includes(q) || String(label(slug)).toLowerCase().includes(q);
+    const slugs = [...new Set([...bySlug.keys(), ...(q ? allTargets.map((t) => t.slug) : [])])]
+      .filter(matches).sort((a, b) => a.localeCompare(b));
+    const html = slugs.length ? slugs.map((slug) => {
+      const sessions = (bySlug.get(slug) || []).slice()
+        .sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
+      return `<div class="item tree-project ${slug === state.target ? "active" : ""}" data-slug="${esc(slug)}" role="button" tabindex="0" title="Target for a new conversation">
+          <span class="name">${esc(label(slug))}</span><span class="count">${sessions.length ? esc(sessions.length) : ""}</span>
+        </div>${sessions.length ? `<div class="tree-sessions">${sessions.map((c) => {
+          const dot = c.transport === "terminal"
+            ? `<span class="dot agent-${AGENT_DOT[c.agent] || "unknown"}" title="${esc(ACTIVITY[c.agent] || ACTIVITY.unknown)}"></span>`
+            : `<span class="nodot"></span>`;
+          return `<div class="item tree-session ${c.id === state.conv ? "active" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">
+            ${dot}<span class="t">${esc(c.title || "New session")}<div class="meta">${esc(c.runtime)}</div></span>
+          </div>`;
+        }).join("")}</div>` : ""}`;
+    }).join("") : `<div class="hint">${q ? "no match" : "No sessions yet"}</div>`;
+    if (html === treeHtml) return;
+    treeHtml = html;
+    $("tree").innerHTML = html;
+    const activate = (el, fn) => {
+      el.onclick = fn;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } };
+    };
+    $("tree").querySelectorAll(".tree-project").forEach((el) => activate(el, () => {
+      state.target = el.dataset.slug;
+      state.conv = null;
+      paintTree();
+      updateRouting(lastRuntimes);
+    }));
+    $("tree").querySelectorAll(".tree-session").forEach((el) => activate(el, () =>
+      openConv(el.dataset.id).catch((err) => showDegraded({ reason: `Could not open session: ${err.message}` }))));
   }
 
   function renderRuntimes(list) {
@@ -372,14 +579,9 @@
 
   function renderConvs(list) {
     conversations = list;
+    $("tree-error").hidden = true;
     paintBoard();
-    $("convs").innerHTML = list.length ? list.map((c) => `
-      <div class="item ${c.id === state.conv ? "active" : ""}" data-id="${esc(c.id)}">
-        ${esc(c.title || "(new)")}
-        <div class="meta">${esc(c.target)} · ${esc(c.runtime)}${c.running ? " · running" : ""}</div>
-      </div>`).join("") : `<div class="hint">none yet</div>`;
-    $("convs").querySelectorAll(".item").forEach((el) =>
-      el.onclick = () => openConv(el.dataset.id));
+    paintTree();
   }
 
   // Manual stages belong to conversations; runtime activity never accepts a task.
@@ -389,35 +591,36 @@
     el.hidden = false;
     if (retry) {
       const button = document.createElement("button");
-      button.textContent = "Повторить";
+      button.textContent = "Retry";
       button.onclick = retry;
       el.appendChild(button);
     }
   }
 
   function paintBoard(force = false, focusId = null) {
-    if (state.view !== "board" || draggingId || boardPending) return;
+    if (state.view !== "board" || state.boardView !== "sessions" || draggingId || boardPending) return;
     if (!force && document.activeElement.matches("select[data-board-stage]")) return;
     const projectSelect = $("board-project-filter");
     const projects = [...new Set(conversations.map((c) => c.target))].sort();
     const optionsKey = JSON.stringify(projects);
     if (projectSelect.dataset.options !== optionsKey) {
       const selected = projectSelect.value;
-      projectSelect.innerHTML = `<option value="">Все проекты</option>` + projects.map((slug) =>
+      projectSelect.innerHTML = `<option value="">All projects</option>` + projects.map((slug) =>
         `<option value="${esc(slug)}">${esc(slug)}</option>`).join("");
       projectSelect.value = projects.includes(selected) ? selected : "";
       projectSelect.dataset.options = optionsKey;
     }
+    renderProjectPath($("board-project-path"), projectSelect.value);
     const query = $("board-search").value.trim().toLocaleLowerCase();
     const filtered = conversations.filter((c) => (!projectSelect.value || c.target === projectSelect.value) &&
       (!query || [c.title, c.preview, c.target, c.runtime].join(" ").toLocaleLowerCase().includes(query)));
     filtered.sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
     $("board-count").textContent = filtered.length === conversations.length
-      ? `Всего: ${conversations.length}` : `Показано: ${filtered.length} из ${conversations.length}`;
+      ? `Total: ${conversations.length}` : `Showing ${filtered.length} of ${conversations.length}`;
     $("board-empty").hidden = filtered.length > 0;
     $("board-empty").textContent = conversations.length
-      ? "Ничего не найдено. Измени поиск или выбери другой проект."
-      : "Здесь появятся твои разговоры. Создай первую сессию, чтобы начать.";
+      ? "Nothing found. Change the search or pick another project."
+      : "Your conversations will appear here. Create your first session to start.";
     const signature = JSON.stringify(filtered);
     if (!force && signature === boardSignature) return;
     boardSignature = signature;
@@ -427,27 +630,34 @@
     $("board-columns").innerHTML = STAGES.map(([stage, label, color]) => {
       const cards = filtered.filter((c) => c.board_stage === stage);
       return `<section class="board-column" data-stage="${stage}" aria-label="${label}" style="--stage-color:${color}">
-        <header><span class="stage-dot"></span><h2>${label}</h2><span class="stage-count">${cards.length}</span></header>
+        <header><span class="stage-dot"></span><h2>${label}</h2><span class="stage-count">${cards.length}</span><button class="column-add" data-new-in="${stage}" aria-label="New session in ${label}" title="New session in ${label}">+</button></header>
         <div class="board-cards">${cards.map((c) => {
           const activity = c.activity || "idle";
           const date = c.last_activity_at ? new Date(c.last_activity_at) : null;
-          const dateText = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString("ru", {day: "numeric", month: "short"}) : "";
+          const dateText = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString("en", {day: "numeric", month: "short"}) : "";
           return `<article class="session-card" draggable="true" data-conversation-id="${esc(c.id)}">
-            <button class="session-open" data-open-conversation="${esc(c.id)}">${esc(c.title || "Новая сессия")}</button>
+            <button class="session-open" data-open-conversation="${esc(c.id)}">${esc(c.title || "New session")}</button>
             <div class="session-meta">${esc(c.target)} · ${esc(c.runtime)} · ${esc(MODES[c.transport] || c.transport || "")}</div>
-            ${c.continuation_available === false ? '<div class="hint">История сохранена · продолжение недоступно</div>' : ''}
-            <p class="session-preview">${esc(c.preview || "В этой сессии ещё нет сообщений.")}</p>
-            <span class="session-activity ${esc(activity)}">${esc(ACTIVITY[activity] || activity)}</span>
-            <div class="session-footer"><time datetime="${esc(c.last_activity_at || "")}" title="${esc(date && !Number.isNaN(date.getTime()) ? date.toLocaleString("ru") : "")}">${esc(dateText)}</time>
-              <select data-board-stage aria-label="Этап: ${esc(c.title || "Новая сессия")}">
+            ${(() => { const p = projectPath(c.target); return p ? `<div class="project-path session-path" title="${esc(p.cwd)}">${esc(p.text)}</div>` : ""; })()}
+            ${c.continuation_available === false ? '<div class="hint">History kept · cannot be continued</div>' : ''}
+            <p class="session-preview">${esc(c.preview || "No messages in this session yet.")}</p>
+            <span class="session-activity ${esc(activity)}">${esc(ACTIVITY[activity] || activity)}${c.agent === "alive" && c.pid ? ` · PID ${esc(c.pid)}` : ""}</span>
+            <div class="session-footer"><time datetime="${esc(c.last_activity_at || "")}" title="${esc(date && !Number.isNaN(date.getTime()) ? date.toLocaleString("en") : "")}">${esc(dateText)}</time>
+              <select data-board-stage aria-label="Stage: ${esc(c.title || "New session")}">
                 ${STAGES.map(([value, text]) => `<option value="${value}" ${value === stage ? "selected" : ""}>${text}</option>`).join("")}
               </select>
             </div>
           </article>`;
-        }).join("") || `<div class="column-empty">Перенеси сюда сессию</div>`}</div>
+        }).join("") || `<div class="column-empty">Drop a session here</div>`}</div>
       </section>`;
     }).join("");
     $("board-columns").scrollLeft = horizontal;
+    $("board-columns").querySelectorAll("[data-new-in]").forEach((button) => {
+      button.onclick = async () => {
+        button.disabled = true;
+        try { await newSessionFromBoard(button.dataset.newIn); } finally { button.disabled = false; }
+      };
+    });
     $("board-columns").querySelectorAll(".board-column").forEach((col) => {
       col.querySelector(".board-cards").scrollTop = positions[col.dataset.stage] || 0;
       col.ondragover = (event) => {
@@ -480,7 +690,11 @@
         $("board-columns").querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
         paintBoard();
       };
-      card.querySelector("[data-open-conversation]").onclick = () => openConv(id).catch((err) => boardError(`Не удалось открыть сессию: ${err.message}`, () => openConv(id)));
+      // The whole card opens the session; the stage picker keeps its own clicks.
+      card.onclick = (event) => {
+        if (event.target.closest("select")) return;
+        openConv(id).catch((err) => boardError(`Could not open session: ${err.message}`, () => openConv(id)));
+      };
       card.querySelector("select").onchange = (event) => moveSession(id, event.target.value, true);
     });
     if (focusId) {
@@ -504,7 +718,7 @@
       const saved = await api(`/api/conversations/${id}/board`, { method: "PATCH", body: JSON.stringify({ board_stage: stage }) });
       conversations = conversations.map((c) => c.id === id ? saved : c);
     } catch (err) {
-      boardError(`Этап не сохранён: ${err.message}`, () => moveSession(id, stage, restoreFocus));
+      boardError(`Stage not saved: ${err.message}`, () => moveSession(id, stage, restoreFocus));
     } finally {
       boardPending = false;
       mutationVersion++;
@@ -513,7 +727,7 @@
   }
 
   async function refreshBoard() {
-    if (state.view !== "board" || document.hidden || boardPending || draggingId) return;
+    if (state.view !== "board" || state.boardView !== "sessions" || document.hidden || boardPending || draggingId) return;
     const version = ++refreshVersion;
     const mutation = mutationVersion;
     try {
@@ -521,22 +735,426 @@
       if (version !== refreshVersion || mutation !== mutationVersion || boardPending) return;
       renderConvs(list);
     } catch (err) {
-      boardError(`Не удалось обновить сессии: ${err.message}`, refreshBoard);
+      boardError(`Could not refresh sessions: ${err.message}`, refreshBoard);
     }
   }
 
   function showBoard() {
+    detachTerminal();
     state.view = "board";
     $("app").classList.add("board-mode");
     $("board-view").hidden = false;
-    paintBoard();
-    refreshBoard();
+    setBoardView(state.boardView);
   }
 
   function showChat() {
     state.view = "chat";
+    // The back button returns to the board view the owner came from; its label says which.
+    $("show-board").textContent = `← ${VIEWS[state.boardView][0]}`;
     $("app").classList.remove("board-mode");
     $("board-view").hidden = true;
+  }
+
+  // ------------------------------------------------ board views switch
+  const VIEWS = {
+    sessions: ["Sessions", "All your work in one place. Move cards between stages and jump back into any conversation."],
+    tasks: ["Tasks", "Every project's backlog, read from knowledge/backlog.md. Start a session from any task."],
+    automations: ["Automations", "Every scheduled process and how it is doing today, read from the scheduler's own files."],
+  };
+
+  function setBoardView(view) {
+    state.boardView = view;
+    document.querySelectorAll("[data-board-view]").forEach((b) =>
+      b.setAttribute("aria-selected", String(b.dataset.boardView === view)));
+    $("board-title").textContent = VIEWS[view][0];
+    $("board-description").textContent = VIEWS[view][1];
+    $("sessions-pane").hidden = view !== "sessions";
+    $("tasks-pane").hidden = view !== "tasks";
+    $("automations-pane").hidden = view !== "automations";
+    $("board-newconv").hidden = view !== "sessions";
+    if (view === "sessions") { paintBoard(true); refreshBoard(); return; }
+    $("board-project-path").hidden = true;
+    if (view === "tasks") loadTasks(true);
+    else loadAutomations();
+  }
+
+  const viewVisible = (view) => state.view === "board" && state.boardView === view && !document.hidden;
+
+  function feedback(el, message, retry) {
+    el.textContent = message;
+    el.hidden = false;
+    if (retry) {
+      const button = document.createElement("button");
+      button.textContent = "Retry";
+      button.onclick = retry;
+      el.appendChild(button);
+    }
+  }
+
+  function fmtTime(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+
+  // --------------------------------------------------------- tasks view
+  const CHIPS = {
+    active: ["In Progress", "Review", "Blocked", "Ready"],
+    backlog: ["Backlog"],
+    closed: ["Done", "Cancelled"],
+    all: ["In Progress", "Review", "Blocked", "Ready", "Backlog", "Done", "Cancelled"],
+  };
+  const TASK_DOT = { "In Progress": "st-active", Review: "st-active", Blocked: "st-bad", Ready: "st-ok",
+    Backlog: "st-idle", Done: "st-ok", Cancelled: "st-idle" };
+  const tasks = { data: null, chip: "active", version: 0 };
+
+  function paintTaskProjects() {
+    const select = $("tasks-project");
+    const key = JSON.stringify(allTargets.map((t) => t.slug));
+    if (select.dataset.options === key) return;
+    const selected = select.value;
+    select.innerHTML = `<option value="">All projects</option>` + allTargets.map((t) =>
+      `<option value="${esc(t.slug)}">${esc(t.label || t.slug)}</option>`).join("");
+    select.value = allTargets.some((t) => t.slug === selected) ? selected : "";
+    select.dataset.options = key;
+  }
+
+  async function loadTasks(withTargets = false) {
+    const version = ++tasks.version;
+    try {
+      if (withTargets) renderTargets(await api("/api/targets"));
+      paintTaskProjects();
+      const project = $("tasks-project").value;
+      const data = await api(`/api/tasks${project ? `?target=${encodeURIComponent(project)}` : ""}`);
+      if (version !== tasks.version) return;
+      tasks.data = { ...data, all: !project };
+      $("tasks-feedback").hidden = true;
+      paintTasks();
+    } catch (err) {
+      if (version !== tasks.version) return;
+      feedback($("tasks-feedback"), `Could not refresh: ${err.message}`, () => loadTasks());
+    }
+  }
+
+  function paintTasks() {
+    const data = tasks.data;
+    if (!data) return;
+    const table = $("tasks-table"), empty = $("tasks-empty"), none = $("tasks-none");
+    if (data.error) {
+      feedback($("tasks-feedback"), data.error);
+      table.innerHTML = ""; empty.hidden = true; none.hidden = true;
+      $("tasks-count").textContent = "";
+      return;
+    }
+    const projects = data.projects || [];
+    const order = CHIPS[tasks.chip];
+    const query = $("tasks-search").value.trim().toLocaleLowerCase();
+    const every = projects.filter((p) => p.state === "ok").flatMap((p) => p.tasks.map((t) => ({ ...t, project: p.project })));
+    const rows = every.filter((t) => order.includes(t.status) &&
+      (!query || `${t.title || ""} ${t.id || ""}`.toLocaleLowerCase().includes(query)));
+    // Stable sort: status order of the chip, then file order.
+    rows.sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
+    const errors = projects.filter((p) => p.state === "error");
+    const missing = projects.filter((p) => p.state === "none").map((p) => p.project);
+    $("tasks-count").textContent = rows.length === every.length ? `Total: ${every.length}` : `Showing ${rows.length} of ${every.length}`;
+    const cols = data.all ? 6 : 5;
+    table.innerHTML = errors.length || rows.length ? `<table class="data-table">
+      <thead><tr><th>Status</th><th>Task</th><th>ID</th><th>Owner</th>${data.all ? "<th>Project</th>" : ""}<th></th></tr></thead>
+      <tbody>${errors.map((p) => `<tr class="error-row"><td colspan="${cols}">${esc(p.project)}: backlog unreadable — ${esc(p.reason)}</td></tr>`).join("")}
+      ${rows.map((t) => `<tr data-task-project="${esc(t.project)}" data-task-id="${esc(t.id || "")}">
+        <td class="nowrap"><span class="status-word"><span class="dot ${TASK_DOT[t.status] || "st-idle"}"></span>${esc(t.status)}</span></td>
+        <td>${esc(t.title)}</td>
+        <td class="nowrap mono">${esc(t.id || "—")}</td>
+        <td class="nowrap">${esc(t.owner || "")}</td>
+        ${data.all ? `<td class="nowrap">${esc(t.project)}</td>` : ""}
+        <td><button class="ghost" data-start-task>Start session</button></td>
+      </tr>`).join("")}</tbody></table>` : "";
+    const okProjects = projects.filter((p) => p.state === "ok");
+    empty.hidden = rows.length > 0 || !okProjects.length;
+    empty.textContent = !data.all && every.length === 0 ? "No tasks in this backlog yet" : "Nothing found";
+    none.hidden = !missing.length;
+    none.textContent = `No backlog.md: ${missing.join(", ")}`;
+    table.querySelectorAll("[data-start-task]").forEach((button, i) => {
+      button.onclick = () => startTaskSession(rows[i], button);
+    });
+  }
+
+  const newTransport = () => state.desktop ? $("transport-select").value : "oneshot";
+
+  // Shared by "+ New session", the column "+" and "Start session": create, start a terminal agent on the owner's click, open.
+  async function createAndOpen(body, noteExisting = false) {
+    const conv = await api("/api/conversations", { method: "POST", body: JSON.stringify(body) });
+    let startError = "";
+    if (conv.transport === "terminal") {
+      // The owner's click is the only thing that starts an agent.
+      try { await api(`/api/conversations/${conv.id}/terminal/start`, {method: "POST"}); }
+      catch (err) { startError = err.message; }
+    }
+    await openConv(conv.id);
+    const note = startError ? `Could not start the agent: ${startError}`
+      : noteExisting && conv.existing ? `A terminal for ${conv.target} · ${conv.runtime} already exists — opened it.` : "";
+    if (note && state.conv === conv.id) {
+      $("session-note").hidden = false;
+      $("session-note").textContent = note;
+    }
+    return conv;
+  }
+
+  // "+ New session" / "New conversation"; a column "+" also places the new session in its stage.
+  async function newSession(stage = null) {
+    const body = { target: state.target, runtime: state.runtime, transport: newTransport() };
+    if (stage) body.board_stage = stage;
+    try {
+      await createAndOpen(body, true);
+    } catch (err) {
+      if (state.view === "board") boardError(`Could not create session: ${err.message}`);
+      else showDegraded({reason: err.message});
+    }
+  }
+
+  function newSessionFromBoard(stage = null) {
+    if ($("board-project-filter").value) state.target = $("board-project-filter").value;
+    return newSession(stage);
+  }
+
+  async function startTaskSession(task, button) {
+    button.disabled = true;
+    $("tasks-feedback").hidden = true;
+    try {
+      const conv = await createAndOpen({ target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title });
+      // Pre-typed only; the owner edits and sends it.
+      if (state.conv === conv.id) $("prompt").value = task.id
+        ? `Task ${task.id} from knowledge/backlog.md: "${task.title}".`
+        : `Task from knowledge/backlog.md: "${task.title}".`;
+    } catch (err) {
+      feedback($("tasks-feedback"), `Could not start session: ${err.message}`);
+    } finally { button.disabled = false; }
+  }
+
+  // --------------------------------------------------- automations view
+  const AUTO_TONE = { failed: "bad", failed_in_result: "warn", missed: "warn" };
+  const AUTO_DOT = { ok: "st-ok", running: "st-active", failed: "st-bad", failed_in_result: "st-warn", missed: "st-warn" };
+  const STRIP_TONE = { running: "st-ok", exit_code: "st-warn", not_loaded: "st-bad" };
+  const RESULT_TEXT = { running: "Running", succeeded: "Succeeded", failed: "Failed" };
+  const OCC_TEXT = { running: "Running", failed: "Failed", ok: "OK", failed_in_result: "Failed in result",
+    not_its_day: "Not its day", unknown: "Unknown" };
+  const OTHER_DOT = { ok: "st-ok", failed: "st-bad", not_loaded: "st-bad" };
+  const autos = { data: null, detailId: null, detailDate: null, detail: null, version: 0 };
+
+  function autoReason(row) {
+    if (row.state === "failed") return `attempts today: ${row.attempts_today} · ${row.reason} · retries every 15 min`;
+    return row.reason || "";
+  }
+
+  async function loadAutomations() {
+    const version = ++autos.version;
+    let data, detail = null, detailError = null;
+    try {
+      data = await api("/api/automations");
+    } catch (err) {
+      // The last good data stays on screen.
+      if (version === autos.version) feedback($("auto-feedback"), `Could not refresh: ${err.message}`, loadAutomations);
+      return;
+    }
+    if (autos.detailId) {
+      const q = autos.detailDate ? `?date=${encodeURIComponent(autos.detailDate)}` : "";
+      try { detail = await api(`/api/automations/${encodeURIComponent(autos.detailId)}${q}`); }
+      catch (err) { detailError = err; }
+    }
+    if (version !== autos.version) return;
+    autos.data = data;
+    $("auto-feedback").hidden = true;
+    if (detailError) {
+      feedback($("auto-feedback"), `Could not refresh: ${detailError.message}`, loadAutomations);
+      if (!autos.detail) autos.detailId = null;
+    } else autos.detail = detail;
+    paintAutomations();
+  }
+
+  function paintAutomations() {
+    const data = autos.data;
+    if (!data) return;
+    const s = data.scheduler || {};
+    const strip = $("auto-strip");
+    strip.hidden = false;
+    strip.title = (s.jobs || []).map((j) => `${j.label}: ${j.loaded === null ? "unknown" : j.loaded ? `loaded, last exit ${j.last_exit ?? "—"}` : "not loaded"}`).join("\n");
+    strip.innerHTML = `<span class="dot ${STRIP_TONE[s.state] || "st-idle"}"></span><span class="${s.state === "not_loaded" ? "tone-bad" : s.state === "exit_code" ? "tone-warn" : ""}">${esc(s.text)}</span>`;
+    $("auto-notes").innerHTML = (data.notes || []).map((n) =>
+      `<div class="${n.level === "error" ? "banner bad" : "grey-line"}" style="margin:0 0 10px">${esc(n.text)}</div>`).join("");
+    const rows = data.processes || [];
+    $("auto-table").innerHTML = rows.length ? `<table class="data-table">
+      <thead><tr><th>Process</th><th>Schedule</th><th>State</th><th>Last run</th><th>Next</th></tr></thead>
+      <tbody>${rows.map((r) => {
+        const last = r.last_run;
+        return `<tr class="clickable ${r.id === autos.detailId ? "selected" : ""}" data-process="${esc(r.id)}" tabindex="0">
+          <td class="nowrap"><strong>${esc(r.id)}</strong></td>
+          <td>${esc(r.schedule_text)}</td>
+          <td><span class="status-word ${AUTO_TONE[r.state] ? `tone-${AUTO_TONE[r.state]}` : ""}"><span class="dot ${AUTO_DOT[r.state] || "st-idle"}"></span>${esc(r.state_text)}</span>
+            ${autoReason(r) ? `<div class="reason">${esc(autoReason(r))}</div>` : ""}</td>
+          <td>${last ? `${esc(fmtTime(last.at) || last.date)} · ${esc(RESULT_TEXT[last.result] || last.result)}` : "—"}
+            ${last && last.reason ? `<div class="reason">${esc(last.reason)}</div>` : ""}
+            <div class="reason">Last success: ${esc(r.last_success_at ? fmtTime(r.last_success_at) : "none in 14 days")}</div></td>
+          <td>${esc(r.next_run_text)}</td>
+        </tr>`;
+      }).join("")}</tbody></table>` : "";
+    const other = data.other || [];
+    $("auto-other-title").hidden = !other.length;
+    $("auto-other").innerHTML = other.length ? `<table class="data-table">
+      <thead><tr><th>Name</th><th>Schedule</th><th>State</th><th>Last run</th><th>Next</th></tr></thead>
+      <tbody>${other.map((o) => `<tr>
+        <td>${esc(o.name)}${o.label ? `<div class="reason mono">${esc(o.label)}</div>` : ""}</td>
+        <td>${esc(o.schedule_text)}${o.enabled === false ? `<div class="reason">Disabled</div>` : ""}</td>
+        <td><span class="status-word ${o.state === "failed" || o.state === "not_loaded" ? "tone-bad" : ""}"><span class="dot ${OTHER_DOT[o.state] || "st-idle"}"></span>${esc(o.state_text)}</span>
+          ${o.reason ? `<div class="reason">${esc(o.reason)}</div>` : ""}
+          ${o.failure_streak ? `<div class="reason">failures in a row: ${esc(o.failure_streak)}</div>` : ""}</td>
+        <td>${esc(fmtTime(o.last_run_at) || o.last_run_at || "—")}</td>
+        <td>${esc(fmtTime(o.next_run_at) || o.next_run_at || "—")}</td>
+      </tr>`).join("")}</tbody></table>` : "";
+    $("auto-table").querySelectorAll("[data-process]").forEach((tr) => {
+      const open = () => openAutomation(tr.dataset.process);
+      tr.onclick = open;
+      tr.onkeydown = (e) => { if (e.key === "Enter") open(); };
+    });
+    paintAutomationDetail();
+  }
+
+  function openAutomation(id, date = null) {
+    autos.detailId = id; autos.detailDate = date; autos.detail = null;
+    loadAutomations();
+  }
+
+  function paintAutomationDetail() {
+    const pane = $("auto-detail");
+    const d = autos.detail;
+    pane.hidden = !autos.detailId || !d;
+    $("auto-layout").classList.toggle("with-detail", !pane.hidden);
+    if (pane.hidden) return;
+    const r = d.row, a = d.attempt, p = d.paths || {};
+    const pathRows = [["Registry", p.registry], ["Run folder", p.run_folder], ["State", p.state], ["stdout", p.stdout],
+      ["stderr", p.stderr], ["Log", p.log], ["Outcome", p.outcome]].filter(([, v]) => v);
+    pane.innerHTML = `<div class="detail-head"><h3>${esc(r.id)}</h3><button class="ghost" id="auto-detail-close">Close</button></div>
+      <div class="reason">${esc(r.schedule_text)} · <span class="${AUTO_TONE[r.state] ? `tone-${AUTO_TONE[r.state]}` : ""}">${esc(r.state_text)}</span>${autoReason(r) ? ` · ${esc(autoReason(r))}` : ""}</div>
+      <h4>History · 14 days</h4>
+      ${d.occurrences.length ? `<table class="data-table"><tbody>${d.occurrences.map((o) => `<tr class="clickable ${o.date === d.date ? "selected" : ""}" data-occ="${esc(o.date)}" tabindex="0">
+        <td class="nowrap">${esc(o.date)}</td><td class="nowrap">attempts: ${esc(o.attempts)}</td>
+        <td><span class="${AUTO_TONE[o.state] ? `tone-${AUTO_TONE[o.state]}` : ""}">${esc(OCC_TEXT[o.state] || o.state)}</span>${o.reason ? `<div class="reason">${esc(o.reason)}</div>` : ""}</td>
+      </tr>`).join("")}</tbody></table>` : `<div class="grey-line">No runs in 14 days</div>`}
+      <h4>Output of the last attempt${d.date ? ` · ${esc(d.date)}` : ""}</h4>
+      ${a ? `<div class="reason mono">${esc(a.run_id)} · ${esc(a.status)}${a.returncode !== null && a.returncode !== undefined ? ` · exit ${esc(a.returncode)}` : ""} · ${esc(fmtTime(a.started_at))} → ${esc(fmtTime(a.completed_at) || "…")}</div>
+        <h4>stderr</h4><pre class="output">${esc(a.stderr || "(empty)")}</pre>
+        <h4>stdout</h4><pre class="output">${esc(a.stdout || "(empty)")}</pre>
+        ${a.log_lines.length ? `<h4>Log</h4><pre class="output">${esc(a.log_lines.join("\n"))}</pre>` : ""}` : `<div class="grey-line">No attempt recorded</div>`}
+      <h4>Files</h4><ul class="paths">${pathRows.map(([k, v]) => `<li><span class="k">${esc(k)}:</span> ${esc(v)}</li>`).join("")}</ul>`;
+    $("auto-detail-close").onclick = () => { autos.detailId = null; autos.detail = null; paintAutomations(); };
+    pane.querySelectorAll("[data-occ]").forEach((tr) => {
+      const open = () => openAutomation(d.row.id, tr.dataset.occ);
+      tr.onclick = open;
+      tr.onkeydown = (e) => { if (e.key === "Enter") open(); };
+    });
+  }
+
+  // ------------------------------------------------- in-app terminal
+  // Liveness comes from the backend's process evidence; the screen is display only.
+  function renderAgentState(conv) {
+    const el = $("agent-state");
+    el.className = "hint agent-state";
+    $("terminal-start").hidden = true;
+    if (state.transport !== "terminal") { el.textContent = ""; return; }
+    const agent = conv.agent || "unknown";
+    el.classList.add(agent);
+    if (agent === "alive") el.textContent = `Agent running · PID ${conv.pid}`;
+    else if (agent === "not_running") { el.textContent = "Agent not running"; $("terminal-start").hidden = false; }
+    else el.textContent = `State unknown${conv.agent_reason ? " · " + conv.agent_reason : ""}`;
+  }
+
+  const term = { obj: null, fit: null, ws: null, timer: null, gen: 0 };
+
+  // Refusals that reconnecting cannot fix. 4401/4403 are refused before the handshake completes, which a
+  // browser reports as 1006, so a socket that never opened asks the HTTP API for the same answer.
+  const TERM_REFUSED = { 4401: "Session expired — reload the page",
+    4403: "This page's origin is not allowed — open Vepol from the app",
+    4404: "This conversation has no terminal" };
+  const HTTP_REFUSED = { 401: 4401, 403: 4403, 404: 4404 };
+  let termRefused = null;
+
+  function refuseTerminal(id, text) {
+    termRefused = { id, text };
+    $("session-note").hidden = false;
+    $("session-note").textContent = text;
+  }
+
+  function ensureTerm() {
+    if (term.obj) return term.obj;
+    const T = window.Terminal && (window.Terminal.Terminal || window.Terminal);
+    const F = window.FitAddon && (window.FitAddon.FitAddon || window.FitAddon);
+    term.obj = new T({ cursorBlink: true, fontSize: 13, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" });
+    term.fit = new F();
+    term.obj.loadAddon(term.fit);
+    term.obj.open($("terminal"));
+    const encoder = new TextEncoder();
+    term.obj.onData((d) => { if (term.ws && term.ws.readyState === 1) term.ws.send(encoder.encode(d)); });
+    term.obj.onBinary((d) => {
+      if (!term.ws || term.ws.readyState !== 1) return;
+      const bytes = new Uint8Array(d.length);
+      for (let i = 0; i < d.length; i++) bytes[i] = d.charCodeAt(i) & 255;
+      term.ws.send(bytes);
+    });
+    window.addEventListener("resize", fitTerm);
+    return term.obj;
+  }
+
+  function fitTerm() {
+    if (!term.obj || $("terminal").hidden || state.view !== "chat") return;
+    term.fit.fit();
+    if (term.ws && term.ws.readyState === 1) term.ws.send(JSON.stringify({ type: "resize", cols: term.obj.cols, rows: term.obj.rows }));
+  }
+
+  function detachTerminal() {
+    term.gen++;
+    clearTimeout(term.timer); term.timer = null;
+    if (term.ws) { const ws = term.ws; term.ws = null; try { ws.close(); } catch (_) {} }
+  }
+
+  async function refreshOpenConversation(id) {
+    const conv = await api(`/api/conversations/${id}`);
+    if (state.conv === id) applyConversation(conv);
+  }
+
+  function attachTerminal(id) {
+    detachTerminal();
+    ensureTerm();
+    term.obj.reset();
+    fitTerm();
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/${id}/terminal?token=${encodeURIComponent(TOKEN)}`);
+    ws.binaryType = "arraybuffer";
+    term.ws = ws;
+    const gen = term.gen;
+    let ended = false, opened = false;
+    ws.onopen = () => { opened = true; if (term.ws !== ws) return; fitTerm(); term.obj.focus(); };
+    ws.onmessage = (e) => {
+      if (term.ws !== ws) return;
+      if (typeof e.data === "string") {
+        let ev = {};
+        try { ev = JSON.parse(e.data); } catch (_) {}
+        if (ev.type === "not_running" || ev.type === "exited") { ended = true; refreshOpenConversation(id).catch(() => {}); }
+        return;
+      }
+      term.obj.write(new Uint8Array(e.data));
+    };
+    // A drop without "exited" (backend restart, external tmux detach) reconnects after 1.5 s.
+    ws.onclose = async (e) => {
+      if (term.ws !== ws) return;
+      term.ws = null;
+      if (ended || state.conv !== id) return;
+      let code = e.code;
+      if (!TERM_REFUSED[code] && !opened) {
+        try { await api(`/api/conversations/${id}`); } catch (err) { code = HTTP_REFUSED[err.status] || code; }
+        if (term.gen !== gen || state.conv !== id) return;
+      }
+      if (TERM_REFUSED[code]) { refuseTerminal(id, TERM_REFUSED[code]); return; }
+      term.timer = setTimeout(() => { if (state.conv === id && state.transport === "terminal") attachTerminal(id); }, 1500);
+    };
   }
 
   function renderThread(conv) {
@@ -557,7 +1175,7 @@
   function renderRun(run) {
     if (!run) { $("runstate").textContent = "idle"; return; }
     if (run.status === "running") {
-      $("runstate").innerHTML = `<span class="spinner"></span>Работает · ${esc(MODES[state.transport])}`;
+      $("runstate").innerHTML = `<span class="spinner"></span>Working · ${esc(MODES[state.transport])}`;
       return;
     }
     const cls = run.status === "done" ? "" : (run.status === "failed" ? "bad" : "warn");
@@ -579,17 +1197,19 @@
     state.transport = conv.transport || "oneshot";
     state.continuation = conv.continuation_available !== false;
     $("transport-label").textContent = MODES[state.transport] || state.transport;
-    const note = !state.continuation ? "Исходная сессия агента не найдена. История сохранена; продолжение недоступно." : conv.transport_note;
+    const note = termRefused && termRefused.id === conv.id ? termRefused.text
+      : !state.continuation ? "The agent's original session was not found. History is kept; it cannot be continued." : conv.transport_note;
     $("session-note").hidden = !note;
     $("session-note").textContent = note || "";
     $("steps").textContent = (conv.steps || []).filter(e => e.type === "progress").map(e => e.text).join("\n");
     $("checkpoint").hidden = state.transport !== "session";
     $("checkpoint-note").hidden = state.transport !== "session";
     $("checkpoint").disabled = state.running || !state.continuation;
-    $("terminal-complete").hidden = state.transport !== "terminal" || !state.running;
     const last = conv.runs[conv.runs.length - 1];
     $("terminal-ready").hidden = state.transport !== "terminal" || conv.terminal_ready || state.running || !last;
-    $("terminal-output").hidden = state.transport !== "terminal";
+    $("terminal").hidden = state.transport !== "terminal";
+    $("thread").hidden = state.transport === "terminal";
+    renderAgentState(conv);
     renderPermissions(conv.pending || []);
     $("send").disabled = state.running || !state.continuation;
   }
@@ -598,7 +1218,7 @@
     $("permissions").innerHTML = "";
     pending.forEach(request => {
       const box = document.createElement("section"); box.className = "card";
-      const heading = document.createElement("strong"); heading.textContent = request.kind === "questions" ? "Агент ждёт ответа" : (request.title || "Агент ждёт твоего решения"); box.appendChild(heading);
+      const heading = document.createElement("strong"); heading.textContent = request.kind === "questions" ? "The agent is waiting for an answer" : (request.title || "The agent is waiting for your decision"); box.appendChild(heading);
       heading.style.cssText = "display:block;margin-bottom:8px";
       const details = document.createElement("pre");
       details.style.cssText = "white-space:pre-wrap;max-height:160px;overflow:auto;font-size:12px";
@@ -609,7 +1229,7 @@
         const label = document.createElement("label");
         const question = q.question || q.text || q.header || String(i);
         label.textContent = question;
-        const field = document.createElement("input"); field.className = "filter"; field.placeholder = "Твой ответ";
+        const field = document.createElement("input"); field.className = "filter"; field.placeholder = "Your answer";
         label.appendChild(field); box.appendChild(label);
         if (q.options && q.options.length) {
           const choices = document.createElement("div");
@@ -630,7 +1250,7 @@
           if (state.conv === id) renderPermissions((await api(`/api/conversations/${id}`)).pending || []);
         } catch (err) { box.querySelectorAll("button").forEach(b => b.disabled = false); showDegraded({reason: err.message}); }
       };
-      [["allow", answers.length ? "Ответить" : "Разрешить"], ["deny", "Отклонить"]].forEach(([decision, label]) => {
+      [["allow", answers.length ? "Answer" : "Allow"], ["deny", "Deny"]].forEach(([decision, label]) => {
         const button = document.createElement("button"); button.textContent = label;
         button.className = decision === "deny" ? "ghost" : ""; button.onclick = () => reply(decision); box.appendChild(button);
       });
@@ -643,7 +1263,9 @@
     state.running = !!(last && last.status === "running"); state.runId = state.running ? last.id : null;
     renderSession(conv); renderThread(conv); renderRun(last); renderEvidence(last && last.evidence);
     $("stop").style.display = state.running ? "" : "none"; $("stop").disabled = false;
-    $("conversation-title").textContent = `${conv.title || "Новая сессия"} · ${conv.target} · ${conv.runtime}`;
+    $("conversation-title").textContent = `${conv.title || "New session"} · ${conv.target} · ${conv.runtime}`;
+    renderProjectPath($("conversation-path"), conv.target);
+    paintTree();
   }
 
   async function retryRun() {
@@ -675,6 +1297,195 @@
       ${capture.length ? `<div class="mono" style="margin-top:6px;color:var(--ink-dim)">session capture:</div><ul class="files mono">${capture.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}`;
   }
 
+  // The board polls sessions while it is shown; the tree needs the same list in the chat view.
+  async function refreshTree() {
+    if (state.view !== "chat" || document.hidden) return;
+    try { renderConvs(await api("/api/conversations")); }
+    catch (err) {
+      // The last tree stays on screen with a note; the next good list clears it.
+      $("tree-error").hidden = false;
+      $("tree-error").title = err.message;
+    }
+  }
+
+  // ------------------------------------------------ knowledge panel (read-only)
+  // `open` holds the expanded folders; folders start collapsed, like an explorer.
+  const kb = { panel: "session", target: null, data: null, file: null, open: new Set(), version: 0, fileVersion: 0 };
+
+  function setPanel(panel) {
+    kb.panel = panel;
+    document.querySelectorAll("[data-panel]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.panel === panel)));
+    $("panel-session").hidden = panel !== "session";
+    $("panel-knowledge").hidden = panel !== "knowledge";
+    if (panel === "knowledge") loadKnowledge();
+  }
+
+  // Called whenever a session is opened: the panel follows that session's project.
+  function knowledgeFor(slug) {
+    if (kb.target !== slug) {
+      kb.target = slug; kb.data = null; kb.file = null; kb.open = new Set();
+      $("kb-filter").value = "";
+      $("kb-feedback").hidden = true;
+    }
+    if (kb.panel === "knowledge") loadKnowledge();
+    else paintKnowledge();
+  }
+
+  async function loadKnowledge() {
+    const target = kb.target;
+    const version = ++kb.version;
+    if (!target) { paintKnowledge(); return; }
+    try {
+      const data = await api(`/api/knowledge/tree?target=${encodeURIComponent(target)}`);
+      if (version !== kb.version || target !== kb.target) return;
+      kb.data = { ...data, target };
+      $("kb-feedback").hidden = true;
+    } catch (err) {
+      if (version !== kb.version || target !== kb.target) return;
+      // The last good tree of this project stays on screen.
+      feedback($("kb-feedback"), `Could not refresh: ${err.message}`, loadKnowledge);
+    }
+    paintKnowledge();
+  }
+
+  const fmtSize = (n) => typeof n !== "number" ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+  function paintKnowledge() {
+    const d = kb.data;
+    // The root path the server read; the target's own knowledge path when the reply has none.
+    const rootPath = d ? d.root || (allTargets.find((t) => t.slug === d.target) || {}).knowledge || "" : "";
+    const root = $("kb-root");
+    root.textContent = rootPath;
+    root.title = rootPath;
+    root.hidden = !rootPath;
+    const q = $("kb-filter").value.trim().toLocaleLowerCase();
+    // Server order: depth-first, directories before files. Without a filter an entry shows
+    // only while every folder above it is expanded; a filter searches every folder.
+    const visible = (e) => {
+      const parts = String(e.path).split("/");
+      for (let i = 1; i < parts.length; i++) if (!kb.open.has(parts.slice(0, i).join("/"))) return false;
+      return true;
+    };
+    const entries = d ? (d.entries || []).filter((e) => q ? String(e.name).toLocaleLowerCase().includes(q) : visible(e)) : [];
+    const tree = $("kb-tree");
+    tree.hidden = !d;
+    tree.innerHTML = entries.length ? entries.map((e) => {
+      const kind = e.kind === "dir" ? "dir" : "file";
+      // Filtered results show their path, the full tree shows names indented by depth.
+      const depth = q ? 0 : String(e.path).split("/").length - 1;
+      const selected = kind === "file" && kb.file && kb.file.path === e.path;
+      const expanded = kb.open.has(e.path);
+      const attrs = kind === "file" ? `data-kb-path="${esc(e.path)}" role="button" tabindex="0"`
+        : q ? "" : `data-kb-dir="${esc(e.path)}" role="button" tabindex="0" aria-expanded="${expanded}"`;
+      const chevron = kind === "dir" && !q ? `<span class="kb-chevron">${expanded ? "▾" : "▸"}</span>` : "";
+      return `<div class="kb-entry ${kind} ${selected ? "selected" : ""}" style="padding-left:${8 + depth * 12}px" title="${esc(e.path)}"
+        ${attrs}>${chevron}${esc(q ? e.path : e.name)}${kind === "dir" ? "/" : ""}<span class="kb-size">${kind === "file" ? esc(fmtSize(e.size)) : ""}</span></div>`;
+    }).join("") : `<div class="hint" style="padding:4px 8px">${q ? "No match" : "No files"}</div>`;
+    tree.querySelectorAll("[data-kb-path]").forEach((el) => {
+      const open = () => openKnowledgeFile(el.dataset.kbPath);
+      el.onclick = open;
+      el.onkeydown = (e) => { if (e.key === "Enter") open(); };
+    });
+    tree.querySelectorAll("[data-kb-dir]").forEach((el) => {
+      const toggle = () => {
+        const dir = el.dataset.kbDir;
+        if (kb.open.has(dir)) kb.open.delete(dir); else kb.open.add(dir);
+        paintKnowledge();
+      };
+      el.onclick = toggle;
+      el.onkeydown = (e) => { if (e.key === "Enter") toggle(); };
+    });
+    const note = $("kb-note");
+    note.textContent = !kb.target ? "Open a session to see its project's knowledge." : d && d.truncated ? "Showing the first 2,000 entries." : "";
+    note.hidden = !note.textContent;
+    const f = kb.file;
+    $("kb-file").hidden = !f;
+    if (f) {
+      $("kb-file-path").textContent = f.path;
+      $("kb-file-text").textContent = f.text !== null ? f.text : f.note;
+      $("kb-file-text").classList.toggle("hint", f.text === null);
+    }
+  }
+
+  async function openKnowledgeFile(path) {
+    const target = kb.target;
+    const version = ++kb.fileVersion;
+    kb.file = { path, text: null, note: "Loading…" };
+    paintKnowledge();
+    try {
+      const f = await api(`/api/knowledge/file?target=${encodeURIComponent(target)}&path=${encodeURIComponent(path)}`);
+      if (version !== kb.fileVersion || target !== kb.target) return;
+      kb.file = { path, text: String(f.text ?? "") };
+    } catch (err) {
+      if (version !== kb.fileVersion || target !== kb.target) return;
+      kb.file = { path, text: null, note: err.status === 413 ? "too large to show" : `Could not open: ${err.message}` };
+    }
+    paintKnowledge();
+  }
+
+  // ------------------------------------------------------ usage status bar
+  // Numbers come only from /api/usage; a missing provider says "no data", never a guess.
+  const usage = { data: null, failed: false, version: 0 };
+  const STALE_MS = 6 * 3600 * 1000;
+
+  function toDate(v) {
+    if (v === null || v === undefined || v === "") return null;
+    const d = typeof v === "number" ? new Date(v < 1e12 ? v * 1000 : v) : new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function whenText(d, withTime) {
+    const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === new Date().toDateString()) return time;
+    const date = d.toLocaleDateString("en", { month: "short", day: "numeric" });
+    return withTime ? `${date}, ${time}` : date;
+  }
+
+  function usagePart(name, p) {
+    const wins = p && Array.isArray(p.windows)
+      ? p.windows.filter((w) => w && typeof w.used_percent === "number" && Number.isFinite(w.used_percent)) : [];
+    if (!wins.length) return { text: `${name} — no data`, stale: true, title: "" };
+    let text = `${name} ${wins.map((w) => `${w.label} ${Math.round(w.used_percent)}%`).join(" · ")}`;
+    const resets = wins.map((w) => [w.label, toDate(w.resets_at)]).filter(([, d]) => d);
+    if (wins.length === 1 && resets.length) text += ` · resets ${whenText(resets[0][1], false)}`;
+    const asOf = toDate(p.as_of);
+    if (asOf) text += ` · as of ${whenText(asOf, true)}`;
+    const title = [p.source ? `${name} · ${p.source}` : name,
+      ...resets.map(([label, d]) => `${label} resets ${whenText(d, true)}`)].join("\n");
+    return { text, stale: !!p.stale || !asOf || Date.now() - asOf.getTime() > STALE_MS, title };
+  }
+
+  function paintUsage() {
+    if (!$("usage-bar")) return;
+    if (usage.data) {
+      [["claude", "Claude"], ["codex", "Codex"]].forEach(([key, name]) => {
+        const part = usagePart(name, usage.data[key]);
+        const el = $(`usage-${key}`);
+        el.textContent = part.text;
+        el.title = part.title;
+        el.classList.toggle("stale", part.stale);
+      });
+    }
+    $("usage-sep").hidden = !usage.data;
+    $("usage-error").hidden = !usage.failed;
+  }
+
+  async function loadUsage() {
+    if (document.hidden || !$("usage-bar")) return;
+    const version = ++usage.version;
+    try {
+      const data = await api("/api/usage");
+      if (version !== usage.version) return;
+      usage.data = data || {};
+      usage.failed = false;
+    } catch (_) {
+      if (version !== usage.version) return;
+      // The last numbers stay on screen with a note.
+      usage.failed = true;
+    }
+    paintUsage();
+  }
+
   // ------------------------------------------------------------- actions
   async function refreshAll() {
     const [targets, runtimes, convs] = await Promise.all([
@@ -700,15 +1511,19 @@
     const conv = await api(`/api/conversations/${id}`);
     if (version !== openVersion) return;
     state.conv = id;
+    termRefused = null;
     showChat();
     state.target = conv.target;
     state.runtime = conv.runtime;
     applyConversation(conv);
+    knowledgeFor(conv.target);
+    // Opening never starts an agent; it only attaches to one that is running.
+    if (conv.transport === "terminal") attachTerminal(id); else detachTerminal();
     try {
       const at = await api(`/api/conversations/${id}/attach`);
       if (version === openVersion) $("attach").innerHTML = at.available === false
         ? `<span class="hint">${esc(at.reason)}</span>`
-        : `<div class="k">Открыть тот же терминал</div><code>${esc(at.command)}</code>`;
+        : `<div class="k">Open the same terminal</div><code>${esc(at.command)}</code>`;
     } catch (_) { if (version === openVersion) $("attach").textContent = "—"; }
     if (version !== openVersion) return;
     connectWs(id);
@@ -734,7 +1549,6 @@
         state.runId = ev.run_id;
         $("stop").style.display = ""; $("stop").disabled = false;
         $("checkpoint").disabled = true;
-        $("terminal-complete").hidden = state.transport !== "terminal";
         renderRun({ status: "running" });
       } else if (ev.type === "progress") {
         $("runstate").innerHTML = `<span class="spinner"></span>${esc(ev.text)}`;
@@ -804,23 +1618,57 @@
   $("board-project-filter").addEventListener("change", () => paintBoard());
   $("board-columns").addEventListener("focusout", () => queueMicrotask(() => paintBoard()));
   $("show-board").onclick = showBoard;
-  $("board-newconv").onclick = () => {
-    if ($("board-project-filter").value) state.target = $("board-project-filter").value;
-    $("newconv").click();
-  };
-  setInterval(refreshBoard, 5000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshBoard(); });
-  $("tfilter").addEventListener("input", paintTargets);
+  $("board-newconv").onclick = () => newSessionFromBoard();
+  setInterval(() => { refreshBoard(); refreshTree(); }, 5000);
+  setInterval(loadUsage, 60000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    refreshBoard();
+    refreshTree();
+    loadUsage();
+    if (viewVisible("tasks")) loadTasks();
+    if (viewVisible("automations")) loadAutomations();
+  });
+  document.querySelectorAll("[data-board-view]").forEach((b) => { b.onclick = () => setBoardView(b.dataset.boardView); });
+  setInterval(() => {
+    if (viewVisible("tasks")) loadTasks();
+    if (viewVisible("automations")) loadAutomations();
+  }, 30000);
+  $("tasks-project").addEventListener("change", () => loadTasks());
+  $("tasks-search").addEventListener("input", paintTasks);
+  $("tasks-refresh").onclick = () => loadTasks(true);
+  document.querySelectorAll("[data-task-chip]").forEach((b) => {
+    b.onclick = () => {
+      tasks.chip = b.dataset.taskChip;
+      document.querySelectorAll("[data-task-chip]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+      paintTasks();
+    };
+  });
+  $("tfilter").addEventListener("input", paintTree);
+  document.querySelectorAll("[data-panel]").forEach((b) => { b.onclick = () => setPanel(b.dataset.panel); });
+  $("kb-filter").addEventListener("input", paintKnowledge);
   $("send").onclick = send;
   $("stop").onclick = stopRun;
   $("checkpoint").onclick = () => {
     if (state.running || !state.continuation) return;
-    $("prompt").value = "Сохрани итог нашей текущей работы в knowledge/ этого проекта по его AGENTS.md: результат, решения и следующие действия. Сообщи, какие файлы обновлены.";
+    $("prompt").value = "Save a summary of our current work into this project's knowledge/ per its AGENTS.md: result, decisions and next steps. Tell me which files you updated.";
     send();
   };
-  $("terminal-complete").onclick = async () => {
-    try { await api(`/api/conversations/${state.conv}/terminal/complete`, {method: "POST"}); }
-    catch (err) { showDegraded({reason: err.message}); }
+  $("terminal-start").onclick = async () => {
+    const id = state.conv;
+    if (!id) return;
+    $("terminal-start").disabled = true;
+    try {
+      await api(`/api/conversations/${id}/terminal/start`, {method: "POST"});
+      const conv = await api(`/api/conversations/${id}`);
+      if (state.conv !== id) return;
+      termRefused = null;
+      applyConversation(conv);
+      attachTerminal(id);
+    } catch (err) {
+      $("session-note").hidden = false;
+      $("session-note").textContent = `Could not start the agent: ${err.message}`;
+    } finally { $("terminal-start").disabled = false; }
   };
   $("terminal-ready").onclick = async () => {
     try {
@@ -828,33 +1676,18 @@
       await retryRun();
     } catch (err) { showDegraded({reason: err.message}); }
   };
-  setInterval(async () => {
-    if (state.view !== "chat" || state.transport !== "terminal" || !state.conv) return;
-    const id = state.conv;
-    try { const output = await api(`/api/conversations/${id}/terminal`); if (state.conv === id) $("terminal-output").textContent = output.text; }
-    catch (_) {}
-  }, 1500);
   $("prompt").addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
   });
-  $("newconv").onclick = async () => {
-    try {
-      const conv = await api("/api/conversations", {
-        method: "POST", body: JSON.stringify({ target: state.target, runtime: state.runtime, transport: state.desktop ? $("transport-select").value : "oneshot" }),
-      });
-      await openConv(conv.id);
-    } catch (err) {
-      if (state.view === "board") boardError(`Не удалось создать сессию: ${err.message}`);
-      else showDegraded({reason: err.message});
-    }
-  };
+  $("newconv").onclick = () => newSession();
 
+  loadUsage();
   refreshAll().catch((e) => {
     document.body.innerHTML =
       `<div style="padding:40px;font-family:var(--sans)">
-         <h1>Не удалось открыть Vepol</h1>
+         <h1>Could not open Vepol</h1>
          <p style="color:var(--ink-dim)">${esc(e.message || e)}</p>
-         <p style="color:var(--ink-dim)">${window.__VEPOL_TOKEN__ ? "Перезапусти приложение Vepol." : "Открой ссылку из запуска run.sh."}</p>
+         <p style="color:var(--ink-dim)">${window.__VEPOL_TOKEN__ ? "Restart the Vepol app." : "Open the link printed by run.sh."}</p>
        </div>`;
   });
 })();

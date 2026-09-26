@@ -8,22 +8,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
 import pathlib
+import pty
+import struct
+import subprocess
+import termios
 import threading
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
+from . import automations as automations_mod
 from . import broker as broker_mod
+from . import knowledge_files as knowledge_mod
 from . import runtimes as runtimes_mod
 from . import targets as targets_mod
+from . import tasks as tasks_mod
+from . import terminal_session as terminal_mod
+from . import usage as usage_mod
 from .auth import Auth
 from .config import Config
 from .evidence import diff_kb
-from .runs import Conversation, RunStore
-from .sessions import attach_command, session_name
+from .runs import BOARD_STAGES, Conversation, RunStore
+from .sessions import UnsafeSessionName, attach_command, session_name
 from .session_manager import SessionManager
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -131,12 +142,17 @@ def create_app(
                    continuation_available=details["continuation_available"])
         if details["pending"]:
             row["activity"] = "waiting"
+        if details["transport"] == "terminal":
+            # Process evidence replaces the run-derived state for terminal conversations.
+            row.update(agent=details["agent"], pid=details["pid"], agent_reason=details.get("agent_reason", ""))
+            row["activity"] = details["agent"]
         return row
 
     def desktop_status():
         convs = app.state.store.list_conversations()
         pending = [f"{c.id}:{p['id']}" for c in convs for p in app.state.sessions.describe(c)["pending"]]
-        return {"busy": app.state.sessions.busy() or any(r.status == "running" for c in convs for r in c.runs),
+        # A pending permission/decision is work in flight too, so Quit explains it as such.
+        return {"busy": bool(pending) or app.state.sessions.busy() or any(r.status == "running" for c in convs for r in c.runs),
                 "pending": len(pending), "pending_ids": pending}
 
     # ---------------------------------------------------------- middleware
@@ -187,6 +203,50 @@ def create_app(
         found = runtimes_mod.load_runtimes()
         return [r.as_dict() for r in found.values()]
 
+    @app.get("/api/knowledge/tree", dependencies=auth_dep)
+    def api_knowledge_tree(target: str = "") -> dict:
+        try:
+            return knowledge_mod.knowledge_tree(hub_path, target)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
+
+    @app.get("/api/knowledge/file", dependencies=auth_dep)
+    def api_knowledge_file(target: str = "", path: str = "") -> dict:
+        try:
+            return knowledge_mod.knowledge_file(hub_path, target, path)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="no such file")
+        except knowledge_mod.FileTooLarge:
+            raise HTTPException(status_code=413, detail="too large to show")
+
+    @app.get("/api/usage", dependencies=auth_dep)
+    def api_usage() -> dict:
+        return usage_mod.read_usage(state_dir, os.environ.get("CODEX_HOME"))
+
+    # Read-only views: plain `def` so blocking kb-board calls and ledger scans run in the threadpool.
+    @app.get("/api/tasks", dependencies=auth_dep)
+    def api_tasks(target: str | None = None) -> dict:
+        try:
+            return tasks_mod.list_tasks(hub_path, target)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
+
+    @app.get("/api/automations", dependencies=auth_dep)
+    def api_automations() -> dict:
+        return automations_mod.build_automations(hub_path)
+
+    @app.get("/api/automations/{process_id}", dependencies=auth_dep)
+    def api_automation(process_id: str, date: str | None = None) -> dict:
+        try:
+            detail = automations_mod.automation_detail(hub_path, process_id, date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"unknown process {process_id!r}")
+        return detail
+
     @app.get("/api/conversations", dependencies=auth_dep)
     def api_conversations() -> list[dict]:
         return [
@@ -199,7 +259,9 @@ def create_app(
         body = await _json_body(request, cfg.max_body_bytes)
         target = str(body.get("target") or "hub")
         runtime = str(body.get("runtime") or "claude")
-        mode = str(body.get("transport") or ("session" if cfg.desktop else "oneshot"))
+        mode = str(body.get("transport") or ("terminal" if cfg.desktop else "oneshot"))
+        title = body.get("title")
+        title = title.strip()[:200] if isinstance(title, str) else ""
         if mode not in ({"session", "terminal"} if cfg.desktop else {"oneshot", "session", "terminal"}):
             raise HTTPException(status_code=400, detail="unknown transport")
         if runtime not in cfg.allowed_runtimes:
@@ -207,12 +269,21 @@ def create_app(
                 status_code=400,
                 detail=f"unknown runtime {runtime!r}; allowed: {list(cfg.allowed_runtimes)}",
             )
+        board_stage = body.get("board_stage")
+        if board_stage is not None and (not isinstance(board_stage, str) or board_stage not in BOARD_STAGES):
+            raise HTTPException(status_code=400, detail="invalid board stage")
         if mode == "terminal":
             for existing in app.state.store.list_conversations():
                 if existing.target == target and existing.runtime == runtime and existing.transport == "terminal":
-                    return {"id": existing.id, "target": target, "runtime": runtime, "transport": mode}
-        conv = app.state.store.create_conversation(target=target, runtime=runtime, transport=mode)
-        return {"id": conv.id, "target": conv.target, "runtime": conv.runtime, "transport": mode}
+                    # One terminal per (target, runtime): an existing terminal keeps its title and
+                    # board stage (owner decision 2026-09-26); the page shows a note.
+                    return {"id": existing.id, "target": target, "runtime": runtime, "transport": mode,
+                            "existing": True}
+        conv = app.state.store.create_conversation(target=target, runtime=runtime, title=title, transport=mode)
+        if board_stage is not None:
+            conv = app.state.store.update_board_stage(conv.id, board_stage)
+        return {"id": conv.id, "target": conv.target, "runtime": conv.runtime, "transport": mode,
+                "existing": False}
 
     @app.get("/api/conversations/{conv_id}", dependencies=auth_dep)
     def api_conversation(conv_id: str) -> dict:
@@ -262,7 +333,7 @@ def create_app(
         if any(r.status == "running" for r in conv.runs):
             raise HTTPException(status_code=409, detail="a run is already in flight")
         if not app.state.sessions.continuation_available(conv):
-            raise HTTPException(status_code=409, detail="Исходная сессия агента не найдена. История сохранена; продолжение недоступно.")
+            raise HTTPException(status_code=409, detail="The agent's original session was not found. History is kept; it cannot be continued.")
 
         target = _resolve_target(hub_path, conv.target)
         if cfg.desktop and conv.transport == "oneshot" and not conv.messages and not conv.runs:
@@ -311,8 +382,8 @@ def create_app(
             if client:
                 client.interrupt()
             if conv.transport == "terminal":
-                app.state.store.finish_run(conv_id, run_id, "stopped", reason="Остановлено владельцем")
-                app.state.bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "stopped", "ok": False, "reason": "Остановлено владельцем"})
+                app.state.store.finish_run(conv_id, run_id, "stopped", reason="Stopped by the owner")
+                app.state.bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "stopped", "ok": False, "reason": "Stopped by the owner"})
         return {"run_id": run_id, "stopping": hit}
 
     @app.post("/api/conversations/{conv_id}/retry", dependencies=auth_dep, status_code=202)
@@ -327,7 +398,7 @@ def create_app(
         if last_user is None:
             raise HTTPException(status_code=400, detail="nothing to retry")
         if not app.state.sessions.continuation_available(conv):
-            raise HTTPException(status_code=409, detail="Исходная сессия недоступна; повтор не создаёт новый разговор.")
+            raise HTTPException(status_code=409, detail="The original session is unavailable; a retry does not start a new conversation.")
 
         target = _resolve_target(hub_path, conv.target)
         run = app.state.store.start_run(conv_id, run_id=broker_mod.new_run_id())
@@ -359,10 +430,10 @@ def create_app(
         runtime = conv.runtime
         if app.state.sessions.mode(conv) == "session":
             return {"available": False, "mode": "session", "command": "",
-                    "reason": "Сессия работает в приложении. Перехват того же процесса в терминале пока недоступен."}
-        slug = "".join(ch for ch in conv.target.lower() if ch.isalnum() or ch in "-_") or "hub"
+                    "reason": "The session runs inside the app. Taking over the same process in a terminal is not available yet."}
         try:
-            name = session_name(slug, runtime)
+            # Same derivation as Start, liveness and the bridge: one conversation, one session name.
+            name = session_name(conv.target, runtime)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"available": True, "session": name, "command": attach_command(name), "mode": "terminal"}
@@ -375,7 +446,7 @@ def create_app(
     def api_shutdown():
         status = desktop_status()
         if status["busy"] or status["pending"]:
-            raise HTTPException(status_code=409, detail="В сессиях ещё идёт работа. Vepol останется запущенным.")
+            raise HTTPException(status_code=409, detail="Sessions are still working. Vepol will keep running.")
         shutdown = getattr(app.state, "shutdown", None)
         if shutdown is None:
             raise HTTPException(status_code=409, detail="This backend is not owned by Vepol Desktop")
@@ -393,14 +464,23 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"answered": True}
 
-    @app.get("/api/conversations/{conv_id}/terminal", dependencies=auth_dep)
-    def api_terminal(conv_id: str):
+    @app.post("/api/conversations/{conv_id}/terminal/start", dependencies=auth_dep)
+    def api_terminal_start(conv_id: str) -> dict:
+        """Create or reuse the agent's tmux session. Only an explicit click calls this."""
         conv = app.state.store.get_conversation(conv_id)
         if conv is None or conv.transport != "terminal":
             raise HTTPException(status_code=404, detail="No terminal session")
-        client = app.state.sessions.clients.get(conv_id)
-        return {"text": client.capture() if client else "Отправь сообщение, чтобы открыть терминал.",
-                "command": attach_command(session_name(conv.target, conv.runtime))}
+        target = _resolve_target(hub_path, conv.target)
+        try:
+            result = app.state.sessions.client(conv, target).start()
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            reason = str(exc)
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                reason = exc.stderr.strip()
+            raise HTTPException(status_code=409, detail=reason) from exc
+        # A note left by a Send before Start ("Click Start…") no longer applies.
+        app.state.store.update_transport(conv_id, note="")
+        return result
 
     @app.post("/api/conversations/{conv_id}/terminal/ready", dependencies=auth_dep)
     def api_terminal_ready(conv_id: str):
@@ -409,21 +489,116 @@ def create_app(
             raise HTTPException(status_code=404, detail="No terminal session")
         client = app.state.sessions.clients.get(conv_id)
         if client is None:
-            raise HTTPException(status_code=409, detail="Сначала открой терминальную сессию")
-        client.confirm_ready()
+            raise HTTPException(status_code=409, detail="Open the terminal session first")
+        try:
+            client.confirm_ready()
+        except subprocess.CalledProcessError:
+            raise HTTPException(status_code=409, detail="The agent is not running. Click Start to open a new session.")
         app.state.store.update_transport(conv_id, note="")
         return {"ready": True}
 
-    @app.post("/api/conversations/{conv_id}/terminal/complete", dependencies=auth_dep)
-    def api_terminal_complete(conv_id: str):
+    @app.websocket("/ws/{conv_id}/terminal")
+    async def ws_terminal(websocket: WebSocket, conv_id: str) -> None:
+        """Bytes between the agent's PTY and the window. Attach never creates,
+        kills or signals the agent: two sockets are simply two tmux clients."""
+        token = websocket.query_params.get("token")
+        origin = websocket.headers.get("origin")
+        if not app.state.auth.verify(token):
+            await websocket.close(code=4401)
+            return
+        if not app.state.auth.origin_allowed(origin):
+            await websocket.close(code=4403)
+            return
+        # 4404 closes after the handshake: a pre-handshake close reaches the
+        # browser as 1006, which the page retries forever.
         conv = app.state.store.get_conversation(conv_id)
         if conv is None or conv.transport != "terminal":
-            raise HTTPException(status_code=404, detail="No terminal session")
-        for run in conv.runs:
-            if run.status == "running":
-                app.state.store.finish_run(conv_id, run.id, "submitted", reason="Владелец отметил окончание работы в терминале")
-                app.state.bus.publish(conv_id, {"type": "run_finished", "run_id": run.id, "status": "submitted", "ok": True})
-        return {"confirmed": True}
+            await websocket.accept()
+            await websocket.close(code=4404)
+            return
+        try:
+            name = session_name(conv.target, conv.runtime)
+        except UnsafeSessionName:
+            await websocket.accept()
+            await websocket.close(code=4404)
+            return
+
+        env = broker_mod.clean_env()
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        env["TERM"] = "xterm-256color"
+        loop = asyncio.get_running_loop()
+        await websocket.accept()
+        try:
+            tmux = terminal_mod.tmux_binary(env)
+            exists = (await loop.run_in_executor(
+                None, lambda: subprocess.run([tmux, "has-session", "-t", name], env=env, capture_output=True),
+            )).returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            await websocket.send_json({"type": "not_running", "reason": str(exc)})
+            await websocket.close()
+            return
+        if not exists:
+            await websocket.send_json({"type": "not_running"})
+            await websocket.close()
+            return
+
+        master, slave = pty.openpty()
+        # login_tty makes the PTY the client's controlling terminal (setsid +
+        # TIOCSCTTY + dup2): resize reaches it as SIGWINCH and closing the
+        # master hangs it up. CPython closes inherited fds after preexec_fn.
+        proc = subprocess.Popen(
+            [tmux, "-u", "attach-session", "-t", name],
+            preexec_fn=lambda: os.login_tty(slave), env=env, close_fds=True,
+        )
+        os.close(slave)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def pump() -> None:
+            while True:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    data = b""
+                loop.call_soon_threadsafe(queue.put_nowait, data)
+                if not data:
+                    return
+
+        threading.Thread(target=pump, daemon=True).start()
+        receiving = asyncio.create_task(websocket.receive())
+        reading = asyncio.create_task(queue.get())
+        try:
+            while True:
+                done, _ = await asyncio.wait({receiving, reading}, return_when=asyncio.FIRST_COMPLETED)
+                if reading in done:
+                    data = reading.result()
+                    if not data:
+                        # Our tmux client ended. An external detach leaves the agent alive:
+                        # close without "exited" so the page reconnects. Otherwise it is gone.
+                        live = await loop.run_in_executor(None, terminal_mod.liveness, name, env)
+                        if live["agent"] != "alive":
+                            await websocket.send_json({"type": "exited"})
+                        break
+                    await websocket.send_bytes(data)
+                    reading = asyncio.create_task(queue.get())
+                if receiving in done:
+                    message = receiving.result()
+                    if message["type"] == "websocket.disconnect":
+                        break
+                    if message.get("bytes"):
+                        os.write(master, message["bytes"])
+                    elif message.get("text"):
+                        _apply_resize(master, message["text"])
+                    receiving = asyncio.create_task(websocket.receive())
+        except (WebSocketDisconnect, RuntimeError, OSError):
+            pass
+        finally:
+            receiving.cancel()
+            reading.cancel()
+            await asyncio.gather(receiving, reading, return_exceptions=True)
+            await loop.run_in_executor(None, _release_client, proc, master)
+            with contextlib.suppress(Exception):
+                await websocket.close()
 
     @app.websocket("/ws/{conv_id}")
     async def ws(websocket: WebSocket, conv_id: str) -> None:
@@ -469,6 +644,9 @@ def create_app(
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
+    # xterm.js and its fit add-on, vendored (MIT); no CDN, same origin as the page.
+    app.mount("/vendor", StaticFiles(directory=STATIC / "vendor"), name="vendor")
+
     @app.get("/boot.js")
     def boot() -> JSONResponse:
         # The token is injected into the served page at launch, not persisted.
@@ -488,6 +666,42 @@ async def _json_body(request: Request, limit: int) -> dict:
     except ValueError:
         raise HTTPException(status_code=400, detail="bad json")
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_resize(master: int, text: str) -> None:
+    """Only a well-formed resize frame touches the PTY; any other text is ignored."""
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return
+    if not isinstance(message, dict) or message.get("type") != "resize":
+        return
+    cols, rows = message.get("cols"), message.get("rows")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 1000 for v in (cols, rows)):
+        return
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def _release_client(proc: subprocess.Popen, master: int) -> None:
+    """Detach the tmux client (never the agent), then close the PTY.
+
+    Order matters on macOS: closing the master while the pump thread is
+    blocked in read() stalls close() for seconds. Ending the client first
+    ends that read, so the close is immediate. The tmux server and the
+    agent in its pane are untouched.
+    """
+    if proc.poll() is None:
+        with contextlib.suppress(OSError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+    with contextlib.suppress(OSError):
+        os.close(master)
 
 
 def _resolve_target(hub: pathlib.Path, slug: str):
@@ -551,12 +765,17 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
         before = diff_kb.snapshot(pathlib.Path(target.knowledge))
         result = client.execute(prompt)
         if result.get("still_running"):
-            store.update_transport(conv_id, note=result.get("reason") or "Протокол прерван, но процесс ещё работает")
-            bus.publish(conv_id, {"type": "progress", "run_id": run_id, "text": result.get("reason") or "Процесс ещё работает; автоматическое завершение недоступно."})
+            store.update_transport(conv_id, note=result.get("reason") or "The protocol was interrupted, but the process is still running")
+            bus.publish(conv_id, {"type": "progress", "run_id": run_id, "text": result.get("reason") or "The process is still running; automatic completion is not available."})
             result = client.wait_for_completion()
         if result.get("submitted"):
-            bus.publish(conv_id, {"type": "progress", "run_id": run_id,
-                                 "text": "Сообщение отправлено в терминал. Окончание работы отмечаешь ты."})
+            # The paste is the whole job: the terminal shows the rest, so the
+            # run closes now and never marks the app busy.
+            reason = result.get("reason") or "Message sent to the terminal."
+            store.finish_run(conv_id, run_id, "submitted", reason=reason, category="submitted",
+                             evidence={"pid": result.get("pid"), "lane": "terminal"})
+            bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "submitted",
+                                  "ok": True, "reason": reason})
             return
         evidence = diff_kb.compare(before, diff_kb.snapshot(pathlib.Path(target.knowledge))).as_dict()
         status = "done" if result.get("ok") else ("stopped" if result.get("category") == "stopped" else "degraded")
@@ -567,7 +786,7 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
             store.update_transport(conv_id, note=result.get("reason") or "Session transport failed")
         bus.publish(conv_id, {**result, "type": "run_finished", "run_id": run_id, "status": status, "evidence": evidence})
     except Exception as exc:
-        reason = f"Сессия недоступна: {exc}"
+        reason = f"Session unavailable: {exc}"
         store.finish_run(conv_id, run_id, "degraded", reason=reason)
         store.update_transport(conv_id, note=reason)
         bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "degraded", "ok": False, "reason": reason})

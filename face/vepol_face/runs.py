@@ -117,6 +117,15 @@ class RunStore:
             self._save(conv)
             return run
 
+    def set_title(self, conv_id: str, title: str) -> Conversation:
+        with self._lock:
+            conv = self.get_conversation(conv_id)
+            if conv is None:
+                raise KeyError(conv_id)
+            conv.title = title
+            self._save(conv)
+            return conv
+
     def update_board_stage(self, conv_id: str, stage: str) -> Conversation:
         """Move a conversation without changing its transcript or runtime state."""
         if not isinstance(stage, str) or stage not in BOARD_STAGES:
