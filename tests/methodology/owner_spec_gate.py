@@ -93,15 +93,17 @@ def test_spec_driven_workflow_contract() -> None:
         "docs/methodology/spec-driven-workflow.md",
         "spec-driven workflow lists required spec contents",
         [
-            "Product context",
-            "Place in Vepol",
-            "Software 3.0",
+            "at most 150 lines",
+            "What we do.",
+            "How it works.",
+            "What is out of scope.",
+            "How we check it.",
             "owner approval",
             "spec-contract",
-            "mandatory E2E path",
+            "mandatory E2E",
             "technically impossible",
             "build plan",
-            "Changes requested",
+            "rejects or supersedes",
         ],
     )
 
