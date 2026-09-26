@@ -199,7 +199,8 @@
   .project-path { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board-project-path { margin-top: 6px; }
   .session-path { margin: -4px 0 8px; }
-  #terminal { flex: 1; min-height: 0; padding: 10px 12px 4px; background: #000; }
+  /* content-box: the fit addon measures this element's height, which must exclude the padding. */
+  #terminal { flex: 1; min-height: 0; padding: 10px 12px 4px; box-sizing: content-box; background: #000; }
   #terminal .xterm { height: 100%; }
   .agent-state.alive { color: var(--ok); }
   .agent-state.not_running { color: var(--ink-dim); }

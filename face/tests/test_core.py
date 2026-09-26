@@ -1,8 +1,6 @@
-"""RED tests for Vepol Face.
+"""Tests for Vepol Face.
 
-Each test names the spec acceptance criterion it enforces
-(knowledge/decisions/vepol-face-macos-app-2026-06-24.md, contract 3c09461b).
-Written before implementation.
+Each test names the acceptance criterion it enforces.
 """
 from __future__ import annotations
 
@@ -102,7 +100,7 @@ def test_canonical_session_names_accepted(name):
     [
         "kb-demo-bash",               # runtime not allowed
         "kb--claude",                 # empty slug
-        "vepol-dev-claude",           # missing prefix
+        "demo-claude",                # missing prefix
         "kb-demo-claude; rm -rf /",
         "kb-$(whoami)-claude",
         "kb-`id`-claude",
@@ -261,12 +259,12 @@ def test_resume_key_is_stable_per_conversation_target_runtime():
     """MVP-2: stable vepol-face:<conversation_id>:<target>:<runtime> key."""
     from vepol_face.broker import resume_key
 
-    k1 = resume_key("conv-1", "vepol-dev", "claude")
-    k2 = resume_key("conv-1", "vepol-dev", "claude")
-    assert k1 == k2 == "vepol-face:conv-1:vepol-dev:claude"
-    assert resume_key("conv-2", "vepol-dev", "claude") != k1
+    k1 = resume_key("conv-1", "demo", "claude")
+    k2 = resume_key("conv-1", "demo", "claude")
+    assert k1 == k2 == "vepol-face:conv-1:demo:claude"
+    assert resume_key("conv-2", "demo", "claude") != k1
     assert resume_key("conv-1", "hub", "claude") != k1
-    assert resume_key("conv-1", "vepol-dev", "codex") != k1
+    assert resume_key("conv-1", "demo", "codex") != k1
 
 
 def test_broker_argv_uses_json_status_and_run_id_not_stdout_parsing():
@@ -298,7 +296,7 @@ def test_run_store_persists_and_reattaches(tmp_path):
     from vepol_face.runs import RunStore
 
     store = RunStore(tmp_path)
-    conv = store.create_conversation(target="vepol-dev", runtime="claude")
+    conv = store.create_conversation(target="demo", runtime="claude")
     store.append_message(conv.id, role="user", text="hello")
     run = store.start_run(conv.id, run_id="r-1")
 
@@ -1083,3 +1081,7 @@ def test_automations_states_come_from_scheduler_files_without_writing(tmp_path, 
     assert "secret" not in json.dumps(payload) + json.dumps(detail)
     assert detail["occurrences"][0]["attempts"] == 2
     assert detail["attempt"]["stderr"].splitlines()[-1] == "claude: OAuth session expired"
+    # The backup job is not installed by Vepol: its row shows only when the job exists.
+    assert [r["name"] for r in payload["other"]] == ["Backup"]
+    monkeypatch.setattr(automations, "launchctl_list", lambda label: (113, "Could not find service"))
+    assert automations.build_automations(hub, now=now)["other"] == []

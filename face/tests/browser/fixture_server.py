@@ -44,7 +44,15 @@ hub = fixture_root / "hub"
 for slug in ("alpha", "beta", "gamma", "delta"):
     (hub / "projects" / slug).mkdir(parents=True, exist_ok=True)
 
-REAL_HUB = pathlib.Path.home() / "knowledge"
+# kb-board, _kb_processes.py and the backlog template (read-only): VEPOL_FIXTURE_KB_ROOT if set,
+# else the Vepol repo this app sits in (so a release tests its own tools), else ~/knowledge.
+_repo = app_root.resolve().parent
+if os.environ.get("VEPOL_FIXTURE_KB_ROOT"):
+    REAL_HUB = pathlib.Path(os.environ["VEPOL_FIXTURE_KB_ROOT"]).expanduser()
+elif (_repo / "bin" / "kb-board").is_file() and (_repo / "_template" / "knowledge" / "backlog.md").is_file():
+    REAL_HUB = _repo
+else:
+    REAL_HUB = pathlib.Path.home() / "knowledge"
 
 
 def kb_board(*args: str) -> str:

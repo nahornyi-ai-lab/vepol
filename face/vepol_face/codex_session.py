@@ -290,7 +290,7 @@ class CodexSession:
             self._emit({"type": "progress", "text": "Codex: connecting to the persistent session"})
         if not self._initialized:
             self._rpc("initialize", {
-                "clientInfo": {"name": "vepol_desktop", "title": "Vepol", "version": "0.1.0"},
+                "clientInfo": {"name": "vepol_desktop", "title": "Vepol", "version": "1.0.0"},
                 "capabilities": {"experimentalApi": True},
             })
             self._write({"method": "initialized", "params": {}})
