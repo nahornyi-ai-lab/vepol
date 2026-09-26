@@ -19,6 +19,24 @@ import textwrap
 
 
 
+def sandbox_env(hub: pathlib.Path) -> dict:
+    """Environment for a cycle invocation against a sandbox hub.
+
+    Isolation (mandatory, not hygiene): the durable runner's dedup index lives
+    at `KB_CLAUDE_RUN_ROOT` (default `~/knowledge/.orchestrator/claude-runs`)
+    and is NOT hub-scoped, while the cycle's per-node key is only
+    `cycle-node:<slug>:<date>:retro`. A *succeeded* managed run keeps its
+    reservation forever, so without an own run root these fixtures (a) attach
+    to whatever run an earlier sandbox left under the same slug/date and never
+    execute their own stub broker, and (b) write their runs into the real hub.
+    """
+    return {
+        **os.environ,
+        "KB_HUB": str(hub),
+        "KB_CLAUDE_RUN_ROOT": str(hub / ".orchestrator" / "claude-runs"),
+    }
+
+
 def _cycle_src_bin() -> pathlib.Path:
     """Source bin/ for the cycle CLI under test.
 
@@ -115,7 +133,7 @@ def cr4_b2_disabled_ancestor():
     proc = subprocess.run(
         [str(sb / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro"],
-        env={**os.environ, "KB_HUB": str(sb)},
+        env=sandbox_env(sb),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 2, f"refuses with exit 2 (got {proc.returncode})")
@@ -206,7 +224,7 @@ def cr5_b3_skips_spawn_for_completed():
     proc = subprocess.run(
         [str(p / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro"],
-        env={**os.environ, "KB_HUB": str(p)},
+        env=sandbox_env(p),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 0, f"cycle succeeds (rc={proc.returncode})")
@@ -221,7 +239,7 @@ def cr5_b3_skips_spawn_for_completed():
     proc2 = subprocess.run(
         [str(p / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro", "--force"],
-        env={**os.environ, "KB_HUB": str(p)},
+        env=sandbox_env(p),
         capture_output=True, text=True,
     )
     assert_(proc2.returncode == 0, "force re-run succeeds")
@@ -295,7 +313,7 @@ def cr4_b3_no_overwrite_completed():
     proc = subprocess.run(
         [str(p / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro"],
-        env={**os.environ, "KB_HUB": str(p)},
+        env=sandbox_env(p),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 0, f"cycle succeeds (rc={proc.returncode})")
@@ -363,7 +381,7 @@ def cr4_b4_max_fanout():
     proc = subprocess.run(
         [str(sb / "bin" / "kb-orchestrator-cycle"), "retro",
          "--skip-registry-check", "--skip-hub-retro"],
-        env={**os.environ, "KB_HUB": str(sb)},
+        env=sandbox_env(sb),
         capture_output=True, text=True,
     )
     assert_(proc.returncode == 1, f"refuses with exit 1 on MAX_FANOUT (got {proc.returncode}; stderr={proc.stderr[-200:]})")
