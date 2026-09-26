@@ -72,7 +72,7 @@ us.
 ### "Can I contribute back to Vepol?"
 
 Yes, please. Contributions are accepted under the same FSL-1.1-MIT
-terms. See [CONTRIBUTING.md](CONTRIBUTING.md) when published.
+terms. See `CONTRIBUTING.md` (when published) for the process.
 
 ### "What if I'm not sure my use case fits?"
 

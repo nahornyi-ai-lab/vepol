@@ -41,7 +41,7 @@ upgrading.
   **Behavior change:** mutations on a non-canonical board now refuse instead
   of quietly canonicalizing it — run `kb-board fmt <path>` (dry run first) or
   `kb-board migrate <path>` to canonicalize deliberately.
-  ([v0.8.1](releases/v0.8.1.md))
+  ([v0.8.1](docs/releases/v0.8.1.md))
 - `kb-board` reports structured mutation failures instead of a Python
   traceback: `{"ok": false, "code", "message"}` with `--json`, or
   `kb-board: <code>: <message>` on stderr, exit 1.
@@ -92,7 +92,7 @@ upgrading.
   acceptance, `idea_id` backlink, optional `--context` body) atomically under
   the board lock, idempotently, and mirrors the `plan_item_id` back to the
   card. The v0.6.0 acceptance test now passes as written.
-  ([v0.7.2](releases/v0.7.2.md))
+  ([v0.7.2](docs/releases/v0.7.2.md))
 
 ## [0.7.1] — 2026-08-07
 
@@ -107,7 +107,7 @@ upgrading.
   the People Notebook pipeline could not be imported. Each file gains one
   `from __future__ import annotations` line; an AST sweep of all 106 Python
   files, 39 Python executables and 124 embedded Python heredocs under `bin/`
-  confirms no other file has the same problem. ([v0.7.1](releases/v0.7.1.md))
+  confirms no other file has the same problem. ([v0.7.1](docs/releases/v0.7.1.md))
 
 ## [0.7.0] — 2026-07-14
 
