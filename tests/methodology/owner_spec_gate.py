@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Owner-approved specification gate documentation contract tests.
 
-Spec: vepol-dev/knowledge/decisions/owner-spec-approval-gate-2026-06-21.md
-Build plan: vepol-dev/knowledge/decisions/owner-spec-approval-gate-build-plan-2026-06-21.md
-
 These tests exercise the methodology/docs rollout as a process contract:
 material work must flow through research -> reviewed spec -> owner approval ->
 build plan -> RED/E2E tests -> implementation.

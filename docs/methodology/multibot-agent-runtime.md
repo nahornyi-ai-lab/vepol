@@ -82,10 +82,10 @@ Telegram Group "<your_group>" (private, invite-only)
    ├─ @owner                      (human, также Telethon observer)
    ├─ @demo_hub_bot              (root)
    ├─ @demo_grants_bot
-   ├─ @demo_winox_bot
-   ├─ @demo_leadgen_bot          (parent: hub, children: leadgen-leads, nailab-ailab-landing)
-   ├─ @nailab_landing_bot         (parent: leadgen)
-   ├─ @demo_leadgen_leads_bot    (parent: leadgen)
+   ├─ @demo_studio_bot
+   ├─ @demo_sales_bot            (parent: hub, children: sales-leads, sales-landing)
+   ├─ @demo_landing_bot          (parent: sales)
+   ├─ @demo_sales_leads_bot      (parent: sales)
    ├─ @demo_family_bot           (parent: hub, children: auto)
    ├─ @demo_auto_bot             (parent: family)
    └─ ... (всего 14, см. bots-roster.md)
@@ -139,7 +139,7 @@ agents:
     workdir: "~/knowledge"
     runtime: claude
     parent_slug: null
-    children_slugs: [family, grants, leadgen, ...]
+    children_slugs: [family, grants, sales, ...]
     persona: "Hub — root orchestrator"
     topics: []
     allowed_users: ["*"]
@@ -148,13 +148,13 @@ agents:
     task_timeout_sec: null
     enabled: true
 
-  leadgen:
+  sales:
     parent_slug: hub
-    children_slugs: [leadgen-leads, nailab-ailab-landing]
+    children_slugs: [sales-leads, sales-landing]
     ...
 
-  leadgen-leads:
-    parent_slug: leadgen
+  sales-leads:
+    parent_slug: sales
     children_slugs: []
     ...
 ```
@@ -212,7 +212,7 @@ Editable per-project — `parent_slug`, `bot_*`, `persona`, `topics`, `allowed_u
 - **Watchdog**: stdout silence > 900s default (override через `watchdog_silence_sec`) → SIGTERM + сообщение «процесс молчал 15 мин, прервал».
 - **Optional hard timeout**: `task_timeout_sec` off by default — codex implementation может работать 4+ часа.
 - **Cooldown**: 30s default per (chat_id, agent_slug) — bot не реплаит в течение N секунд после своего предыдущего сообщения в этом chat (против bounce-loops).
-- **Mention-graph depth**: D=4 default — реальная max иерархия в 14 ботах = 3 уровня (hub→leadgen→leadgen-leads), D=4 buffer. Override через `KB_MULTIBOT_DEPTH_CAP` env до D=8 если когда-нибудь понадобится.
+- **Mention-graph depth**: D=4 default — реальная max иерархия в 14 ботах = 3 уровня (hub→sales→sales-leads), D=4 buffer. Override через `KB_MULTIBOT_DEPTH_CAP` env до D=8 если когда-нибудь понадобится.
 - **Fan-out cap**: F=10 параллельных процессов per incoming event. Остальные mention'ы в очередь. Защита от resource exhaustion на MacBook.
 - **Hourly spawn quota**: Q=60 spawn'ов в час per user. Защита от abuse / runaway.
 
@@ -275,8 +275,8 @@ DM-каналы — sender uniquely identifies, тот же default.
 
 Multibot агенты участвуют в existing `kb-orchestrator-cycle retro` через `cycle_enabled: true` в `.orchestration.yaml`:
 
-1. **Leaf агенты** (например leadgen-leads, auto) пишут свой `<project>/knowledge/reports/YYYY-MM-DD.md`.
-2. **Parent агенты** (leadgen, family) собирают reports children + свои observations → rolled-up в `<parent>/knowledge/reports/`.
+1. **Leaf агенты** (например sales-leads, auto) пишут свой `<project>/knowledge/reports/YYYY-MM-DD.md`.
+2. **Parent агенты** (sales, family) собирают reports children + свои observations → rolled-up в `<parent>/knowledge/reports/`.
 3. **Hub** агрегирует все root reports → `~/knowledge/daily/YYYY-MM-DD.md` + Telegram summary.
 
 Phase 1: hub summary летит в DM `@your_hub_bot` как сейчас. Publish в группу `<your_group>` — Phase 2 opt-in.
