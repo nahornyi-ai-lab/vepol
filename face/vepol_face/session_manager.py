@@ -41,10 +41,21 @@ class SessionManager:
             client = self.clients.get(conv.id)
             steps = list(self.events.get(conv.id, []))
         pending = list(client.pending) if client else []
+        agent = {"agent": None, "pid": client.pid if client else None}
+        if self.mode(conv) == "terminal":
+            # Liveness from process evidence, with or without a client object,
+            # so a relaunched app reports the truth before anything is opened.
+            from .sessions import UnsafeSessionName, session_name
+            from .terminal_session import liveness
+            try:
+                live = liveness(session_name(conv.target, conv.runtime), clean_env())
+            except UnsafeSessionName as exc:
+                live = {"agent": "unknown", "pid": None, "reason": str(exc)}
+            agent = {"agent": live["agent"], "pid": live["pid"], "agent_reason": live["reason"]}
         return {
+                **agent,
                 "transport": self.mode(conv),
                 "provider_session_id": client.session_id if client else conv.provider_session_id,
-                "pid": client.pid if client else None,
                 "pending": pending,
                 "steps": steps,
                 "continuation_available": self.continuation_available(conv),
@@ -63,7 +74,7 @@ class SessionManager:
             if conv.id in self.clients:
                 return self.clients[conv.id]
             if not self.continuation_available(conv):
-                raise ValueError("Исходная сессия агента не найдена. История сохранена; продолжение недоступно.")
+                raise ValueError("The agent's original session was not found. History is kept; it cannot be continued.")
             mode = self.mode(conv)
             session_id = self.legacy_id(conv)
             env = clean_env()
@@ -93,7 +104,7 @@ class SessionManager:
                 from .codex_session import CodexSession
                 client = CodexSession(target.cwd, session_id, event, identified, env)
             else:
-                raise ValueError("Для этого агента доступен только режим терминала.")
+                raise ValueError("Only terminal mode is available for this agent.")
             self.clients[conv.id] = client
             return client
 
@@ -101,7 +112,7 @@ class SessionManager:
         with self._lock:
             client = self.clients.get(conv_id)
         if client is None:
-            raise ValueError("Сессия не запущена")
+            raise ValueError("The session is not running")
         client.respond(request_id, response)
 
     def close(self):

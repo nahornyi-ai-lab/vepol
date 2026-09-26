@@ -287,7 +287,7 @@ class CodexSession:
             self._output_thread.start()
             self._error_thread.start()
             threading.Thread(target=self._wait_exit, name="vepol-codex-exit", daemon=True).start()
-            self._emit({"type": "progress", "text": "Codex: подключение к постоянной сессии"})
+            self._emit({"type": "progress", "text": "Codex: connecting to the persistent session"})
         if not self._initialized:
             self._rpc("initialize", {
                 "clientInfo": {"name": "vepol_desktop", "title": "Vepol", "version": "0.1.0"},
@@ -417,10 +417,10 @@ class CodexSession:
         method, raw_id = message["method"], message["id"]
         params = message.get("params") or {}
         titles = {
-            "item/commandExecution/requestApproval": "Разрешить выполнение команды",
-            "item/fileChange/requestApproval": "Разрешить изменение файлов",
-            "item/permissions/requestApproval": "Разрешить доступ на время этого запроса",
-            "item/tool/requestUserInput": "Ответьте агенту",
+            "item/commandExecution/requestApproval": "Allow running a command",
+            "item/fileChange/requestApproval": "Allow file changes",
+            "item/permissions/requestApproval": "Allow access for this request",
+            "item/tool/requestUserInput": "Answer the agent",
         }
         if method not in titles:
             self._unsupported_request(message, "Unsupported Codex server request: " + self._safe(str(method)))
@@ -440,7 +440,7 @@ class CodexSession:
         if is_questions:
             request["questions"] = copy.deepcopy(params["questions"])
         if params.get("networkApprovalContext"):
-            request["title"] = "Разрешить доступ к сети"
+            request["title"] = "Allow network access"
         with self._state:
             self._pending[key] = {"raw_id": raw_id, "method": method, "params": params, "request": request}
         self._emit({"type": "permission", "request": copy.deepcopy(request)})

@@ -11,6 +11,66 @@ from typing import Callable
 
 from .sessions import attach_command, build_send_prompt_plan, session_name
 
+TMUX_CANDIDATES = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
+# tmux's own wording when there is nothing to attach to. Anything else is "unknown".
+_NOT_RUNNING_MARKERS = ("no server running", "can't find", "no such", "error connecting", "no sessions")
+
+
+def tmux_binary(env: dict | None = None) -> str:
+    env = dict(os.environ if env is None else env)
+    for candidate in TMUX_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which("tmux", path=env.get("PATH", ""))
+    if found:
+        return os.path.abspath(found)
+    raise FileNotFoundError("tmux executable is unavailable")
+
+
+def liveness(name: str, env: dict | None = None) -> dict:
+    """Agent state from process evidence only: the pane PID must exist and be alive.
+
+    `alive` needs a PID that answers kill(0); no server, no session or a dead PID
+    is `not_running`; every other error is `unknown` with the reason. Screen
+    output, silence and control-mode events are never consulted.
+    """
+    env = dict(os.environ if env is None else env)
+    try:
+        probe = subprocess.run(
+            [tmux_binary(env), "display-message", "-p", "-t", name, "#{pane_pid}"],
+            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"agent": "unknown", "pid": None, "reason": str(exc)}
+    if probe.returncode != 0:
+        err = probe.stderr.strip() or f"tmux exited {probe.returncode}"
+        state = "not_running" if any(marker in err for marker in _NOT_RUNNING_MARKERS) else "unknown"
+        return {"agent": state, "pid": None, "reason": err}
+    if not probe.stdout.strip():
+        # tmux 3.7b exits 0 with empty output for a missing session while the server is up.
+        try:
+            has = subprocess.run(
+                [tmux_binary(env), "has-session", "-t", name],
+                env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"agent": "unknown", "pid": None, "reason": str(exc)}
+        if has.returncode != 0:
+            return {"agent": "not_running", "pid": None, "reason": has.stderr.strip() or "no such session"}
+    try:
+        pid = int(probe.stdout.strip())
+    except ValueError:
+        return {"agent": "unknown", "pid": None, "reason": f"unexpected tmux output {probe.stdout.strip()!r}"}
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"agent": "not_running", "pid": pid, "reason": "process exited"}
+    except PermissionError:
+        pass  # exists, owned by someone else: still alive
+    except OSError as exc:
+        return {"agent": "unknown", "pid": pid, "reason": str(exc)}
+    return {"agent": "alive", "pid": pid, "reason": ""}
+
 
 class TerminalSession:
     def __init__(
@@ -53,9 +113,22 @@ class TerminalSession:
             self._ready = True
         self._on_event({"type": "progress", "text": "Terminal input readiness confirmed by the owner"})
 
+    def start(self) -> dict:
+        """Create or reuse the canonical tmux session. Only the owner's click calls this."""
+        with self._lock:
+            self._connect(create=True)
+            # Invisible keeper: no status bar, wheel scrolls history, Ctrl-B reaches the agent.
+            for option, value in (("status", "off"), ("mouse", "on"), ("prefix", "None")):
+                self._run(["set-option", "-t", self.name, option, value])
+        return liveness(self.name, self._env)
+
+    def liveness(self) -> dict:
+        return liveness(self.name, self._env)
+
     def _binary(self, runtime: str) -> str:
+        if runtime == "tmux":
+            return tmux_binary(self._env)
         candidates = {
-            "tmux": ["/opt/homebrew/bin/tmux"],
             "claude": ["/opt/homebrew/bin/claude", str(pathlib.Path.home() / ".local/bin/claude")],
             "codex": [str(pathlib.Path.home() / ".local/bin/codex"), "/Applications/Codex.app/Contents/Resources/codex"],
             "agy": [str(pathlib.Path.home() / ".local/bin/agy"), "/opt/homebrew/bin/agy"],
@@ -106,15 +179,21 @@ class TerminalSession:
             argv += ["--add-dir", self.cwd]
         return argv
 
-    def _connect(self) -> None:
-        if self._connected:
-            return
+    def _connect(self, create: bool = False) -> None:
         exists = self._run(["has-session", "-t", self.name], check=False).returncode == 0
+        if self._connected:
+            if exists:
+                return
+            # The agent exited and took its tmux session with it: forget the old pane.
+            self._connected, self._ready, self._pid = False, False, None
         if exists and self.session_id:
             raise RuntimeError(
                 "The canonical terminal already exists; its provider identity cannot be replaced"
             )
         if not exists:
+            if not create:
+                # Only the owner's Start click creates a session; never an auto-restart.
+                raise RuntimeError("The agent is not running. Click Start to open a new session.")
             self._run([
                 "new-session", "-d", "-s", self.name, "-c", self.cwd,
                 "-x", "160", "-y", "48", *self._runtime_command(),
@@ -173,10 +252,6 @@ class TerminalSession:
                     "category": "terminal_error", "pid": self.pid,
                     "session_id": self.session_id, "name": self.name, "command": self.command,
                 }
-
-    def capture(self) -> str:
-        """Rendered terminal output for display only; never a completion signal."""
-        return self._run(["capture-pane", "-p", "-t", self.name, "-S", "-200"]).stdout
 
     def interrupt(self) -> None:
         """Only called after the owner explicitly asks to interrupt this pane."""

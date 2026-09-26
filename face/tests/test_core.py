@@ -89,7 +89,7 @@ def test_origin_allowlist_is_default_deny(origin, ok):
 
 @pytest.mark.parametrize(
     "name",
-    ["kb-vepol-dev-claude", "kb-a-codex", "kb-my_project-agy", "kb-x9-claude"],
+    ["kb-demo-claude", "kb-a-codex", "kb-my_project-agy", "kb-x9-claude"],
 )
 def test_canonical_session_names_accepted(name):
     from vepol_face.sessions import validate_session_name
@@ -100,10 +100,10 @@ def test_canonical_session_names_accepted(name):
 @pytest.mark.parametrize(
     "name",
     [
-        "kb-vepol-dev-bash",          # runtime not allowed
+        "kb-demo-bash",               # runtime not allowed
         "kb--claude",                 # empty slug
         "vepol-dev-claude",           # missing prefix
-        "kb-vepol-dev-claude; rm -rf /",
+        "kb-demo-claude; rm -rf /",
         "kb-$(whoami)-claude",
         "kb-`id`-claude",
         "kb-a-claude\nkill",
@@ -124,7 +124,7 @@ def test_prompt_never_enters_tmux_through_shell_interpolation(tmp_path):
     from vepol_face.sessions import build_send_prompt_plan
 
     nasty = "hi; rm -rf ~ && echo $(whoami) `id` \"quoted\" 'single'\n"
-    plan = build_send_prompt_plan("kb-vepol-dev-claude", nasty, tmp_path)
+    plan = build_send_prompt_plan("kb-demo-claude", nasty, tmp_path)
 
     assert plan.prompt_file.read_text() == nasty
     for argv in plan.commands:
@@ -1004,3 +1004,82 @@ def test_websocket_bad_token_is_closed_with_auth_code(client):
         with c.websocket_connect("/ws/whatever?token=wrong") as ws:
             ws.receive_json()
     assert exc.value.code == 4401
+
+
+# ------------------------------------------------------------ Automations view
+
+def test_automations_states_come_from_scheduler_files_without_writing(tmp_path, monkeypatch):
+    """Automations spec 2026-09-24, "How we check": the state rules are the whole
+    value of the view; a wrong one shows green for a broken process."""
+    import datetime as dt
+    import shutil
+
+    from vepol_face import automations
+
+    real = pathlib.Path.home() / "knowledge" / "bin" / "_kb_processes.py"
+    if not real.is_file():
+        pytest.skip("real hub validator not present")
+    hub = tmp_path / "knowledge"
+    (hub / "bin").mkdir(parents=True)
+    shutil.copy(real, hub / "bin" / "_kb_processes.py")
+    (hub / "personal" / "mail" / "briefs").mkdir(parents=True)
+    (hub / "personal" / "processes.yaml").write_text(
+        "- id: people-remind\n  enabled: true\n  when: \"08:00\"\n  run: kb-people-remind\n  outputs: [telegram]\n"
+        "- id: mail-morning\n  enabled: true\n  when: \"06:15\"\n  run: kb-mail-brief --period morning\n  outputs: [file]\n"
+        "- id: daily\n  enabled: true\n  when: after:mail-morning\n  run: kb-brief\n  outputs: [telegram]\n"
+        "- id: learning\n  enabled: true\n  when: after:daily\n  run: kb-learning-arxiv\n  outputs: [telegram]\n"
+        "- id: money-radar\n  enabled: true\n  when: \"07:00\"\n  run: kb-money-radar --days tue,fri\n  outputs: [telegram]\n"
+        "- id: entity-rollup\n  enabled: false\n  when: after:learning\n  run: kb-entity-rollup\n  outputs: [file]\n"
+    )
+    (hub / "logs").mkdir()
+    (hub / "logs" / "today-plan.json").write_text(json.dumps(
+        {"date": "2026-09-24", "mail_morning_fired": True, "people_remind_fired": True}))
+    (hub / "personal" / "mail" / "briefs" / "2026-09-24-morning.json").write_text(json.dumps(
+        {"schema_version": "mail-brief/v1", "available": False, "errors": ["gmail_unavailable:error"]}))
+
+    def run(n, pid, status, start, end, stderr=""):
+        folder = hub / ".orchestrator" / "claude-runs" / f"kbcr-{n:032x}"
+        folder.mkdir(parents=True)
+        (folder / "stderr").write_text(stderr)
+        (folder / "stdout").write_text("")
+        (folder / "state.json").write_text(json.dumps({
+            "status": status, "returncode": 0 if status == "succeeded" else 75,
+            "started_at": f"2026-09-24T{start}:00+00:00", "completed_at": f"2026-09-24T{end}:00+00:00",
+            "updated_at": f"2026-09-24T{end}:00+00:00", "worker_token": "secret", "claim": None,
+            "metadata": {"caller": "kb-tick", "process_id": pid, "occurrence_date": "2026-09-24"},
+        }))
+
+    run(1, "people-remind", "succeeded", "06:00", "06:01")
+    run(2, "mail-morning", "succeeded", "04:15", "04:20")
+    run(3, "daily", "failed", "04:30", "04:35", "rc=75\ncodex: quota\n")
+    run(4, "daily", "failed", "04:45", "04:50", "rc=75\nclaude: OAuth session expired\n\n")
+    run(5, "money-radar", "succeeded", "05:00", "05:01")
+
+    monkeypatch.setattr(automations, "launchctl_list", lambda label: (0, '"LastExitStatus" = 0;'))
+    monkeypatch.setattr(automations, "LAUNCH_AGENTS", tmp_path / "agents")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+    def snapshot():
+        return {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in hub.rglob("*")}
+
+    before = snapshot()
+    now = dt.datetime(2026, 9, 24, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))  # a Thursday
+    payload = automations.build_automations(hub, now=now)
+    detail = automations.automation_detail(hub, "daily", now=now)
+    assert snapshot() == before
+
+    rows = {r["id"]: r for r in payload["processes"]}
+    assert [r["id"] for r in payload["processes"]] == [
+        "people-remind", "mail-morning", "daily", "learning", "money-radar", "entity-rollup"]
+    assert rows["people-remind"]["state_text"] == "OK"
+    assert (rows["mail-morning"]["state_text"], rows["mail-morning"]["reason"]) == (
+        "Failed in result", "gmail_unavailable:error")
+    assert (rows["daily"]["state_text"], rows["daily"]["attempts_today"], rows["daily"]["reason"]) == (
+        "Failed", 2, "claude: OAuth session expired")
+    assert (rows["learning"]["state_text"], rows["learning"]["reason"]) == ("Blocked", "waiting for daily")
+    assert rows["money-radar"]["state_text"] == "Not its day"
+    assert rows["entity-rollup"]["state_text"] == "Disabled"
+    assert payload["scheduler"]["text"] == "Scheduler running"
+    assert "secret" not in json.dumps(payload) + json.dumps(detail)
+    assert detail["occurrences"][0]["attempts"] == 2
+    assert detail["attempt"]["stderr"].splitlines()[-1] == "claude: OAuth session expired"

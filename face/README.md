@@ -1,8 +1,9 @@
 # Vepol Desktop
 
-A native macOS window for Vepol conversations. The session board keeps manual
-work stages separate from the agent's current activity. Search, project
-filters, stage selection and drag/drop help return to the original conversation.
+A native macOS window for Vepol. The agent runs as an ordinary interactive
+session in a real terminal inside the window, and the views around it show your
+work: a session board with manual stages, every project's tasks, and every
+scheduled Vepol process.
 
 ## Build and open
 
@@ -24,37 +25,85 @@ bare URL; reload does not discard authentication. Cmd-W closes the window
 while preserving work. Reopen from the Dock or Cmd-0. Cmd-Q checks for active
 work and, when idle, closes the owned protocol clients and backend naturally.
 
-## Sessions
+## Terminal sessions
 
-- **Persistent session** is the app default: Claude stream-json or Codex
-  app-server. Consecutive turns reuse the process and provider conversation.
-  Tool activity, streamed text and requests for human input appear in the app.
-  Permission decisions use the runtime's existing policy and explicit UI
-  answers; Vepol does not grant persistent permission rules.
-- **Terminal** uses the canonical tmux session for a project/runtime pair.
-  Open its displayed attach command, complete CLI startup/login/trust, then
-  click the readiness button to send the retained first prompt. Completion is
-  marked by the human, never inferred from terminal output or silence. Closing
-  Vepol leaves that terminal session alive.
-- Existing cards and history are preserved. An old card without a verified
-  provider identity cannot silently become a new session. Failed exact resume
-  is shown as unavailable continuation.
+- «+ New session» (or «+» in a board column, which also places the session in
+  that stage) opens the project's terminal for the chosen runtime (Claude or
+  Codex). There is one terminal per project and runtime; asking for a second one
+  opens the existing terminal and says so.
+- The agent starts only when you click: creating the session or clicking
+  «Start». Opening a session attaches to it and never starts anything.
+- The terminal is xterm.js connected to a tmux session that tmux keeps alive
+  invisibly (no status bar, mouse scrolling on, Ctrl-B goes to the agent). You
+  type into it directly, and it follows the window size.
+- The header shows the agent's state from process evidence only: «Agent running
+  · PID n», «Agent not running» with «Start», or «State unknown» with the
+  reason. The same state is on the board card.
+- The composer pastes a prompt into the terminal. After each app start, confirm
+  once with «Terminal ready — send» that login/trust in the terminal is done.
+  Completion is yours to judge; pasted prompts never mark the app busy.
+- Quitting Vepol leaves the terminal and the agent running; the next launch
+  shows the same PID and re-attaches. If the agent exits, the header says so and
+  «Start» opens a new one — never automatically.
 
-A structured session currently has no same-process terminal takeover. The UI
-states this explicitly; the complete Desktop v2.1 S5 criterion remains open.
-A live session also does not fire SessionEnd after each turn. Use the visible
-save-to-wiki action to request a checkpoint from that same agent.
+Conversations created earlier as persistent (structured) sessions or one-shot
+runs keep their history and still open in the app.
+
+## Views
+
+- **Sessions** — the board: Queue / Research / Working / Review / Done, drag or
+  the stage selector, search, project filter. Every card and the headings show
+  folder · project · path on disk; clicking anywhere on a card opens it.
+- **Tasks** — every project's `knowledge/backlog.md`, read through `kb-board`,
+  as a table with status chips and search. «Start session» opens that project's
+  terminal with the task text typed into the composer; nothing is sent. The view
+  never writes a board.
+- **Automations** — every process in `personal/processes.yaml` with its
+  schedule, dependency, state and reason, last and next run, 14-day history and
+  output tails, plus the backup job and Hermes cron jobs. Read-only; states come
+  from the files the scheduler already writes, and «Unknown» means there is no
+  evidence.
+- **Session view** — a project → sessions tree on the left with the same state
+  dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
+  read-only explorer of the project's `knowledge/` folder (folders collapse, a
+  name filter searches all of them, files open as plain text up to 512 KB).
+- **Usage bar** along the bottom: `Claude 5h · 7d` and `Codex 7d` used
+  percentages with «as of» times, grey when older than 6 hours, «no data» when
+  there is none. Codex numbers come from its own rollout files under
+  `$CODEX_HOME/sessions` (default `~/.codex`). Claude numbers come from a small
+  file your Claude Code status line writes; add this line to your statusLine
+  script, where `$input` holds the JSON Claude Code passes on stdin:
+
+  ```sh
+  printf '%s' "$input" | jq -e '.rate_limits' >/dev/null && printf '%s' "$input" | jq -c '{rate_limits, at: now}' > ~/.vepol/face/.crl.tmp && mv ~/.vepol/face/.crl.tmp ~/.vepol/face/claude-rate-limits.json
+  ```
+
+  The bar makes no network call and reads no credentials.
 
 ## Legacy browser entry
 
 `./run.sh` keeps the earlier browser/one-shot entry for existing automation.
 It uses tokenized launch URLs and has the historical browser reload/history
-limitations. Use the native entry for the session board experience above.
+limitations. Use the native entry for the experience above.
 
 ## Verification
 
-Reuse the critical board-persistence journey and the complete browser board
-journey; native acceptance additionally exercises the actual `.app`, live
-Claude/Codex conversations, input requests, reload, manual stage persistence
-and shutdown. Run the suites from this directory with `.venv/bin/python -m
-pytest tests/`.
+Tests use Python with fastapi, uvicorn, httpx, websockets and pytest (the
+app's `.venv`), and Node with Playwright for the browser journeys. The Tasks and
+Automations journeys read the hub's `~/knowledge/bin/kb-board`,
+`~/knowledge/bin/_kb_processes.py` and `~/knowledge/_template/knowledge/backlog.md`
+(read-only; fixtures run on temporary copies). Nothing touches your real
+conversations, your tmux server or a real agent: each run uses its own state
+directory, its own tmux server and `/bin/cat` in place of the agent.
+
+From this directory, outside tmux:
+
+```sh
+.venv/bin/python -m pytest tests/
+for s in board tasks automations orca-extras; do
+  NODE_PATH=/path/to/node_modules VEPOL_FACE_PYTHON=$PWD/.venv/bin/python \
+    node tests/browser/$s-e2e.cjs
+done
+```
+
+`NODE_PATH` points at a `node_modules` that contains `playwright`.

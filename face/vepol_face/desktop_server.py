@@ -22,7 +22,7 @@ def main():
     port = int(boot.get("port", 8781))
     holder = port_in_use("127.0.0.1", port)
     if holder:
-        print(json.dumps({"error": f"Порт {port} занят: {holder}. Закрой прежний Vepol Face и нажми «Повторить».", "holder": holder}), flush=True)
+        print(json.dumps({"error": f"Port {port} is in use: {holder}. Close the previous Vepol Face and press Retry.", "holder": holder}), flush=True)
         return 3
     # Reserve the socket before opening the state store, preventing two writers.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -31,7 +31,7 @@ def main():
         sock.bind(("127.0.0.1", port))
         sock.listen(128)
     except OSError:
-        print(json.dumps({"error": f"Порт {port} уже занят. Повтори запуск."}), flush=True)
+        print(json.dumps({"error": f"Port {port} is already in use. Launch again."}), flush=True)
         return 3
     hub = pathlib.Path(boot["hub"]).expanduser() if boot.get("hub") else None
     state = pathlib.Path(boot["state_dir"]).expanduser() if boot.get("state_dir") else None
