@@ -1013,9 +1013,12 @@ def test_automations_states_come_from_scheduler_files_without_writing(tmp_path, 
 
     from vepol_face import automations
 
-    real = pathlib.Path.home() / "knowledge" / "bin" / "_kb_processes.py"
+    # The processes validator in this repository, else the installed hub's.
+    real = pathlib.Path(__file__).resolve().parents[2] / "bin" / "_kb_processes.py"
     if not real.is_file():
-        pytest.skip("real hub validator not present")
+        real = pathlib.Path.home() / "knowledge" / "bin" / "_kb_processes.py"
+    if not real.is_file():
+        pytest.skip("processes validator not present")
     hub = tmp_path / "knowledge"
     (hub / "bin").mkdir(parents=True)
     shutil.copy(real, hub / "bin" / "_kb_processes.py")
