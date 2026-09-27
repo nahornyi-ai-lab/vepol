@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
 <script src="/vendor/xterm/xterm.js"></script>
 <script src="/vendor/xterm/addon-fit.js"></script>
+<script src="/vendor/marked/marked.umd.js"></script>
+<script src="/vendor/dompurify/purify.min.js"></script>
 <style>
   :root {
     --bg: #f6f7f9;
@@ -251,7 +253,7 @@
   #auto-detail h4 { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); margin: 16px 0 6px; }
   .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .detail-head button { padding: 4px 10px; }
-  pre.output { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; margin: 0 0 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .output { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; margin: 0 0 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .paths { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 11px; }
   .paths li { margin-bottom: 4px; overflow-wrap: anywhere; user-select: all; }
   .paths .k { font-family: var(--sans); user-select: none; }
@@ -272,6 +274,83 @@
   #kb-file { margin-top: 12px; }
   #kb-file-path { margin-bottom: 6px; overflow-wrap: anywhere; }
   #kb-file-text { max-height: 50vh; }
+  #kb-open-memory { margin-bottom: 8px; }
+  button.link { background: transparent; color: var(--accent); padding: 0; font-weight: 500; font-size: 12px; }
+  button.link:hover { text-decoration: underline; }
+  /* Rendered markdown: knowledge files, state, decisions, history, lessons. */
+  .md { font-family: var(--sans); font-size: 14px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; color: var(--ink); }
+  .output .md { font-size: 12px; line-height: 1.55; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { text-transform: none; letter-spacing: -0.01em; color: var(--ink); font-weight: 600; margin: 18px 0 8px; line-height: 1.3; }
+  .md h1 { font-size: 1.45em; }
+  .md h2 { font-size: 1.2em; }
+  .md h3 { font-size: 1.05em; }
+  .md h4, .md h5, .md h6 { font-size: 1em; }
+  .md p, .md ul, .md ol, .md pre, .md blockquote, .md table { margin: 0 0 10px; }
+  .md ul, .md ol { padding-left: 22px; }
+  .md li { margin-bottom: 2px; }
+  .md code { font-family: var(--mono); font-size: .86em; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .md pre { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; overflow: auto; white-space: pre; }
+  .md pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  .md table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; font-size: .93em; }
+  .md th, .md td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  .md th { background: var(--panel-2); font-weight: 600; }
+  .md blockquote { border-left: 3px solid var(--line); padding-left: 12px; margin-left: 0; color: var(--ink-dim); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+  .md a { color: var(--accent); }
+  .md-details { font-size: 12px; color: var(--ink-dim); margin-bottom: 10px; }
+  .md-details summary { cursor: pointer; }
+  .md-details pre { margin: 6px 0 0; }
+  .md-plain { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+  /* Memory home and the Project Memory page. */
+  #memory-pane, #memory-project { overflow-y: auto; }
+  #memory-filter { width: 300px; flex: 0 1 300px; }
+  #memory-count { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
+  .memory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; padding: 2px 2px 12px; align-items: start; }
+  .memory-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 15px 16px; cursor: pointer; min-width: 0; }
+  .memory-card:hover { border-color: var(--accent); }
+  .memory-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .memory-card h3 { margin: 0; font-size: 15px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+  .memory-card .project-path { margin: 4px 0 12px; }
+  .facts { margin: 0; }
+  .facts dt { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); font-weight: 600; margin-bottom: 2px; }
+  .facts dd { margin: 0 0 10px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+  .facts dd:last-child { margin-bottom: 0; }
+  .muted { color: var(--ink-dim); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 9px; border: 1px solid var(--line); border-radius: 10px; white-space: nowrap; color: var(--ink-dim); background: var(--panel-2); flex: none; }
+  .mem-page { max-width: 920px; padding-bottom: 12px; }
+  .mem-top { margin: 4px 0 12px; }
+  .mem-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .mem-title h1 { overflow-wrap: anywhere; }
+  #mem-folder { margin-top: 6px; }
+  #mem-newconv { white-space: nowrap; flex: none; }
+  .mem-section { margin-top: 26px; }
+  .mem-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .mem-section-head h2.section { margin: 0; }
+  .mem-section-head button { padding: 4px 10px; }
+  .mem-box { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 14px 16px; }
+  .mem-group { font-size: 12px; font-weight: 600; margin: 12px 0 4px; }
+  .mem-group:first-child { margin-top: 0; }
+  .mem-list { list-style: none; margin: 0; padding: 0; }
+  .mem-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+  .mem-list .dot { flex: none; transform: translateY(-1px); }
+  .mem-fold { margin-top: 10px; font-size: 13px; }
+  .mem-fold summary { cursor: pointer; color: var(--ink-dim); }
+  .mem-fold .mem-list { margin-top: 4px; }
+  .mem-rows { border: 1px solid var(--line); border-radius: 9px; background: var(--panel); overflow: hidden; }
+  .mem-row { display: flex; gap: 8px; align-items: baseline; padding: 9px 12px; cursor: pointer; font-size: 13px; line-height: 1.45; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .mem-row:first-child { border-top: 0; }
+  .mem-row:hover, .mem-row[aria-expanded="true"] { background: var(--panel-2); }
+  .mem-row .when { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); white-space: nowrap; }
+  .mem-inline { padding: 12px 14px; border-top: 1px solid var(--line); }
+  details.mem-row-d { border-top: 1px solid var(--line); }
+  details.mem-row-d:first-child { border-top: 0; }
+  details.mem-row-d > summary { list-style: none; border-top: 0; }
+  details.mem-row-d > summary::-webkit-details-marker { display: none; }
+  details.mem-row-d[open] > summary { background: var(--panel-2); }
+  #mem-files .kb-tree { max-height: 360px; }
+  #mem-files #kb-file-text { max-height: none; }
   .usage-bar {
     position: fixed; left: 0; right: 0; bottom: 0; height: var(--bar-h); z-index: 5;
     display: flex; align-items: center; gap: 10px; padding: 0 14px; overflow: hidden;
@@ -286,6 +365,7 @@
     .right { display: none; }
     #board-view { padding: 22px 16px 12px; }
     .auto-layout.with-detail { grid-template-columns: minmax(0, 1fr); }
+    .memory-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   }
   @media (max-width: 560px) {
     .app { grid-template-columns: 1fr; }
@@ -300,6 +380,10 @@
     #tasks-search { width: 100%; flex: 1 1 100%; }
     #tasks-project { flex: 1; min-width: 0; }
     #tasks-count { margin-left: 0; }
+    #memory-filter { width: 100%; flex: 1 1 100%; }
+    #memory-count { margin-left: 0; }
+    .memory-grid { grid-template-columns: minmax(0, 1fr); }
+    .mem-box { padding: 12px; }
     .board-heading { flex-wrap: wrap; }
     .board-heading > div { min-width: 0; max-width: 100%; }
     .thread, .composer { padding-left: 15px; padding-right: 15px; }
@@ -320,12 +404,38 @@
     <div class="board-heading">
       <div>
         <div class="view-switch" role="tablist" aria-label="View">
-          <button role="tab" data-board-view="sessions" aria-selected="true">Sessions</button><button role="tab" data-board-view="tasks" aria-selected="false">Tasks</button><button role="tab" data-board-view="automations" aria-selected="false">Automations</button>
+          <button role="tab" data-board-view="memory" aria-selected="true">Memory</button><button role="tab" data-board-view="sessions" aria-selected="false">Sessions</button><button role="tab" data-board-view="tasks" aria-selected="false">Tasks</button><button role="tab" data-board-view="automations" aria-selected="false">Automations</button>
         </div>
-        <h1 id="board-title">Sessions</h1><p class="board-description" id="board-description">All your work in one place. Move cards between stages and jump back into any conversation.</p><div class="project-path" id="board-project-path" hidden></div></div>
-      <button id="board-newconv">+ New session</button>
+        <h1 id="board-title">Memory</h1><p class="board-description" id="board-description">What Vepol remembers for each project, read from its knowledge folder.</p><div class="project-path" id="board-project-path" hidden></div></div>
+      <button id="board-newconv" hidden>+ New session</button>
     </div>
-    <div class="board-pane" id="sessions-pane">
+    <div class="board-pane" id="memory-pane">
+      <div class="board-toolbar">
+        <input type="search" class="filter" id="memory-filter" aria-label="Filter projects" placeholder="Find a project…" />
+        <span id="memory-count" role="status" aria-live="polite"></span>
+      </div>
+      <div id="memory-feedback" class="banner bad" role="alert" hidden></div>
+      <div id="memory-grid" class="memory-grid"></div>
+      <div id="memory-empty" class="empty" hidden></div>
+      <div class="board-footnote">Read only. Agents write this memory; the app only shows it.</div>
+    </div>
+    <div class="board-pane" id="memory-project" hidden>
+      <div class="mem-page">
+        <div class="mem-top"><button class="ghost" id="memory-back">← Memory</button></div>
+        <div class="board-heading">
+          <div><div class="mem-title"><h1 id="mem-name"></h1><span id="mem-status"></span></div><div class="project-path" id="mem-folder"></div></div>
+          <button id="mem-newconv">New session here</button>
+        </div>
+        <div id="mem-feedback" class="banner bad" role="alert" hidden style="margin-top:14px"></div>
+        <section class="mem-section" aria-label="State"><h2 class="section">State</h2><div class="mem-box" id="mem-state"></div></section>
+        <section class="mem-section" aria-label="Plans"><div class="mem-section-head"><h2 class="section">Plans</h2><button class="ghost" id="mem-open-tasks">Open in Tasks</button></div><div class="mem-box" id="mem-plans"></div></section>
+        <section class="mem-section" aria-label="Decisions"><h2 class="section">Decisions</h2><div id="mem-decisions"></div></section>
+        <section class="mem-section" aria-label="History"><h2 class="section">History</h2><div id="mem-history"></div></section>
+        <section class="mem-section" aria-label="Lessons"><h2 class="section">Lessons</h2><div class="mem-box" id="mem-lessons"></div></section>
+        <section class="mem-section" aria-label="Files"><h2 class="section">Files</h2><div id="mem-files"></div></section>
+      </div>
+    </div>
+    <div class="board-pane" id="sessions-pane" hidden>
       <div class="board-toolbar">
         <input type="search" class="filter" id="board-search" aria-label="Search sessions" placeholder="Find a session…" />
         <select class="filter" id="board-project-filter" aria-label="Project"><option value="">All projects</option></select>
@@ -368,7 +478,7 @@
     </div>
   </section>
   <div class="col left">
-    <h1 id="product-name">Vepol Face</h1>
+    <h1 id="product-name">Vepol</h1>
     <div class="sub" id="bind">local · loopback</div>
 
     <h2>Projects</h2>
@@ -405,7 +515,7 @@
 
   <div class="col right">
     <div class="view-switch" role="tablist" aria-label="Panel">
-      <button role="tab" data-panel="session" aria-selected="true">Session</button><button role="tab" data-panel="knowledge" aria-selected="false">Knowledge</button>
+      <button role="tab" data-panel="session" aria-selected="true">Session</button><button role="tab" data-panel="knowledge" aria-selected="false">Memory</button>
     </div>
     <div id="panel-session">
       <h2>Run</h2>
@@ -422,12 +532,16 @@
       <div id="attach" class="card">—</div>
     </div>
     <div id="panel-knowledge" hidden>
-      <div class="project-path" id="kb-root"></div>
-      <input type="search" class="filter" id="kb-filter" aria-label="Filter knowledge files" placeholder="filter files…" />
-      <div id="kb-feedback" class="banner bad" role="alert" hidden></div>
-      <div id="kb-tree" class="kb-tree" hidden></div>
-      <div id="kb-note" class="grey-line" hidden></div>
-      <div id="kb-file" hidden><div class="mono" id="kb-file-path"></div><pre class="output" id="kb-file-text"></pre></div>
+      <button class="link" id="kb-open-memory" hidden>Open project memory</button>
+      <!-- The Project Memory page borrows this tree and viewer for its Files section. -->
+      <div id="kb-view">
+        <div class="project-path" id="kb-root"></div>
+        <input type="search" class="filter" id="kb-filter" aria-label="Filter knowledge files" placeholder="filter files…" />
+        <div id="kb-feedback" class="banner bad" role="alert" hidden></div>
+        <div id="kb-tree" class="kb-tree" hidden></div>
+        <div id="kb-note" class="grey-line" hidden></div>
+        <div id="kb-file" hidden><div class="mono" id="kb-file-path"></div><div class="output" id="kb-file-text"></div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -448,7 +562,7 @@
   }
 
   const $ = (id) => document.getElementById(id);
-  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board", boardView: "sessions", transport: "oneshot", desktop: false, continuation: true };
+  const state = { target: null, runtime: null, conv: null, ws: null, running: false, view: "board", boardView: "memory", memorySlug: null, transport: "oneshot", desktop: false, continuation: true };
   const STAGES = [["queued", "Queue", "#9299a6"], ["research", "Research", "#9985d8"],
     ["working", "Working", "#d5a445"], ["review", "Review", "#668ddd"], ["completed", "Done", "#62a883"]];
   const ACTIVITY = { idle: "Not started", running: "Agent working", done: "Agent replied",
@@ -758,6 +872,7 @@
 
   // ------------------------------------------------ board views switch
   const VIEWS = {
+    memory: ["Memory", "What Vepol remembers for each project, read from its knowledge folder."],
     sessions: ["Sessions", "All your work in one place. Move cards between stages and jump back into any conversation."],
     tasks: ["Tasks", "Every project's backlog, read from knowledge/backlog.md. Start a session from any task."],
     automations: ["Automations", "Every scheduled process and how it is doing today, read from the scheduler's own files."],
@@ -767,15 +882,22 @@
     state.boardView = view;
     document.querySelectorAll("[data-board-view]").forEach((b) =>
       b.setAttribute("aria-selected", String(b.dataset.boardView === view)));
+    // The Project Memory page brings its own heading.
+    const page = view === "memory" && !!state.memorySlug;
     $("board-title").textContent = VIEWS[view][0];
     $("board-description").textContent = VIEWS[view][1];
+    $("board-title").hidden = page;
+    $("board-description").hidden = page;
+    $("memory-pane").hidden = view !== "memory" || page;
+    $("memory-project").hidden = !page;
     $("sessions-pane").hidden = view !== "sessions";
     $("tasks-pane").hidden = view !== "tasks";
     $("automations-pane").hidden = view !== "automations";
     $("board-newconv").hidden = view !== "sessions";
     if (view === "sessions") { paintBoard(true); refreshBoard(); return; }
     $("board-project-path").hidden = true;
-    if (view === "tasks") loadTasks(true);
+    if (view === "memory") { if (page) loadMemoryProject(); else loadMemory(); }
+    else if (view === "tasks") loadTasks(true);
     else loadAutomations();
   }
 
@@ -1054,6 +1176,205 @@
     });
   }
 
+  // --------------------------------------------------------- memory view
+  // Read only: /api/memory for the cards, /api/memory/project and /api/tasks for one project's page.
+  const MEM_STATUS = { up_to_date: ["Up to date", "st-ok"], needs_review: ["Needs review", "st-warn"],
+    no_state: ["No state file", "st-idle"] };
+  const PLAN_GROUPS = ["In Progress", "Review", "Blocked", "Ready"];
+  const mem = { cards: null, signature: "", version: 0, page: null, plans: null, pageVersion: 0 };
+
+  function statusChip(status) {
+    const [text, dot] = MEM_STATUS[status] || MEM_STATUS.no_state;
+    return `<span class="chip"><span class="dot ${dot}"></span>${esc(text)}</span>`;
+  }
+
+  // "YYYY-MM-DD" -> today / yesterday / N days ago / the date, in the viewer's own day.
+  function dayText(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+    if (!m) return "";
+    const now = new Date();
+    const days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(+m[1], m[2] - 1, +m[3])) / 86400000);
+    if (days === 0) return "today";
+    if (days === 1) return "yesterday";
+    if (days > 1 && days < 30) return `${days} days ago`;
+    return iso;
+  }
+
+  function planText(plans) {
+    const p = plans || { state: "none" };
+    if (p.state === "none") return `<span class="muted">No plans file</span>`;
+    if (p.state !== "ok") return `<span class="tone-warn">Plans unavailable: ${esc(p.reason || "unknown error")}</span>`;
+    return `${p.next ? esc(p.next) : `<span class="muted">Nothing in progress or ready</span>`}
+      <div class="reason">${esc(p.in_progress)} in progress · ${esc(p.ready)} ready · ${esc(p.blocked)} blocked</div>`;
+  }
+
+  async function loadMemory() {
+    const version = ++mem.version;
+    try {
+      const data = await api("/api/memory");
+      if (version !== mem.version) return;
+      mem.cards = data.cards || [];
+      $("memory-feedback").hidden = true;
+      paintMemory();
+    } catch (err) {
+      // The last good cards stay on screen.
+      if (version === mem.version) feedback($("memory-feedback"), `Could not refresh: ${err.message}`, loadMemory);
+    }
+  }
+
+  function paintMemory() {
+    if (!mem.cards) return;
+    const q = $("memory-filter").value.trim().toLocaleLowerCase();
+    const cards = mem.cards.filter((c) => !q || `${c.label} ${c.slug}`.toLocaleLowerCase().includes(q));
+    $("memory-count").textContent = cards.length === mem.cards.length ? `Total: ${cards.length}` : `Showing ${cards.length} of ${mem.cards.length}`;
+    $("memory-empty").hidden = cards.length > 0;
+    $("memory-empty").textContent = mem.cards.length ? "Nothing found. Change the filter." : "No knowledge folders found.";
+    // The day is part of the signature, so today / yesterday / N days ago move on after midnight.
+    const signature = new Date().toDateString() + JSON.stringify(cards);
+    if (signature === mem.signature) return;
+    mem.signature = signature;
+    $("memory-grid").innerHTML = cards.map((c) => {
+      const d = c.last_decision;
+      return `<article class="memory-card" data-memory-slug="${esc(c.slug)}" role="button" tabindex="0" aria-label="Open project memory: ${esc(c.label)}">
+        <header><h3>${esc(c.label)}</h3>${statusChip(c.status)}</header>
+        <div class="project-path" title="${esc(c.folder)}">${esc(c.folder)}</div>
+        <dl class="facts">
+          <dt>Now</dt><dd>${c.now ? esc(c.now) : `<span class="muted">No snapshot yet</span>`}</dd>
+          <dt>Next</dt><dd>${planText(c.plans)}</dd>
+          <dt>Last decision</dt><dd>${d ? `${esc(d.title)} <span class="muted">· ${esc(d.date)}</span>` : `<span class="muted">No decisions yet</span>`}</dd>
+          <dt>Last activity</dt><dd>${c.last_activity ? `<span title="${esc(c.last_activity)}">${esc(dayText(c.last_activity))}</span>` : `<span class="muted">No activity recorded</span>`}</dd>
+        </dl>
+      </article>`;
+    }).join("");
+    $("memory-grid").querySelectorAll("[data-memory-slug]").forEach((el) => {
+      const open = () => openMemoryProject(el.dataset.memorySlug);
+      el.onclick = open;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+    });
+  }
+
+  function openMemoryProject(slug) {
+    state.memorySlug = slug;
+    mem.page = null; mem.plans = null;
+    $("mem-feedback").hidden = true;
+    if (state.view === "board") { setBoardView("memory"); return; }
+    state.boardView = "memory";
+    showBoard();
+  }
+
+  async function loadMemoryProject() {
+    const slug = state.memorySlug;
+    const version = ++mem.pageVersion;
+    // The Files section is the knowledge panel's own tree and viewer, moved here.
+    knowledgeFor(slug, $("mem-files"));
+    paintMemoryProject();
+    const target = encodeURIComponent(slug);
+    const [page, plans] = await Promise.allSettled([api(`/api/memory/project?target=${target}`), api(`/api/tasks?target=${target}`)]);
+    if (version !== mem.pageVersion || slug !== state.memorySlug) return;
+    if (page.status === "rejected") {
+      feedback($("mem-feedback"), `Could not open project memory: ${page.reason.message}`, loadMemoryProject);
+      return;
+    }
+    $("mem-feedback").hidden = true;
+    mem.page = page.value;
+    mem.plans = plans.status === "fulfilled" ? plans.value : { error: plans.reason.message };
+    paintMemoryProject();
+  }
+
+  function paintMemoryProject() {
+    const slug = state.memorySlug;
+    const p = mem.page && mem.page.slug === slug ? mem.page : null;
+    // Until the page arrives, the header comes from the card the owner clicked.
+    const head = p || (mem.cards || []).find((c) => c.slug === slug) || { label: slug, folder: "", status: null };
+    $("mem-name").textContent = head.label || slug;
+    $("mem-status").innerHTML = head.status ? statusChip(head.status) : "";
+    $("mem-folder").textContent = head.folder || "";
+    $("mem-folder").title = head.folder || "";
+    const loading = `<div class="hint">Loading…</div>`;
+    if (!p) {
+      ["mem-state", "mem-plans", "mem-decisions", "mem-history", "mem-lessons"].forEach((id) => { $(id).innerHTML = loading; });
+      return;
+    }
+    const st = $("mem-state");
+    if (p.state && p.state.text !== null && p.state.text !== undefined) st.replaceChildren(renderMarkdown(p.state.text, slug, "state.md"));
+    else st.innerHTML = `<div class="muted">${esc((p.state && p.state.note) || "No state file")}</div>`;
+    paintPlans(slug);
+    paintDecisions(slug, p.decisions || []);
+    paintHistory(slug, p.history || []);
+    const lessons = $("mem-lessons");
+    if (p.lessons && p.lessons.trim()) lessons.replaceChildren(renderMarkdown(p.lessons, slug, "incidents.md"));
+    else lessons.innerHTML = `<div class="muted">No lessons recorded yet</div>`;
+  }
+
+  function taskList(list) {
+    return `<ul class="mem-list">${list.map((t) => `<li><span class="dot ${TASK_DOT[t.status] || "st-idle"}"></span><span>${esc(t.title)}${t.id ? ` <span class="mono muted">${esc(t.id)}</span>` : ""}${t.owner ? ` <span class="muted">· ${esc(t.owner)}</span>` : ""}</span></li>`).join("")}</ul>`;
+  }
+
+  function paintPlans(slug) {
+    const box = $("mem-plans");
+    const data = mem.plans || {};
+    const project = (data.projects || []).find((x) => x.project === slug);
+    if (data.error || !project) { box.innerHTML = `<div class="tone-warn">Plans unavailable: ${esc(data.error || "no answer for this project")}</div>`; return; }
+    if (project.state === "none") { box.innerHTML = `<div class="muted">No plans file</div>`; return; }
+    if (project.state !== "ok") { box.innerHTML = `<div class="tone-warn">Plans unavailable: ${esc(project.reason)}</div>`; return; }
+    const of = (status) => project.tasks.filter((t) => t.status === status);
+    const groups = PLAN_GROUPS.map((g) => [g, of(g)]).filter(([, list]) => list.length);
+    box.innerHTML = (groups.length
+      ? groups.map(([g, list]) => `<div class="mem-group">${esc(g)} · ${list.length}</div>${taskList(list)}`).join("")
+      : `<div class="muted">Nothing in progress, in review, blocked or ready</div>`) +
+      ["Backlog", "Done"].map((g) => {
+        const list = of(g);
+        return `<details class="mem-fold"><summary>${esc(g)} · ${list.length}</summary>${list.length ? taskList(list) : ""}</details>`;
+      }).join("");
+  }
+
+  function paintDecisions(slug, decisions) {
+    const box = $("mem-decisions");
+    if (!decisions.length) { box.innerHTML = `<div class="mem-box muted">No decisions yet</div>`; return; }
+    box.innerHTML = `<div class="mem-rows">${decisions.map((d) => `<div class="mem-row" role="button" tabindex="0" aria-expanded="false" data-decision="${esc(d.path)}" title="${esc(d.path)}">
+        <span class="when">${esc(d.date || "")}</span><span>· ${esc(d.title)}</span>${d.status ? `<span class="muted">· ${esc(d.status)}</span>` : ""}
+      </div><div class="mem-inline" hidden></div>`).join("")}</div>`;
+    box.querySelectorAll("[data-decision]").forEach((row) => {
+      const toggle = () => toggleDecision(slug, row, row.nextElementSibling);
+      row.onclick = toggle;
+      row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+    });
+  }
+
+  async function toggleDecision(slug, row, box) {
+    const open = box.hidden;
+    box.hidden = !open;
+    row.setAttribute("aria-expanded", String(open));
+    if (!open || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    box.innerHTML = `<div class="hint">Loading…</div>`;
+    const path = row.dataset.decision;
+    try {
+      const f = await api(`/api/knowledge/file?target=${encodeURIComponent(slug)}&path=${encodeURIComponent(path)}`);
+      box.replaceChildren(renderMarkdown(String(f.text ?? ""), slug, path));
+    } catch (err) {
+      delete box.dataset.loaded;
+      box.innerHTML = `<div class="hint">${esc(err.status === 413 ? "too large to show" : `Could not open: ${err.message}`)}</div>`;
+    }
+  }
+
+  function paintHistory(slug, history) {
+    const box = $("mem-history");
+    if (!history.length) { box.innerHTML = `<div class="mem-box muted">No history yet</div>`; return; }
+    box.innerHTML = `<div class="mem-rows">${history.map((h, i) => `<details class="mem-row-d" data-history="${i}">
+        <summary class="mem-row"><span class="when">${esc(h.date)}</span><span>${esc(h.heading)}</span></summary><div class="mem-inline"></div>
+      </details>`).join("")}</div>`;
+    box.querySelectorAll("[data-history]").forEach((el) => {
+      el.addEventListener("toggle", () => {
+        const body = el.querySelector(".mem-inline");
+        if (!el.open || body.firstChild) return;
+        const text = history[+el.dataset.history].body || "";
+        if (text.trim()) body.replaceChildren(renderMarkdown(text, slug, "log.md"));
+        else body.innerHTML = `<div class="muted">No details</div>`;
+      });
+    });
+  }
+
   // ------------------------------------------------- in-app terminal
   // Liveness comes from the backend's process evidence; the screen is display only.
   function renderAgentState(conv) {
@@ -1311,7 +1632,7 @@
 
   // ------------------------------------------------ knowledge panel (read-only)
   // `open` holds the expanded folders; folders start collapsed, like an explorer.
-  const kb = { panel: "session", target: null, data: null, file: null, open: new Set(), version: 0, fileVersion: 0 };
+  const kb = { panel: "session", target: null, data: null, file: null, shown: null, open: new Set(), version: 0, fileVersion: 0 };
 
   function setPanel(panel) {
     kb.panel = panel;
@@ -1321,15 +1642,90 @@
     if (panel === "knowledge") loadKnowledge();
   }
 
-  // Called whenever a session is opened: the panel follows that session's project.
-  function knowledgeFor(slug) {
+  // Called whenever a session is opened: the panel follows that session's project. The Project
+  // Memory page passes its Files section as host; the tree and viewer move there and back.
+  function knowledgeFor(slug, host = $("panel-knowledge")) {
+    host.appendChild($("kb-view"));
     if (kb.target !== slug) {
       kb.target = slug; kb.data = null; kb.file = null; kb.open = new Set();
       $("kb-filter").value = "";
       $("kb-feedback").hidden = true;
     }
-    if (kb.panel === "knowledge") loadKnowledge();
+    if (kb.panel === "knowledge" || host !== $("panel-knowledge")) loadKnowledge();
     else paintKnowledge();
+  }
+
+  // ------------------------------------------------------ markdown rendering
+  // marked + DOMPurify (vendored). Raw HTML is dropped, images show their alt text, and only a
+  // relative link to a .md file inside the same knowledge root stays a link (it opens in the page).
+  const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+  let markdown = null;
+
+  function markdownEngine() {
+    if (!markdown) {
+      markdown = new window.marked.Marked({ gfm: true, async: false });
+      markdown.use({ renderer: { html: () => "", image: (token) => esc(token.text || "") } });
+    }
+    return markdown;
+  }
+
+  // A link's path inside the knowledge root, resolved from the file it appears in; null for any other link.
+  function knowledgeLink(href, from) {
+    if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("/") || href.startsWith("#")) return null;
+    let rel = href.split("#")[0].split("?")[0];
+    try { rel = decodeURIComponent(rel); } catch (_) { return null; }
+    if (!/\.md$/i.test(rel)) return null;
+    const parts = String(from || "").split("/").slice(0, -1);
+    for (const seg of rel.split("/")) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") { if (!parts.length) return null; parts.pop(); } else parts.push(seg);
+    }
+    return parts.length ? parts.join("/") : null;
+  }
+
+  function renderMarkdown(text, target, from = "") {
+    const source = String(text ?? "");
+    try {
+      const box = document.createElement("div");
+      box.className = "md";
+      let body = source;
+      const fm = FRONTMATTER.exec(body);
+      if (fm) {
+        const details = document.createElement("details");
+        details.className = "md-details";
+        const summary = document.createElement("summary");
+        summary.textContent = "Details";
+        const pre = document.createElement("pre");
+        pre.className = "md-plain";
+        pre.textContent = fm[1];
+        details.append(summary, pre);
+        box.appendChild(details);
+        body = body.slice(fm[0].length);
+      }
+      const frag = window.DOMPurify.sanitize(markdownEngine().parse(body),
+        { USE_PROFILES: { html: true }, FORBID_TAGS: ["img", "style"], RETURN_DOM_FRAGMENT: true });
+      frag.querySelectorAll("a").forEach((a) => {
+        const path = knowledgeLink(a.getAttribute("href"), from);
+        if (!path) { a.replaceWith(...a.childNodes); return; }
+        a.setAttribute("href", "#");
+        a.removeAttribute("target");
+        a.title = path;
+        a.onclick = (e) => { e.preventDefault(); openKnowledgeLink(target, path); };
+      });
+      box.appendChild(frag);
+      return box;
+    } catch (_) {
+      const pre = document.createElement("pre");
+      pre.className = "md-plain";
+      pre.textContent = source;
+      return pre;
+    }
+  }
+
+  // Opens a linked knowledge file in the viewer that shows this project (right panel or Files section).
+  function openKnowledgeLink(target, path) {
+    if (kb.target !== target) return;
+    openKnowledgeFile(path).then(() => $("kb-file").scrollIntoView({ block: "nearest" }));
   }
 
   async function loadKnowledge() {
@@ -1396,15 +1792,20 @@
       el.onclick = toggle;
       el.onkeydown = (e) => { if (e.key === "Enter") toggle(); };
     });
+    $("kb-open-memory").hidden = !kb.target;
     const note = $("kb-note");
     note.textContent = !kb.target ? "Open a session to see its project's knowledge." : d && d.truncated ? "Showing the first 2,000 entries." : "";
     note.hidden = !note.textContent;
     const f = kb.file;
     $("kb-file").hidden = !f;
-    if (f) {
+    // Paint the file only when it changed, so filtering the tree keeps the reader's place.
+    if (f && kb.shown !== f) {
+      kb.shown = f;
+      const view = $("kb-file-text");
       $("kb-file-path").textContent = f.path;
-      $("kb-file-text").textContent = f.text !== null ? f.text : f.note;
-      $("kb-file-text").classList.toggle("hint", f.text === null);
+      if (f.text !== null && /\.md$/i.test(f.path)) view.replaceChildren(renderMarkdown(f.text, kb.target, f.path));
+      else view.textContent = f.text !== null ? f.text : f.note;
+      view.classList.toggle("hint", f.text === null);
     }
   }
 
@@ -1627,11 +2028,17 @@
     refreshBoard();
     refreshTree();
     loadUsage();
+    if (viewVisible("memory") && !state.memorySlug) loadMemory();
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
   });
-  document.querySelectorAll("[data-board-view]").forEach((b) => { b.onclick = () => setBoardView(b.dataset.boardView); });
+  // The Memory tab always leads to the cards; a project page opens from a card.
+  document.querySelectorAll("[data-board-view]").forEach((b) => { b.onclick = () => {
+    if (b.dataset.boardView === "memory") state.memorySlug = null;
+    setBoardView(b.dataset.boardView);
+  }; });
   setInterval(() => {
+    if (viewVisible("memory") && !state.memorySlug) loadMemory();
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
   }, 30000);
@@ -1645,6 +2052,23 @@
       paintTasks();
     };
   });
+  $("memory-filter").addEventListener("input", paintMemory);
+  $("memory-back").onclick = () => { state.memorySlug = null; setBoardView("memory"); };
+  $("mem-newconv").onclick = async () => {
+    const button = $("mem-newconv");
+    button.disabled = true;
+    $("mem-feedback").hidden = true;
+    state.target = state.memorySlug;
+    try { await createAndOpen({ target: state.target, runtime: state.runtime, transport: newTransport() }, true); }
+    catch (err) { feedback($("mem-feedback"), `Could not create session: ${err.message}`); }
+    finally { button.disabled = false; }
+  };
+  $("mem-open-tasks").onclick = () => {
+    paintTaskProjects();
+    $("tasks-project").value = state.memorySlug;
+    setBoardView("tasks");
+  };
+  $("kb-open-memory").onclick = () => { if (kb.target) openMemoryProject(kb.target); };
   $("tfilter").addEventListener("input", paintTree);
   document.querySelectorAll("[data-panel]").forEach((b) => { b.onclick = () => setPanel(b.dataset.panel); });
   $("kb-filter").addEventListener("input", paintKnowledge);
@@ -1683,6 +2107,7 @@
   $("newconv").onclick = () => newSession();
 
   loadUsage();
+  loadMemory();
   refreshAll().catch((e) => {
     document.body.innerHTML =
       `<div style="padding:40px;font-family:var(--sans)">
