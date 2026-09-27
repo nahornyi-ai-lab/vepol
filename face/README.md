@@ -34,9 +34,17 @@ work and, when idle, closes the owned protocol clients and backend naturally.
 ## Terminal sessions
 
 - «+ New session» (or «+» in a board column, which also places the session in
-  that stage) opens the project's terminal for the chosen runtime (Claude or
-  Codex). There is one terminal per project and runtime; asking for a second one
-  opens the existing terminal and says so.
+  that stage) asks which project to work in: the hub and every project linked
+  in `~/knowledge/projects/`, most recent activity first (the project's own
+  sessions in the app and the last change to its `knowledge/log.md`), with a
+  search field and the runtime (Claude or Codex). It then opens that project's
+  terminal. There is one terminal per project and runtime; asking for a second
+  one opens the existing terminal and says so.
+- «Add project…» in the same dialog opens the macOS folder panel (it can create
+  a new folder). The chosen folder becomes a Vepol project through the hub's own
+  `new-wiki` — it adds `AGENTS.md`, `CLAUDE.md` and `knowledge/` where they are
+  missing, never overwrites a file, and links the project into the hub — and the
+  session starts there. A folder that is already a project just opens.
 - The agent starts only when you click: creating the session or clicking
   «Start». Opening a session attaches to it and never starts anything.
 - The terminal is xterm.js connected to a tmux session that tmux keeps alive
@@ -70,8 +78,8 @@ runs keep their history and still open in the app.
   `~/Library/LaunchAgents`, the `com.knowledge.backup` launchd job. Read-only;
   states come from the files the scheduler already writes, and «Unknown» means
   there is no evidence.
-- **Session view** — a project → sessions tree on the left with the same state
-  dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
+- **Session view** — a project → sessions tree on the left (every project,
+  most recent activity first) with the same state dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
   read-only explorer of the project's `knowledge/` folder (folders collapse, a
   name filter searches all of them, files open as plain text up to 512 KB).
 - **Usage bar** along the bottom: `Claude 5h · 7d` and Codex's current
@@ -97,9 +105,9 @@ limitations. Use the native entry for the experience above.
 
 Tests need `pytest` and `httpx` in the app's `.venv` on top of
 `requirements.txt` (`.venv/bin/pip install -r requirements.txt pytest httpx`),
-and Node with Playwright for the browser journeys. The Tasks and Automations
-journeys read `bin/kb-board`, `bin/_kb_processes.py` and
-`_template/knowledge/backlog.md` from `VEPOL_FIXTURE_KB_ROOT` if set, else from
+and Node with Playwright for the browser journeys. The Tasks, Automations and
+Projects journeys (and the add-project test) read `bin/kb-board`,
+`bin/new-wiki`, `bin/_kb_processes.py` and `_template/` from `VEPOL_FIXTURE_KB_ROOT` if set, else from
 the Vepol repository this folder sits in, else from `~/knowledge` (read-only;
 fixtures run on temporary copies). Nothing touches your real conversations,
 your tmux server or a real agent: each run uses its own state directory, its own
@@ -109,7 +117,7 @@ From this directory, outside tmux:
 
 ```sh
 .venv/bin/python -m pytest tests/
-for s in board tasks automations orca-extras; do
+for s in board tasks automations orca-extras projects; do
   NODE_PATH=/path/to/node_modules VEPOL_FACE_PYTHON=$PWD/.venv/bin/python \
     node tests/browser/$s-e2e.cjs
 done

@@ -159,6 +159,24 @@ if os.environ.get("VEPOL_FIXTURE_ORCA") == "1":
     orca = {"knowledge": str(knowledge), "files": files,
             "codex_rollout": str(rollout), "claude_usage": str(claude_usage)}
 
+projects = None
+if os.environ.get("VEPOL_FIXTURE_PROJECTS") == "1":
+    # The hub's own kb-board and new-wiki; logs of different ages; one plain folder to add.
+    import time
+    (hub / "bin").mkdir(parents=True, exist_ok=True)
+    for tool in ("kb-board", "new-wiki"):
+        (hub / "bin" / tool).symlink_to(REAL_HUB / "bin" / tool)
+    (hub / "_template").symlink_to(REAL_HUB / "_template")
+    now = time.time()
+    for slug, age_hours in (("gamma", 1), ("alpha", 48), ("beta", 240)):
+        log = hub / "projects" / slug / "log.md"
+        log.write_text("# Log\n", encoding="utf-8")
+        os.utime(log, (now - age_hours * 3600, now - age_hours * 3600))
+    fresh = fixture_root / "work" / "Fresh App"
+    fresh.mkdir(parents=True)
+    # No log anywhere else: hub and delta have no activity and keep discovery order at the end.
+    projects = {"order": ["gamma", "alpha", "beta", "hub", "delta"], "fresh": str(fresh)}
+
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
 port = sock.getsockname()[1]
@@ -170,6 +188,8 @@ if expected is not None:
     print(json.dumps({"tasks": expected}), flush=True)
 if orca is not None:
     print(json.dumps({"orca": orca}), flush=True)
+if projects is not None:
+    print(json.dumps({"projects": projects}), flush=True)
 # uvicorn re-raises SIGTERM after shutdown; exiting through Python runs the cleanup below.
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 try:

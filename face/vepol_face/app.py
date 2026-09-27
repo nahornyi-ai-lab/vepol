@@ -195,7 +195,20 @@ def create_app(
 
     @app.get("/api/targets", dependencies=auth_dep)
     def api_targets() -> list[dict]:
-        return [t.as_dict() for t in targets_mod.discover_targets(hub=hub_path)]
+        convs = [_conversation_summary(c) for c in app.state.store.list_conversations()]
+        return targets_mod.with_last_active(targets_mod.discover_targets(hub=hub_path), convs)
+
+    # «Add project…»: the chosen folder becomes a project through the hub's own new-wiki.
+    @app.post("/api/projects", dependencies=auth_dep)
+    async def api_add_project(request: Request) -> dict:
+        body = await _json_body(request, cfg.max_body_bytes)
+        try:
+            target, created = await asyncio.to_thread(targets_mod.add_project, hub_path, str(body.get("path") or ""))
+        except targets_mod.ProjectRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {**target.as_dict(), "created": created}
 
     @app.get("/api/runtimes", dependencies=auth_dep)
     def api_runtimes() -> list[dict]:

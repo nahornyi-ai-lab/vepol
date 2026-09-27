@@ -312,6 +312,30 @@
     .usage-sep { display: none; }
   }
   .empty { color: var(--ink-dim); font-size: 13px; padding: 40px 0; text-align: center; }
+  /* New-session project picker: every project, newest activity first. */
+  #picker { width: min(640px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 48px)); padding: 0;
+    border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .25); }
+  #picker[open] { display: flex; flex-direction: column; }
+  #picker::backdrop { background: rgba(10, 12, 16, .35); }
+  .picker-head { display: flex; align-items: center; gap: 10px; padding: 18px 20px 4px; }
+  .picker-head h1 { flex: 1; font-size: 17px; margin: 0; }
+  .picker-head button { padding: 5px 10px; }
+  .picker-sub { padding: 0 20px; margin: 0 0 10px; }
+  .picker-bar { display: flex; gap: 10px; align-items: center; padding: 0 20px; }
+  .picker-bar .filter { flex: 1; margin: 0; font-size: 13px; padding: 8px 10px; }
+  #picker-feedback { margin: 10px 20px 0; }
+  .picker-list { overflow-y: auto; min-height: 120px; padding: 8px 12px; border-bottom: 1px solid var(--line); margin-top: 10px; border-top: 1px solid var(--line); }
+  .picker-row { display: grid; grid-template-columns: 1fr auto; gap: 1px 12px; width: 100%; text-align: left;
+    background: transparent; color: var(--ink); border: 1px solid transparent; border-radius: 8px; padding: 8px 10px;
+    font-weight: 500; }
+  .picker-row:hover, .picker-row:focus-visible { background: var(--panel-2); border-color: var(--line); outline: none; }
+  .picker-row .pname { font-weight: 600; overflow-wrap: anywhere; }
+  .picker-row .pwhen { font-size: 11px; color: var(--ink-dim); font-weight: 400; text-align: right; white-space: nowrap; }
+  .picker-row .ppath { grid-column: 1 / -1; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); font-weight: 400;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .picker-foot { display: flex; gap: 12px; align-items: center; padding: 12px 20px 16px; }
+  .picker-foot .hint { flex: 1; }
 </style>
 </head>
 <body>
@@ -381,7 +405,7 @@
     <div id="native-mode" hidden><h2>New session</h2>
       <select id="transport-select" class="filter" aria-label="New session mode"><option value="terminal">Terminal · tmux</option></select>
     </div>
-    <button class="ghost" style="width:100%;margin-top:10px" id="newconv">New conversation</button>
+    <button class="ghost" style="width:100%;margin-top:10px" id="newconv">+ New session</button>
   </div>
 
   <div class="col center">
@@ -431,6 +455,17 @@
     </div>
   </div>
 </div>
+<dialog id="picker" aria-labelledby="picker-title">
+  <div class="picker-head"><h1 id="picker-title">New session</h1><button class="ghost" id="picker-close" aria-label="Close">Close</button></div>
+  <p class="hint picker-sub">Pick a project to work in. Recently used projects are on top.</p>
+  <div class="picker-bar">
+    <input type="search" class="filter" id="picker-search" placeholder="Find a project…" aria-label="Find a project" />
+    <div class="chips" role="group" aria-label="Agent" id="picker-runtimes"></div>
+  </div>
+  <div id="picker-feedback" class="banner bad" role="alert" hidden></div>
+  <div id="picker-list" class="picker-list" aria-label="Projects"></div>
+  <div class="picker-foot"><button id="picker-add">Add project…</button><span class="hint" id="picker-add-hint">Open any folder, or create a new one. It becomes a Vepol project with its own knowledge/ folder.</span></div>
+</dialog>
 <footer class="usage-bar" id="usage-bar" aria-label="Usage limits">
   <span class="usage-part" id="usage-claude"></span><span class="usage-sep" id="usage-sep" hidden>|</span><span class="usage-part" id="usage-codex"></span><span id="usage-error" hidden>Could not refresh</span>
 </footer>
@@ -506,8 +541,41 @@
     el.title = p.cwd;
   }
 
-  // Project → sessions tree, built from /api/conversations and /api/targets. Projects without
-  // sessions appear only while the filter matches them, so a new project can still be picked.
+  // Last activity of a project: the server's value (sessions + knowledge/log.md), refreshed by
+  // this page's own session list, which moves faster than /api/targets.
+  // Server times carry microseconds; cut to milliseconds so every engine parses them.
+  const timeOf = (iso) => Date.parse(String(iso || "").replace(/(\.\d{3})\d+/, "$1")) || 0;
+
+  function lastActive(slug) {
+    const t = allTargets.find((x) => x.slug === slug);
+    let at = (t && t.last_active) || "";
+    conversations.forEach((c) => {
+      if (c.target === slug && timeOf(c.last_activity_at) > timeOf(at)) at = c.last_activity_at;
+    });
+    return at;
+  }
+
+  // Every project (registered targets plus any session's project), newest activity first.
+  function projectsByActivity() {
+    const slugs = [...new Set([...allTargets.map((t) => t.slug), ...conversations.map((c) => c.target)])];
+    const when = new Map(slugs.map((slug) => [slug, timeOf(lastActive(slug))]));
+    return slugs.sort((a, b) => when.get(b) - when.get(a));
+  }
+
+  function fmtAgo(iso) {
+    const t = timeOf(iso);
+    if (!t) return "no activity yet";
+    const min = Math.round((Date.now() - t) / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min} min ago`;
+    if (min < 24 * 60) return `${Math.round(min / 60)} h ago`;
+    const days = Math.round(min / (24 * 60));
+    if (days === 1) return "yesterday";
+    if (days < 14) return `${days} days ago`;
+    return new Date(t).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  // Project → sessions tree: every project, newest activity first, its sessions nested under it.
   const AGENT_DOT = { alive: "alive", not_running: "not_running" };
   let treeHtml = "";
 
@@ -517,8 +585,7 @@
     const bySlug = new Map();
     conversations.forEach((c) => { if (!bySlug.has(c.target)) bySlug.set(c.target, []); bySlug.get(c.target).push(c); });
     const matches = (slug) => !q || slug.toLowerCase().includes(q) || String(label(slug)).toLowerCase().includes(q);
-    const slugs = [...new Set([...bySlug.keys(), ...(q ? allTargets.map((t) => t.slug) : [])])]
-      .filter(matches).sort((a, b) => a.localeCompare(b));
+    const slugs = projectsByActivity().filter(matches);
     const html = slugs.length ? slugs.map((slug) => {
       const sessions = (bySlug.get(slug) || []).slice()
         .sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
@@ -532,7 +599,7 @@
             ${dot}<span class="t">${esc(c.title || "New session")}<div class="meta">${esc(c.runtime)}</div></span>
           </div>`;
         }).join("")}</div>` : ""}`;
-    }).join("") : `<div class="hint">${q ? "no match" : "No sessions yet"}</div>`;
+    }).join("") : `<div class="hint">${q ? "no match" : "No projects yet"}</div>`;
     if (html === treeHtml) return;
     treeHtml = html;
     $("tree").innerHTML = html;
@@ -602,7 +669,7 @@
     if (state.view !== "board" || state.boardView !== "sessions" || draggingId || boardPending) return;
     if (!force && document.activeElement.matches("select[data-board-stage]")) return;
     const projectSelect = $("board-project-filter");
-    const projects = [...new Set(conversations.map((c) => c.target))].sort();
+    const projects = projectsByActivity();
     const optionsKey = JSON.stringify(projects);
     if (projectSelect.dataset.options !== optionsKey) {
       const selected = projectSelect.value;
@@ -619,7 +686,9 @@
     $("board-count").textContent = filtered.length === conversations.length
       ? `Total: ${conversations.length}` : `Showing ${filtered.length} of ${conversations.length}`;
     $("board-empty").hidden = filtered.length > 0;
-    $("board-empty").textContent = conversations.length
+    $("board-empty").textContent = projectSelect.value && !conversations.some((c) => c.target === projectSelect.value)
+      ? "No sessions in this project yet. Press + New session to start one."
+      : conversations.length
       ? "Nothing found. Change the search or pick another project."
       : "Your conversations will appear here. Create your first session to start.";
     const signature = JSON.stringify(filtered);
@@ -811,11 +880,12 @@
 
   function paintTaskProjects() {
     const select = $("tasks-project");
-    const key = JSON.stringify(allTargets.map((t) => t.slug));
+    const slugs = projectsByActivity().filter((slug) => allTargets.some((t) => t.slug === slug));
+    const key = JSON.stringify(slugs);
     if (select.dataset.options === key) return;
     const selected = select.value;
-    select.innerHTML = `<option value="">All projects</option>` + allTargets.map((t) =>
-      `<option value="${esc(t.slug)}">${esc(t.label || t.slug)}</option>`).join("");
+    select.innerHTML = `<option value="">All projects</option>` + slugs.map((slug) =>
+      `<option value="${esc(slug)}">${esc((allTargets.find((t) => t.slug === slug) || {}).label || slug)}</option>`).join("");
     select.value = allTargets.some((t) => t.slug === selected) ? selected : "";
     select.dataset.options = key;
   }
@@ -913,9 +983,96 @@
     }
   }
 
+  // ------------------------------------------------ new-session project picker
+  const picker = { stage: null, busy: false };
+
+  function paintPicker() {
+    const q = $("picker-search").value.trim().toLocaleLowerCase();
+    const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
+    const slugs = projectsByActivity().filter((slug) => {
+      const t = allTargets.find((x) => x.slug === slug);
+      return !q || [slug, label(slug), t ? t.cwd : ""].join(" ").toLocaleLowerCase().includes(q);
+    });
+    // Paths under the folder that holds the hub (the home folder on a normal install) read as ~/…
+    const hubTarget = allTargets.find((t) => t.kind === "hub");
+    const home = hubTarget ? hubTarget.cwd.replace(/\/+$/, "") : "";
+    const short = (cwd) => !home ? cwd : cwd === home ? "~" : cwd.startsWith(home + "/") ? `~${cwd.slice(home.length)}` : cwd;
+    $("picker-list").innerHTML = slugs.length ? slugs.map((slug) => {
+      const t = allTargets.find((x) => x.slug === slug);
+      const count = conversations.filter((c) => c.target === slug).length;
+      return `<button class="picker-row" data-pick="${esc(slug)}">
+          <span class="pname">${esc(label(slug))}</span>
+          <span class="pwhen">${esc(fmtAgo(lastActive(slug)))}${count ? ` · ${count} session${count === 1 ? "" : "s"}` : ""}</span>
+          <span class="ppath" title="${esc(t ? t.cwd : "")}">${esc(t ? short(t.cwd) : "not a registered project")}</span>
+        </button>`;
+    }).join("") : `<div class="empty">No project matches. Use “Add project…” to open its folder.</div>`;
+    $("picker-list").querySelectorAll("[data-pick]").forEach((row) => { row.onclick = () => pickProject(row.dataset.pick); });
+    const brokered = lastRuntimes.filter((r) => r.capabilities && r.capabilities.brokered);
+    $("picker-runtimes").innerHTML = brokered.map((r) =>
+      `<button data-pick-runtime="${esc(r.name)}" aria-pressed="${r.name === state.runtime}" title="${esc(r.reason || r.state)}">${esc(r.name)}</button>`).join("");
+    $("picker-runtimes").querySelectorAll("[data-pick-runtime]").forEach((b) => {
+      b.onclick = () => { state.runtime = b.dataset.pickRuntime; renderRuntimes(lastRuntimes); paintPicker(); };
+    });
+  }
+
+  function pickerError(message) {
+    $("picker-feedback").textContent = message;
+    $("picker-feedback").hidden = !message;
+  }
+
+  async function openPicker(stage = null) {
+    picker.stage = stage;
+    pickerError("");
+    $("picker-search").value = "";
+    paintPicker();
+    if (!$("picker").open) $("picker").showModal();
+    $("picker-search").focus();
+    try {
+      renderTargets(await api("/api/targets"));
+      paintPicker();
+    } catch (err) { pickerError(`Could not refresh the project list: ${err.message}`); }
+  }
+
+  function pickProject(slug) {
+    if (picker.busy) return;
+    $("picker").close();
+    state.target = slug;
+    return newSession(picker.stage);
+  }
+
+  // The native app answers with the macOS folder panel; a plain browser asks for a path.
+  async function chooseFolder() {
+    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.vepolPickFolder;
+    if (handler) return handler.postMessage({});
+    return window.prompt("Project folder — the full path on this Mac:", "");
+  }
+
+  async function addProject() {
+    if (picker.busy) return;
+    pickerError("");
+    let folder;
+    try { folder = await chooseFolder(); }
+    catch (err) { pickerError(`Could not open the folder panel: ${err.message || err}`); return; }
+    if (!folder || !String(folder).trim()) return;
+    picker.busy = true;
+    $("picker-add").disabled = true;
+    $("picker-add-hint").textContent = `Setting up ${folder}…`;
+    try {
+      const target = await api("/api/projects", { method: "POST", body: JSON.stringify({ path: String(folder).trim() }) });
+      renderTargets(await api("/api/targets"));
+      picker.busy = false;
+      await pickProject(target.slug);
+    } catch (err) {
+      pickerError(`Could not add the project: ${err.message}`);
+    } finally {
+      picker.busy = false;
+      $("picker-add").disabled = false;
+      $("picker-add-hint").textContent = "Open any folder, or create a new one. It becomes a Vepol project with its own knowledge/ folder.";
+    }
+  }
+
   function newSessionFromBoard(stage = null) {
-    if ($("board-project-filter").value) state.target = $("board-project-filter").value;
-    return newSession(stage);
+    return openPicker(stage);
   }
 
   async function startTaskSession(task, button) {
@@ -1680,7 +1837,20 @@
   $("prompt").addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
   });
-  $("newconv").onclick = () => newSession();
+  $("newconv").onclick = () => openPicker();
+  $("picker-search").addEventListener("input", paintPicker);
+  $("picker-search").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const first = $("picker-list").querySelector("[data-pick]");
+    if (first) { e.preventDefault(); pickProject(first.dataset.pick); }
+  });
+  $("picker-close").onclick = () => $("picker").close();
+  // A click on the dimmed backdrop (outside the dialog box) closes it.
+  $("picker").addEventListener("click", (e) => {
+    const r = $("picker").getBoundingClientRect();
+    if (e.target === $("picker") && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) $("picker").close();
+  });
+  $("picker-add").onclick = addProject;
 
   loadUsage();
   refreshAll().catch((e) => {

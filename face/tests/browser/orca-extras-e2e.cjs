@@ -119,35 +119,45 @@ function processOf(pid) {
     await page.locator('#board-view').waitFor({ state: 'visible' });
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 2, 'two cards');
 
-    // O1. Tree: projects by name, sessions nested with the board's liveness dot; session opens, project picks the target.
+    // O1. Tree: every project, newest activity first (beta's session is the newest, projects without
+    // activity keep discovery order), sessions nested with the board's liveness dot; a session opens.
     await page.locator(`[data-open-conversation="${a1.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const wantTree = [
-      { slug: 'alpha', active: true, sessions: [{ id: a1.id, dot: 'agent-alive', active: true }] },
       { slug: 'beta', active: false, sessions: [{ id: b1.id, dot: 'agent-not_running', active: false }] },
+      { slug: 'alpha', active: true, sessions: [{ id: a1.id, dot: 'agent-alive', active: true }] },
+      { slug: 'hub', active: false, sessions: [] },
+      { slug: 'delta', active: false, sessions: [] },
+      { slug: 'gamma', active: false, sessions: [] },
     ];
-    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'alpha/beta tree with dots');
+    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'every project in the tree, sessions with dots')
+      .catch(async (e) => { throw new Error(`${e.message}; tree: ${JSON.stringify(await treeShape(page))}`); });
+    const node = async (slug) => (await treeShape(page)).find(p => p.slug === slug);
     await page.screenshot({ path: path.join(OUT, 'tree.png'), fullPage: true });
     const opened = page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname === `/api/conversations/${b1.id}`);
     await page.locator(`#tree .tree-session[data-id="${b1.id}"]`).click();
     assert.equal((await (await opened).json()).id, b1.id);
     await waitUntil(async () => {
-      const t = await treeShape(page);
-      return t[1].sessions[0].active && !t[0].sessions[0].active && t[1].active;
+      const [a, b] = [await node('alpha'), await node('beta')];
+      return b.sessions[0].active && !a.sessions[0].active && b.active;
     }, 'beta session selected in the tree');
     assert.equal((await api(`/api/conversations/${b1.id}`)).agent, 'not_running', 'opening never starts an agent');
     await page.locator('#tree .tree-project[data-slug="alpha"]').click();
-    await waitUntil(async () => (await treeShape(page))[0].active, 'alpha project selected');
+    await waitUntil(async () => (await node('alpha')).active, 'alpha project selected');
     assert.equal(await page.locator('#routing').textContent(), '→ codex · alpha');
+    // «+ New session» asks for the project; the agent choice carries over.
     const created = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#newconv').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#picker-runtimes [aria-pressed="true"]').textContent(), 'codex');
+    await page.locator('#picker-list [data-pick="alpha"]').click();
     const c1 = await (await created).json();
     assert.equal(c1.target, 'alpha');
     assert.equal(c1.runtime, 'codex');
     assert.equal(c1.existing, false);
-    await waitUntil(async () => (await treeShape(page))[0].sessions.some(s => s.id === c1.id && s.active), 'new alpha session in the tree');
+    await waitUntil(async () => (await node('alpha')).sessions.some(s => s.id === c1.id && s.active), 'new alpha session in the tree');
     evidence.cases.O1 = { tree: wantTree, newConversation: c1 };
-    evidence.steps.push('O1 tree nests alpha/beta sessions with alive/not-running dots; a session row opens it; the alpha row targets "New conversation"');
+    evidence.steps.push('O1 tree lists every project newest first and nests sessions with alive/not-running dots; a session row opens it; «+ New session» → picker → alpha');
 
     // O2. Knowledge panel: read-only tree of alpha's knowledge/, filter, exact file text, no escape, nothing written.
     await page.locator('[data-panel="knowledge"]').click();
@@ -190,15 +200,14 @@ function processOf(pid) {
     evidence.cases.O2 = { entries: kbEntries, filtered: ['decisions/a.md'], escapeStatus: escape.status, hugeStatus: 413, treeRefreshError: 'Could not refresh', mtimes: mtimesBefore };
     evidence.steps.push('O2 knowledge tree lists the fixture files, filter narrows to one, click shows its exact text; ../../etc/hosts is 404; huge.md is 413 "too large to show"; a failed list poll keeps the tree with "Could not refresh"; mtimes unchanged');
 
-    // O3. Column "+": gamma has no terminal; picked in the tree, "+" in Research creates, starts and places it there.
-    await page.locator('#tfilter').fill('gamma');
-    await page.locator('#tree .tree-project[data-slug="gamma"]').click();
-    await page.locator('#tfilter').fill('');
+    // O3. Column "+": gamma has no terminal; "+" in Research asks for the project, then creates, starts and places it there.
     await page.locator('#show-board').click();
     await page.locator('#board-view').waitFor({ state: 'visible' });
     const countBefore = (await api('/api/conversations')).length;
     const createdG = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#board-columns [data-new-in="research"]').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    await page.locator('#picker-list [data-pick="gamma"]').click();
     const g1 = await (await createdG).json();
     assert.equal(g1.target, 'gamma');
     assert.equal(g1.existing, false);
@@ -231,6 +240,8 @@ function processOf(pid) {
     // "+" again for gamma/codex (from another column): the existing card opens, its stage stays, a note says so.
     const again = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#board-columns [data-new-in="working"]').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    await page.locator('#picker-list [data-pick="gamma"]').click();
     const g2 = await (await again).json();
     assert.equal(g2.id, g1.id);
     assert.equal(g2.existing, true);

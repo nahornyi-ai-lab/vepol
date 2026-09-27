@@ -38,7 +38,7 @@ private enum ShellError: Error, LocalizedError {
 }
 
 @MainActor
-final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, UNUserNotificationCenterDelegate {
+final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, UNUserNotificationCenterDelegate {
     private var configuration: LaunchConfiguration?
     private var window: NSWindow!
     private var webView: WKWebView?
@@ -304,6 +304,7 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
         let quotedOrigin = String(data: try! JSONSerialization.data(withJSONObject: configuration.origin, options: [.fragmentsAllowed]), encoding: .utf8)!
         let injection = "if (window.location.origin === \(quotedOrigin)) { Object.defineProperty(window, '__VEPOL_TOKEN__', {value: \(quotedToken)}); }"
         webConfiguration.userContentController.addUserScript(WKUserScript(source: injection, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        webConfiguration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "vepolPickFolder")
         let view = WKWebView(frame: window.contentView?.bounds ?? .zero, configuration: webConfiguration)
         view.autoresizingMask = [.width, .height]
         view.navigationDelegate = self
@@ -344,6 +345,25 @@ final class VepolApplication: NSObject, NSApplicationDelegate, WKNavigationDeleg
             else { openExternal(url) }
         }
         return nil
+    }
+
+    // «Add project…»: the macOS folder panel, answered to the page as a path (nil on Cancel).
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        guard message.name == "vepolPickFolder", message.frameInfo.isMainFrame,
+              let url = message.frameInfo.request.url, isBackendURL(url) else {
+            replyHandler(nil, "Not allowed.")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Choose a project folder, or create a new one with New Folder."
+        panel.beginSheetModal(for: window) { response in
+            replyHandler(response == .OK ? panel.url?.path : nil, nil)
+        }
     }
 
     private func request(_ path: String, method: String = "GET") async throws -> [String: Any] {
