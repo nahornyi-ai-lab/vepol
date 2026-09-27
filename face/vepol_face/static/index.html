@@ -323,7 +323,9 @@
   .picker-head button { padding: 5px 10px; }
   .picker-sub { padding: 0 20px; margin: 0 0 10px; }
   .picker-bar { display: flex; gap: 10px; align-items: center; padding: 0 20px; }
-  .picker-bar .filter { flex: 1; margin: 0; font-size: 13px; padding: 8px 10px; }
+  .picker-bar { flex-wrap: wrap; }
+  .picker-bar .filter { flex: 1 1 220px; margin: 0; font-size: 13px; padding: 8px 10px; }
+  #picker-runtimes button { display: inline-flex; align-items: center; gap: 6px; }
   #picker-feedback { margin: 10px 20px 0; }
   .picker-list { overflow-y: auto; min-height: 120px; padding: 8px 12px; border-bottom: 1px solid var(--line); margin-top: 10px; border-top: 1px solid var(--line); }
   .picker-row { display: grid; grid-template-columns: 1fr auto; gap: 1px 12px; width: 100%; text-align: left;
@@ -617,10 +619,13 @@
       openConv(el.dataset.id).catch((err) => showDegraded({ reason: `Could not open session: ${err.message}` }))));
   }
 
+  // The native app's terminal runs any installed agent CLI; one-shot runs in a browser need a brokered one.
+  const pickable = (r) => !!(r.capabilities && (state.desktop ? r.capabilities.interactive && r.installed : r.capabilities.brokered));
+
   function renderRuntimes(list) {
     lastRuntimes = list;
-    const brokered = list.filter((r) => r.capabilities && r.capabilities.brokered);
-    const other = list.filter((r) => !(r.capabilities && r.capabilities.brokered));
+    const brokered = list.filter(pickable);
+    const other = list.filter((r) => !pickable(r));
     const one = (r, pick) => `
       <div class="rt ${pick ? "pick" : "off"} ${r.name === state.runtime ? "active" : ""}"
            data-name="${esc(r.name)}" title="${esc(r.reason || "")}">
@@ -630,7 +635,7 @@
       </div>`;
     $("runtimes").innerHTML =
       brokered.map((r) => one(r, true)).join("") +
-      (other.length ? `<div class="hint" style="margin-top:8px">not brokered yet</div>` : "") +
+      (other.length ? `<div class="hint" style="margin-top:8px">${state.desktop ? "not a terminal agent" : "not brokered yet"}</div>` : "") +
       other.map((r) => one(r, false)).join("");
     $("runtimes").querySelectorAll(".rt.pick").forEach((el) =>
       el.onclick = () => { state.runtime = el.dataset.name; renderRuntimes(list); updateRouting(list); });
@@ -1007,9 +1012,9 @@
         </button>`;
     }).join("") : `<div class="empty">No project matches. Use “Add project…” to open its folder.</div>`;
     $("picker-list").querySelectorAll("[data-pick]").forEach((row) => { row.onclick = () => pickProject(row.dataset.pick); });
-    const brokered = lastRuntimes.filter((r) => r.capabilities && r.capabilities.brokered);
-    $("picker-runtimes").innerHTML = brokered.map((r) =>
-      `<button data-pick-runtime="${esc(r.name)}" aria-pressed="${r.name === state.runtime}" title="${esc(r.reason || r.state)}">${esc(r.name)}</button>`).join("");
+    // Availability is shown, never enforced: the agent's own terminal says if it needs a login or is out of quota.
+    $("picker-runtimes").innerHTML = lastRuntimes.filter(pickable).map((r) =>
+      `<button data-pick-runtime="${esc(r.name)}" aria-pressed="${r.name === state.runtime}" title="${esc(`${r.name}: ${r.state}${r.reason ? ` — ${r.reason}` : ""}`)}"><span class="dot ${esc(r.state)}"></span>${esc(r.name)}</button>`).join("");
     $("picker-runtimes").querySelectorAll("[data-pick-runtime]").forEach((b) => {
       b.onclick = () => { state.runtime = b.dataset.pickRuntime; renderRuntimes(lastRuntimes); paintPicker(); };
     });
@@ -1659,6 +1664,7 @@
     renderConvs(convs);
     const h = await api("/api/health");
     state.desktop = !!h.desktop;
+    renderRuntimes(runtimes);
     $("native-mode").hidden = !state.desktop;
     if (state.desktop) { $("product-name").textContent = "Vepol"; document.title = "Vepol"; }
     $("bind").textContent = `local · ${h.host}:${h.port}`;

@@ -438,6 +438,30 @@ def test_api_accepts_minted_token(client):
     assert isinstance(r.json(), list)
 
 
+def test_every_listed_agent_cli_opens_as_a_terminal_session(client, monkeypatch):
+    """Critical: without it only Claude and Codex can be started in the app."""
+    from vepol_face.sessions import RUNTIME_SUFFIX, session_name
+    from vepol_face.terminal_session import TerminalSession
+
+    c, app = client
+    h = {"X-Vepol-Token": app.state.auth.token}
+    assert {"agy", "hermes", "opencode", "grok"} <= set(RUNTIME_SUFFIX)
+    for runtime in RUNTIME_SUFFIX:
+        r = c.post("/api/conversations", json={"target": "hub", "runtime": runtime, "transport": "terminal"}, headers=h)
+        assert r.status_code == 201, (runtime, r.text)
+        assert c.get(f"/api/conversations/{r.json()['id']}/attach", headers=h).json()["session"] == session_name("hub", runtime)
+    # Structured sessions still need Claude or Codex.
+    assert c.post("/api/conversations", json={"target": "hub", "runtime": "agy", "transport": "session"},
+                  headers=h).status_code == 400
+
+    # The pane runs the agent's own interactive CLI; the newer agents take no extra arguments.
+    monkeypatch.setattr(TerminalSession, "_binary", lambda self, rt: f"/fake/{rt}")
+    for runtime in ("hermes", "opencode", "grok"):
+        argv = TerminalSession(cwd="/tmp/project", project="hub", runtime=runtime,
+                               on_event=lambda e: None, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})._runtime_command()
+        assert argv[0] == "/usr/bin/env" and argv[-1] == f"/fake/{runtime}", argv
+
+
 def test_api_rejects_oversized_payload(client):
     c, app = client
     r = c.post(

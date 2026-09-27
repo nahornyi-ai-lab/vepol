@@ -37,9 +37,15 @@ work and, when idle, closes the owned protocol clients and backend naturally.
   that stage) asks which project to work in: the hub and every project linked
   in `~/knowledge/projects/`, most recent activity first (the project's own
   sessions in the app and the last change to its `knowledge/log.md`), with a
-  search field and the runtime (Claude or Codex). It then opens that project's
-  terminal. There is one terminal per project and runtime; asking for a second
-  one opens the existing terminal and says so.
+  search field and the agent. In the native app the agent can be any installed
+  agent CLI from the hub roster (`~/knowledge/.orchestrator/cli-tools.tsv`):
+  Claude, Codex, Antigravity (`agy`), Hermes, OpenCode or Grok; its availability
+  is shown but never blocks the terminal, where the CLI itself reports login or
+  quota problems. First-run screens (agy and Grok ask once per folder whether to
+  trust it) are answered by you in the terminal. Hermes follows its own
+  `terminal.cwd` setting in `~/.hermes/config.yaml`, not the project folder.
+  It then opens that project's terminal. There is one terminal per project and
+  runtime; asking for a second one opens the existing terminal and says so.
 - «Add project…» in the same dialog opens the macOS folder panel (it can create
   a new folder). The chosen folder becomes a Vepol project through the hub's own
   `new-wiki` — it adds `AGENTS.md`, `CLAUDE.md` and `knowledge/` where they are

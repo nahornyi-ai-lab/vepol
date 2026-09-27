@@ -21,7 +21,9 @@ os.environ.pop("TMUX", None)
 os.environ.pop("TMUX_PANE", None)
 
 import uvicorn
+from vepol_face import runtimes as runtimes_mod
 from vepol_face import terminal_session
+from vepol_face.sessions import RUNTIME_SUFFIX
 from vepol_face.app import create_app
 from vepol_face.config import Config
 
@@ -35,7 +37,7 @@ _real_binary = terminal_session.TerminalSession._binary
 
 
 def _fixture_binary(self, runtime: str) -> str:
-    return str(standin) if runtime in ("claude", "codex", "agy") else _real_binary(self, runtime)
+    return str(standin) if runtime in RUNTIME_SUFFIX else _real_binary(self, runtime)
 
 
 terminal_session.TerminalSession._binary = _fixture_binary
@@ -162,6 +164,7 @@ if os.environ.get("VEPOL_FIXTURE_ORCA") == "1":
 projects = None
 if os.environ.get("VEPOL_FIXTURE_PROJECTS") == "1":
     # The hub's own kb-board and new-wiki; logs of different ages; one plain folder to add.
+    import datetime
     import time
     (hub / "bin").mkdir(parents=True, exist_ok=True)
     for tool in ("kb-board", "new-wiki"):
@@ -175,7 +178,18 @@ if os.environ.get("VEPOL_FIXTURE_PROJECTS") == "1":
     fresh = fixture_root / "work" / "Fresh App"
     fresh.mkdir(parents=True)
     # No log anywhere else: hub and delta have no activity and keep discovery order at the end.
-    projects = {"order": ["gamma", "alpha", "beta", "hub", "delta"], "fresh": str(fresh)}
+    # The fixture's own agent roster and broker state: claude/codex brokered and recently fine, two more
+    # terminal agents installed but never observed, and notebooklm (not a terminal agent).
+    roster = fixture_root / "cli-tools.tsv"
+    roster.write_text("".join(f"{name} | path-any | /bin/cat | fixture\n"
+                              for name in ("claude", "codex", "agy", "hermes", "notebooklm")), encoding="utf-8")
+    broker = fixture_root / "broker-state.json"
+    seen = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    broker.write_text(json.dumps({"providers": {name: {"last_success_at": seen} for name in ("claude", "codex")}}),
+                      encoding="utf-8")
+    runtimes_mod.CLI_TSV, runtimes_mod.BROKER_STATE = roster, broker
+    projects = {"order": ["gamma", "alpha", "beta", "hub", "delta"], "fresh": str(fresh),
+                "agents": ["agy", "claude", "codex", "hermes"]}
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))

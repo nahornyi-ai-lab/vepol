@@ -42,7 +42,7 @@ async function waitUntil(fn, label, timeout = 10000) {
       });
       server.once('exit', code => { clearTimeout(timer); reject(new Error(`Fixture server exited ${code}: ${stderr}`)); });
     });
-    const { order, fresh } = fixture.projects;
+    const { order, fresh, agents } = fixture.projects;
     const hub = path.join(OUT, 'hub');
     const base = `http://127.0.0.1:${boot.port}`;
     const api = async (url) => {
@@ -70,6 +70,9 @@ async function waitUntil(fn, label, timeout = 10000) {
     await waitUntil(async () => JSON.stringify(await pickerSlugs()) === JSON.stringify(order), `picker order ${order}`);
     assert.match(await page.locator('#picker-list [data-pick="gamma"] .pwhen').textContent(), /^1 h ago$/);
     assert.match(await page.locator('#picker-list [data-pick="delta"] .pwhen').textContent(), /^no activity yet$/);
+    // Every installed terminal agent from the roster is offered; notebooklm (not an agent) is not.
+    const chips = () => page.locator('#picker-runtimes [data-pick-runtime]').evaluateAll(b => b.map(x => x.dataset.pickRuntime));
+    await waitUntil(async () => JSON.stringify(await chips()) === JSON.stringify(agents), `agent chips ${agents}`);
     await page.locator('#picker-search').fill('alp');
     assert.deepEqual(await pickerSlugs(), ['alpha']);
     await page.locator('#picker-search').fill('');
@@ -151,6 +154,22 @@ async function waitUntil(fn, label, timeout = 10000) {
     await waitUntil(async () => /· beta ·/.test(await page.locator('#conversation-title').textContent()), 'beta session opened');
     assert.equal((await convOf('beta')).board_stage, 'research');
     evidence.steps.push('P6 column «+» Research → picker → beta session in Research');
+
+    // 7. Another agent CLI: hermes in delta runs in its own tmux session kb-delta-hermes.
+    await page.locator('#show-board').click();
+    await page.locator('#board-newconv').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    await page.locator('#picker-runtimes [data-pick-runtime="hermes"]').click();
+    assert.equal(await page.locator('#picker-runtimes [aria-pressed="true"]').textContent(), 'hermes');
+    await page.locator('#picker-list [data-pick="delta"]').click();
+    await waitUntil(async () => /· delta · hermes$/.test(await page.locator('#conversation-title').textContent()), 'delta/hermes session opened');
+    const hermes = await api(`/api/conversations/${(await convOf('delta')).id}`);
+    assert.equal(hermes.runtime, 'hermes');
+    assert.equal(hermes.transport, 'terminal');
+    assert.equal((await api(`/api/conversations/${hermes.id}/attach`)).session, 'kb-delta-hermes');
+    await waitUntil(async () => (await api(`/api/conversations/${hermes.id}`)).agent === 'alive', 'hermes stand-in alive');
+    await page.screenshot({ path: path.join(OUT, 'hermes-session.png') });
+    evidence.steps.push(`P7 agent chips ${agents.join(', ')}; hermes picked → delta terminal kb-delta-hermes is running`);
 
     assert.deepEqual(evidence.pageErrors, [], 'No browser exceptions');
     assert.deepEqual(evidence.httpErrors, [], 'No HTTP errors');

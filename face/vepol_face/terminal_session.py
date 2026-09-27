@@ -132,6 +132,10 @@ class TerminalSession:
             "claude": ["/opt/homebrew/bin/claude", str(pathlib.Path.home() / ".local/bin/claude")],
             "codex": [str(pathlib.Path.home() / ".local/bin/codex"), "/Applications/Codex.app/Contents/Resources/codex"],
             "agy": [str(pathlib.Path.home() / ".local/bin/agy"), "/opt/homebrew/bin/agy"],
+            # These open their own interactive TUI in the pane's folder with no extra arguments.
+            "hermes": [str(pathlib.Path.home() / ".local/bin/hermes")],
+            "opencode": [str(pathlib.Path.home() / ".opencode/bin/opencode")],
+            "grok": [str(pathlib.Path.home() / ".grok/bin/grok")],
         }.get(runtime, [])
         for candidate in candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):

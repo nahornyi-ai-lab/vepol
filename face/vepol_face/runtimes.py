@@ -14,6 +14,8 @@ import pathlib
 import shutil
 from dataclasses import dataclass, field
 
+from .sessions import RUNTIME_SUFFIX
+
 BROKER_STATE = pathlib.Path(os.path.expanduser("~/knowledge/.orchestrator/state.json"))
 CLI_TSV = pathlib.Path(os.path.expanduser("~/knowledge/.orchestrator/cli-tools.tsv"))
 
@@ -180,7 +182,7 @@ def load_runtimes(
             when=meta["when"],
             capabilities={
                 "brokered": name in ("claude", "codex"),
-                "interactive": name in ("claude", "codex", "agy"),
+                "interactive": name in RUNTIME_SUFFIX,
             },
         )
     return out

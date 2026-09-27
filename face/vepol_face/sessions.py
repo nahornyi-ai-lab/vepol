@@ -12,8 +12,9 @@ import re
 import uuid
 from dataclasses import dataclass
 
-SESSION_RE = re.compile(r"^kb-[a-z0-9][a-z0-9_-]*-(claude|codex|agy)$")
-RUNTIME_SUFFIX = ("claude", "codex", "agy")
+# Agent CLIs the in-app terminal can run (terminal_session.py knows how to start each).
+RUNTIME_SUFFIX = ("claude", "codex", "agy", "hermes", "opencode", "grok")
+SESSION_RE = re.compile(rf"^kb-[a-z0-9][a-z0-9_-]*-({'|'.join(RUNTIME_SUFFIX)})$")
 
 
 class UnsafeSessionName(ValueError):

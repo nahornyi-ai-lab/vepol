@@ -34,7 +34,7 @@ from .auth import Auth
 from .config import Config
 from .evidence import diff_kb
 from .runs import BOARD_STAGES, Conversation, RunStore
-from .sessions import UnsafeSessionName, attach_command, session_name
+from .sessions import RUNTIME_SUFFIX, UnsafeSessionName, attach_command, session_name
 from .session_manager import SessionManager
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -276,10 +276,12 @@ def create_app(
         title = title.strip()[:200] if isinstance(title, str) else ""
         if mode not in ({"session", "terminal"} if cfg.desktop else {"oneshot", "session", "terminal"}):
             raise HTTPException(status_code=400, detail="unknown transport")
-        if runtime not in cfg.allowed_runtimes:
+        # The in-app terminal runs any listed agent CLI; structured sessions and one-shot runs need Claude or Codex.
+        allowed = RUNTIME_SUFFIX if mode == "terminal" else cfg.allowed_runtimes
+        if runtime not in allowed:
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown runtime {runtime!r}; allowed: {list(cfg.allowed_runtimes)}",
+                detail=f"unknown runtime {runtime!r}; allowed: {list(allowed)}",
             )
         board_stage = body.get("board_stage")
         if board_stage is not None and (not isinstance(board_stage, str) or board_stage not in BOARD_STAGES):
@@ -434,7 +436,7 @@ def create_app(
         conv = app.state.store.get_conversation(conv_id)
         if conv is None:
             raise HTTPException(status_code=404, detail="no such conversation")
-        if conv.runtime not in ("claude", "codex", "agy"):
+        if conv.runtime not in RUNTIME_SUFFIX:
             raise HTTPException(
                 status_code=400,
                 detail=f"conversation runtime {conv.runtime!r} has no interactive session form",
