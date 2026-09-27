@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Generate the Vepol app icon.
 
-Draws the 1024x1024 master on macOS Big Sur+ geometry (824x824 squircle inside a
-1024 canvas, baked drop shadow), downsamples every required size with LANCZOS and
-packs them into ``Vepol.icns`` with the system ``iconutil``.
+Draws the 1024x1024 master on the macOS icon grid (an 824x824 continuous-corner
+rounded rectangle, corner radius 185.4, inside a 1024 canvas, with the template's
+small drop shadow), downsamples every required size with LANCZOS and packs them
+into ``Vepol.icns`` with the system ``iconutil``. macOS 26 puts an icon whose
+outline differs from this shape into a grey tile, so the outline must match it.
 
 Requires Pillow; the app build itself does not — it consumes the committed
 ``Vepol.icns``. Regenerate only when the artwork changes:
@@ -13,7 +15,6 @@ Requires Pillow; the app build itself does not — it consumes the committed
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import shutil
 import subprocess
@@ -27,7 +28,8 @@ except ModuleNotFoundError:  # pragma: no cover - developer tool, not a build st
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIZE = 1024
 SS = 4      # supersample factor for the vector artwork
-PAD = 100   # content inset: an 824x824 squircle inside the 1024 canvas
+PAD = 100   # content inset: an 824x824 shape inside the 1024 canvas
+RADIUS = 185.4  # corner radius of the macOS icon shape at 824x824
 
 # Icon palette, aligned with the Face UI accent tokens.
 INK_ON_PLATE = (255, 255, 255, 242)
@@ -42,23 +44,41 @@ ICNS_SIZES = [
 ]
 
 
-def _squircle_polygon(cx, cy, a, b, n=5.0, steps=1440):
-    """Superellipse outline — the continuous curve Apple's icon grid uses."""
+def _cubic(p0, p1, p2, p3, n=64):
+    return [tuple((1 - t) ** 3 * p0[i] + 3 * (1 - t) ** 2 * t * p1[i]
+                  + 3 * (1 - t) * t ** 2 * p2[i] + t ** 3 * p3[i] for i in range(2))
+            for t in (k / n for k in range(1, n + 1))]
+
+
+def _continuous_rect(x0, y0, x1, y1, r):
+    """Apple's continuous-corner rounded rectangle, clockwise from the top edge.
+
+    Each corner is three cubic curves that start 1.5287 r from the corner; these
+    are the published reverse-engineered coefficients of the system shape.
+    """
+    a, b, c, d, e, f, g = (1.52866483, 1.08849323, 0.86840689, 0.63149399,
+                           0.07491100, 0.37282392, 0.16905956)
+    curves = (((b, 0), (c, 0), (d, e)), ((f, g), (g, f), (e, d)), ((0, c), (0, b), (0, a)))
     pts = []
-    for i in range(steps):
-        t = 2 * math.pi * i / steps
-        ct, st = math.cos(t), math.sin(t)
-        pts.append((cx + a * math.copysign(abs(ct) ** (2.0 / n), ct),
-                    cy + b * math.copysign(abs(st) ** (2.0 / n), st)))
+    # (corner, direction along the incoming edge, direction along the outgoing edge)
+    for (cx, cy), (ix, iy), (ox, oy) in (((x1, y0), (-1, 0), (0, 1)), ((x1, y1), (0, -1), (-1, 0)),
+                                         ((x0, y1), (1, 0), (0, -1)), ((x0, y0), (0, 1), (1, 0))):
+        at = lambda u, v: (cx + (ix * u + ox * v) * r, cy + (iy * u + oy * v) * r)
+        cur = at(a, 0)
+        pts.append(cur)
+        for c1, c2, end in curves:
+            end = at(*end)
+            pts.extend(_cubic(cur, at(*c1), at(*c2), end))
+            cur = end
     return pts
 
 
 def _squircle_mask():
     m = Image.new("L", (SIZE * SS, SIZE * SS), 0)
-    half = (SIZE - 2 * PAD) / 2.0
     ImageDraw.Draw(m).polygon(
-        _squircle_polygon(SIZE / 2.0 * SS, SIZE / 2.0 * SS, half * SS, half * SS), fill=255)
-    return m.resize((SIZE, SIZE), Image.LANCZOS)
+        [(x * SS, y * SS) for x, y in _continuous_rect(PAD, PAD, SIZE - PAD, SIZE - PAD, RADIUS)],
+        fill=255)
+    return m.resize((SIZE, SIZE), Image.BOX)
 
 
 def _vertical_gradient(top, bottom):
@@ -83,10 +103,11 @@ def _plate(top, bottom):
     glow = glow.filter(ImageFilter.GaussianBlur(r * 0.55)).point(lambda v: v // 3)
     body = Image.composite(Image.new("RGB", (SIZE, SIZE), (255, 255, 255)), body, glow)
 
+    # The icon template's shadow: small, so the outline still reads as the system shape.
     shadow = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    shadow.paste((0, 0, 0, 255), (0, 0), mask.point(lambda v: int(v * 0.42)))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(18))
-    shadow = shadow.transform(shadow.size, Image.AFFINE, (1, 0, 0, 0, 1, -14))
+    shadow.paste((0, 0, 0, 255), (0, 0), mask.point(lambda v: int(v * 0.30)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(5))
+    shadow = shadow.transform(shadow.size, Image.AFFINE, (1, 0, 0, 0, 1, -10))
 
     plate = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     plate.paste(body, (0, 0), mask)
