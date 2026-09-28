@@ -31,6 +31,34 @@ bare URL; reload does not discard authentication. Cmd-W closes the window
 while preserving work. Reopen from the Dock or Cmd-0. Cmd-Q checks for active
 work and, when idle, closes the owned protocol clients and backend naturally.
 
+## Memory
+
+The app opens on **Memory**: one card per knowledge base, the hub first, then
+every project with the newest activity first. A card shows the project's
+**Now** (the first paragraph of `state.md`), **Next** (the first task in
+progress, else the first ready one, with counts from `kb-board`), the **Last
+decision** in `decisions/` and the **Last activity** in `log.md`, plus a status
+chip: «Up to date», «Needs review» (the log is more than 3 days newer than
+`state.md`) or «No state file». Clicking a card opens the project's memory page:
+State, Plans, Decisions, History, Lessons (the prevention rules in
+`incidents.md`) and Files, all rendered as Markdown and read-only; «New session
+here» opens a terminal in that project.
+
+### Sample workspace
+
+`demo/workspace/` is an invented company with a hub and three developer projects
+(`acme-web`, `design-system`, `billing-api`). After building the app, open it
+with:
+
+```sh
+./demo.sh
+```
+
+The script copies the sample to a fresh `~/.vepol/demo-workspace/` (replacing
+the previous copy) and runs the app on port 8782 with its own state directory,
+its own tmux server and `KB_HUB` set to the copy. Your own conversations, your
+tmux sessions and `~/knowledge` are not touched.
+
 ## Terminal sessions
 
 - «+ New session» (or «+» in a board column, which also places the session in
@@ -85,9 +113,10 @@ runs keep their history and still open in the app.
   states come from the files the scheduler already writes, and «Unknown» means
   there is no evidence.
 - **Session view** — a project → sessions tree on the left (every project,
-  most recent activity first) with the same state dots, and on the right the tabs «Session» and «Knowledge». Knowledge is a
+  most recent activity first) with the same state dots, and on the right the tabs «Session» and «Memory». Memory is a
   read-only explorer of the project's `knowledge/` folder (folders collapse, a
-  name filter searches all of them, files open as plain text up to 512 KB).
+  name filter searches all of them, Markdown files open rendered and other
+  files as plain text, up to 512 KB) with a link «Open project memory».
 - **Usage bar** along the bottom: `Claude 5h · 7d` and Codex's current
   windows as used percentages with «as of» times, grey when older than 6 hours, «no data» when
   there is none. Codex numbers come from its own rollout files under
@@ -123,7 +152,7 @@ From this directory, outside tmux:
 
 ```sh
 .venv/bin/python -m pytest tests/
-for s in board tasks automations orca-extras projects; do
+for s in memory board tasks automations orca-extras projects; do
   NODE_PATH=/path/to/node_modules VEPOL_FACE_PYTHON=$PWD/.venv/bin/python \
     node tests/browser/$s-e2e.cjs
 done

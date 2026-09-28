@@ -117,6 +117,7 @@ function processOf(pid) {
     page.on('request', r => { const p = new URL(r.url()).pathname; if (r.method() === 'POST' && /\/(messages|retry|stop)$/.test(p)) evidence.runtimeCalls.push(p); });
     await page.goto(base);
     await page.locator('#board-view').waitFor({ state: 'visible' });
+    await page.locator('[data-board-view="sessions"]').click();
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 2, 'two cards');
 
     // O1. Tree: every project, newest activity first (beta's session is the newest, projects without
@@ -174,7 +175,11 @@ function processOf(pid) {
     await page.locator('#kb-filter').fill('a.md');
     assert.deepEqual(await kbPaths(), ['decisions/a.md']);
     await page.locator('#kb-tree [data-kb-path="decisions/a.md"]').click();
-    await waitUntil(async () => await page.locator('#kb-file-text').textContent() === orca.files['decisions/a.md'], 'decisions/a.md text');
+    // Markdown is rendered: the heading and paragraph of decisions/a.md are elements, no raw '#'.
+    await waitUntil(async () => await page.locator('#kb-file-text h1').count() === 1, 'decisions/a.md rendered');
+    assert.equal(await page.locator('#kb-file-text h1').textContent(), 'Decision A');
+    assert.equal(await page.locator('#kb-file-text p').textContent(), 'Keep the knowledge panel read-only.');
+    assert(!(await page.locator('#kb-file-text').textContent()).includes('#'), 'no raw markdown heading');
     await page.screenshot({ path: path.join(OUT, 'knowledge.png'), fullPage: true });
     const escape = await fetch(`${base}/api/knowledge/file?target=alpha&path=${encodeURIComponent('../../etc/hosts')}`, { headers: { 'X-Vepol-Token': boot.token } });
     assert.equal(escape.status, 404);
@@ -198,7 +203,7 @@ function processOf(pid) {
     await waitUntil(async () => !(await page.locator('#tree-error').isVisible()), 'notice cleared by the next good list', 7000);
     assert.deepEqual(await treeShape(page), treeBefore);
     evidence.cases.O2 = { entries: kbEntries, filtered: ['decisions/a.md'], escapeStatus: escape.status, hugeStatus: 413, treeRefreshError: 'Could not refresh', mtimes: mtimesBefore };
-    evidence.steps.push('O2 knowledge tree lists the fixture files, filter narrows to one, click shows its exact text; ../../etc/hosts is 404; huge.md is 413 "too large to show"; a failed list poll keeps the tree with "Could not refresh"; mtimes unchanged');
+    evidence.steps.push('O2 knowledge tree lists the fixture files, filter narrows to one, click shows it rendered (heading and paragraph); ../../etc/hosts is 404; huge.md is 413 "too large to show"; a failed list poll keeps the tree with "Could not refresh"; mtimes unchanged');
 
     // O3. Column "+": gamma has no terminal; "+" in Research asks for the project, then creates, starts and places it there.
     await page.locator('[data-board-view="sessions"]').click();

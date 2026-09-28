@@ -44,9 +44,15 @@ terminal_session.TerminalSession._binary = _fixture_binary
 # The pane's shell reads no startup files, so the owner's own rc never runs in a fixture.
 terminal_session.TerminalSession._shell_argv = lambda self: ["/bin/zsh", "-f"]
 
-hub = fixture_root / "hub"
-for slug in ("alpha", "beta", "gamma", "delta"):
-    (hub / "projects" / slug).mkdir(parents=True, exist_ok=True)
+WORKSPACE = os.environ.get("VEPOL_FIXTURE_WORKSPACE")
+if WORKSPACE:
+    # A copy of a sample workspace (demo/workspace): its knowledge/ is the hub, projects/ its relative links.
+    shutil.copytree(WORKSPACE, fixture_root / "workspace", symlinks=True)
+    hub = fixture_root / "workspace" / "knowledge"
+else:
+    hub = fixture_root / "hub"
+    for slug in ("alpha", "beta", "gamma", "delta"):
+        (hub / "projects" / slug).mkdir(parents=True, exist_ok=True)
 
 # kb-board, _kb_processes.py and the backlog template (read-only): VEPOL_FIXTURE_KB_ROOT if set,
 # else the Vepol repo this app sits in (so a release tests its own tools), else ~/knowledge.
@@ -83,6 +89,13 @@ def fill_board(slug: str, tasks: list[tuple[str, str, str, str]]) -> None:
                 kb_board("close", path, "--plan-item-id", item_id, "--claim-id", claim_id,
                          "--actor", actor, "--outcome", "closed")
 
+
+memory = None
+if WORKSPACE:
+    (hub / "bin").mkdir(parents=True, exist_ok=True)
+    (hub / "bin" / "kb-board").symlink_to(REAL_HUB / "bin" / "kb-board")
+    memory = {"workspace": str(fixture_root / "workspace"), "hub": str(hub),
+              "slugs": [p.name for p in sorted((hub / "projects").iterdir())]}
 
 expected = None
 if os.environ.get("VEPOL_FIXTURE_TASKS") == "1":
@@ -213,6 +226,8 @@ if orca is not None:
     print(json.dumps({"orca": orca}), flush=True)
 if projects is not None:
     print(json.dumps({"projects": projects}), flush=True)
+if memory is not None:
+    print(json.dumps({"memory": memory}), flush=True)
 # uvicorn re-raises SIGTERM after shutdown; exiting through Python runs the cleanup below.
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 try:

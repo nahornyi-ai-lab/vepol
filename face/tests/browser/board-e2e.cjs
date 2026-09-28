@@ -70,6 +70,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     observe(page);
     await page.goto(base);
     await page.locator('#board-view').waitFor({ state: 'visible' });
+    await page.locator('[data-board-view="sessions"]').click();
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 60, '60 visible cards');
     await page.screenshot({ path: path.join(OUT, 'desktop.png'), fullPage: true });
     evidence.steps.push('Initial board renders 60 real API-backed cards at 1440x1000');
@@ -96,7 +97,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     assert.doesNotMatch(JSON.stringify(chrome), /[\u0400-\u04ff]/, 'no Cyrillic in the board chrome');
     assert.deepEqual(chrome.columns, columnNames);
     assert.deepEqual(chrome.stageOptions, columnNames);
-    assert.deepEqual(chrome.views, ['Sessions', 'Tasks', 'Automations']);
+    assert.deepEqual(chrome.views, ['Memory', 'Sessions', 'Tasks', 'Automations']);
     assert.deepEqual(chrome.columnAdd, columnNames.map(n => `New session in ${n}`));
     const badgeSet = ['Agent replied', 'Stopped', 'No full answer', 'Error', 'Run interrupted', 'Agent working'];
     assert(chrome.badges.length && chrome.badges.every(b => badgeSet.includes(b)), `badges ${JSON.stringify(chrome.badges)}`);
@@ -105,8 +106,9 @@ async function waitUntil(fn, label, timeout = 10000) {
     assert.equal(chrome.count, 'Total: 60');
     assert.equal(chrome.newSession, '+ New session');
     evidence.chrome = chrome;
-    evidence.steps.push(`UI-01 board chrome is English: columns ${columnNames.join('/')}, views Sessions/Tasks/Automations, badges ${chrome.badges.join(', ')}`);
+    evidence.steps.push(`UI-01 board chrome is English: columns ${columnNames.join('/')}, views Memory/Sessions/Tasks/Automations, badges ${chrome.badges.join(', ')}`);
     await page.reload();
+    await page.locator('[data-board-view="sessions"]').click();
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 60, 'injected authentication survives reload');
     assert.equal(new URL(page.url()).search, '');
     evidence.steps.push('Desktop document-start token injection survives reload at a bare URL');
@@ -242,6 +244,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     observe(page);
     await page.goto(base);
     await page.locator('#board-view').waitFor({ state: 'visible' });
+    await page.locator('[data-board-view="sessions"]').click();
     await column(page, 'research').locator(`[data-conversation-id="${dragId}"]`).waitFor();
     await column(page, 'completed').locator(`[data-conversation-id="${selectId}"]`).waitFor();
     const savedDrag = JSON.parse(fs.readFileSync(path.join(OUT, 'state', `conv-${dragId}.json`), 'utf8'));

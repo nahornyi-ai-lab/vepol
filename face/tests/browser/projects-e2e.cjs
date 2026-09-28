@@ -64,8 +64,8 @@ async function waitUntil(fn, label, timeout = 10000) {
     const pickerSlugs = () => page.locator('#picker-list [data-pick]').evaluateAll(rows => rows.map(r => r.dataset.pick));
     const convOf = async (slug) => (await api('/api/conversations')).find(c => c.target === slug);
 
-    // 1. «+ New session» lists every project, newest activity first, though none has a session yet.
-    await page.locator('#board-newconv').click();
+    // 1. «+ New session» (sidebar; the app opens on Memory) lists every project, newest activity first, though none has a session yet.
+    await page.locator('#newconv').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
     await waitUntil(async () => JSON.stringify(await pickerSlugs()) === JSON.stringify(order), `picker order ${order}`);
     assert.match(await page.locator('#picker-list [data-pick="gamma"] .pwhen').textContent(), /^1 h ago$/);
