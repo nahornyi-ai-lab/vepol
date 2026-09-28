@@ -203,10 +203,10 @@
   #terminal { flex: 1; min-height: 0; padding: 10px 12px 4px; box-sizing: content-box; background: #000; }
   #terminal .xterm { height: 100%; }
   .agent-state.alive { color: var(--ok); }
-  .agent-state.not_running { color: var(--ink-dim); }
+  .agent-state.not_running, .agent-state.shell { color: var(--ink-dim); }
   .agent-state.unknown { color: var(--warn); }
   .session-activity.alive { color: var(--ok); }
-  .session-activity.not_running { color: var(--ink-dim); }
+  .session-activity.not_running, .session-activity.shell { color: var(--ink-dim); }
   .session-activity.unknown { color: var(--warn); }
   #terminal-start { padding: 4px 10px; font-size: 12px; }
   .conversation-heading { flex-wrap: wrap; }
@@ -490,7 +490,7 @@
     ["working", "Working", "#d5a445"], ["review", "Review", "#668ddd"], ["completed", "Done", "#62a883"]];
   const ACTIVITY = { idle: "Not started", running: "Agent working", done: "Agent replied",
     failed: "Error", degraded: "No full answer", interrupted: "Run interrupted", stopped: "Stopped", waiting: "Waiting for you", submitted: "Sent to terminal",
-    alive: "Agent running", not_running: "Agent not running", unknown: "State unknown" };
+    alive: "Agent running", not_running: "Agent not running", shell: "Agent not running · shell open", unknown: "State unknown" };
   const MODES = {session: "Persistent session", terminal: "Terminal · tmux", oneshot: "One-shot run"};
   let conversations = [];
   let draggingId = null;
@@ -578,7 +578,7 @@
   }
 
   // Project → sessions tree: every project, newest activity first, its sessions nested under it.
-  const AGENT_DOT = { alive: "alive", not_running: "not_running" };
+  const AGENT_DOT = { alive: "alive", not_running: "not_running", shell: "not_running" };
   let treeHtml = "";
 
   function paintTree() {
@@ -652,6 +652,12 @@
 
   function renderConvs(list) {
     conversations = list;
+    // The open terminal's header follows the agent (exit to the shell, a restart) without a reload. A list that
+    // differs only triggers a fresh read: a list requested before a change may arrive after it.
+    // The session on screen, which a project click leaves shown although it clears state.conv.
+    const open = list.find((c) => c.id === $("terminal-start").dataset.conv);
+    if (open && state.view === "chat" && state.transport === "terminal" && open.agent
+        && `${open.agent}:${open.pid || ""}` !== $("agent-state").dataset.shown) refreshOpenConversation(open.id).catch(() => {});
     $("tree-error").hidden = true;
     paintBoard();
     paintTree();
@@ -1225,9 +1231,10 @@
     $("terminal-start").dataset.conv = conv.id;
     if (state.transport !== "terminal") { el.textContent = ""; return; }
     const agent = conv.agent || "unknown";
+    el.dataset.shown = `${agent}:${conv.pid || ""}`;
     el.classList.add(agent);
     if (agent === "alive") el.textContent = `Agent running · PID ${conv.pid}`;
-    else if (agent === "not_running") { el.textContent = "Agent not running"; $("terminal-start").hidden = false; }
+    else if (agent === "not_running" || agent === "shell") { el.textContent = ACTIVITY[agent]; $("terminal-start").hidden = false; }
     else el.textContent = `State unknown${conv.agent_reason ? " · " + conv.agent_reason : ""}`;
   }
 
@@ -1282,6 +1289,7 @@
   async function refreshOpenConversation(id) {
     const conv = await api(`/api/conversations/${id}`);
     if (state.conv === id) applyConversation(conv);
+    else if (!state.conv && $("terminal-start").dataset.conv === id) renderAgentState(conv);
   }
 
   function attachTerminal(id) {
@@ -1304,8 +1312,9 @@
         if (ev.type === "not_running" || ev.type === "exited") {
           ended = true;
           // Say it where the owner is looking; hide the cursor so the pane does not look like it takes input.
-          const what = ev.type === "exited" ? "The agent has exited." : "The agent is not running.";
-          term.obj.write(`\x1b[?25l\r\n\x1b[90m${what} Press Start above to open a new session.\x1b[0m\r\n`);
+          const what = ev.type === "exited" ? "The terminal has closed. Press Start above to open a new one."
+            : "The terminal is not open. Press Start above to open it.";
+          term.obj.write(`\x1b[?25l\r\n\x1b[90m${what}\x1b[0m\r\n`);
           refreshOpenConversation(id).catch(() => {});
         }
         return;

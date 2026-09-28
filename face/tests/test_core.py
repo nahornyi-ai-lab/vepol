@@ -454,12 +454,14 @@ def test_every_listed_agent_cli_opens_as_a_terminal_session(client, monkeypatch)
     assert c.post("/api/conversations", json={"target": "hub", "runtime": "agy", "transport": "session"},
                   headers=h).status_code == 400
 
-    # The pane runs the agent's own interactive CLI; the newer agents take no extra arguments.
+    # The pane's shell gets the agent's own interactive CLI typed in; the newer agents take no extra arguments.
     monkeypatch.setattr(TerminalSession, "_binary", lambda self, rt: f"/fake/{rt}")
     for runtime in ("hermes", "opencode", "grok"):
-        argv = TerminalSession(cwd="/tmp/project", project="hub", runtime=runtime,
-                               on_event=lambda e: None, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})._runtime_command()
-        assert argv[0] == "/usr/bin/env" and argv[-1] == f"/fake/{runtime}", argv
+        session = TerminalSession(cwd="/tmp/project", project="hub", runtime=runtime,
+                                  on_event=lambda e: None, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
+        assert session._agent_argv() == [f"/fake/{runtime}"]
+        pane = session._pane_command()
+        assert pane[0] == "/usr/bin/env" and pane[-2:] == session._shell_argv(), pane
 
 
 def test_api_rejects_oversized_payload(client):

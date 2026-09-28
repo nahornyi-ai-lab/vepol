@@ -587,10 +587,10 @@ def create_app(
                 if reading in done:
                     data = reading.result()
                     if not data:
-                        # Our tmux client ended. An external detach leaves the agent alive:
-                        # close without "exited" so the page reconnects. Otherwise it is gone.
+                        # Our tmux client ended. An external detach leaves the terminal open (agent or
+                        # shell): close without "exited" so the page reconnects. Otherwise it is gone.
                         live = await loop.run_in_executor(None, terminal_mod.liveness, name, env)
-                        if live["agent"] != "alive":
+                        if live["agent"] not in ("alive", "shell"):
                             await websocket.send_json({"type": "exited"})
                         break
                     await websocket.send_bytes(data)
@@ -599,10 +599,13 @@ def create_app(
                     message = receiving.result()
                     if message["type"] == "websocket.disconnect":
                         break
-                    if message.get("bytes"):
-                        os.write(master, message["bytes"])
-                    elif message.get("text"):
-                        _apply_resize(master, message["text"])
+                    # A frame racing the tmux client's exit must not end the bridge before the EOF
+                    # branch decides between "exited" and a silent reconnect.
+                    with contextlib.suppress(OSError):
+                        if message.get("bytes"):
+                            os.write(master, message["bytes"])
+                        elif message.get("text"):
+                            _apply_resize(master, message["text"])
                     receiving = asyncio.create_task(websocket.receive())
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
@@ -786,6 +789,7 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
             # The paste is the whole job: the terminal shows the rest, so the
             # run closes now and never marks the app busy.
             reason = result.get("reason") or "Message sent to the terminal."
+            store.update_transport(conv_id, note="")  # an earlier "press Start" no longer applies
             store.finish_run(conv_id, run_id, "submitted", reason=reason, category="submitted",
                              evidence={"pid": result.get("pid"), "lane": "terminal"})
             bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "submitted",
@@ -796,7 +800,8 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
         store.finish_run(conv_id, run_id, status, text=result.get("text", ""),
                          reason=result.get("reason", ""), category=result.get("category"),
                          evidence={**evidence, "pid": result.get("pid"), "provider_session_id": result.get("session_id"), "lane": app.state.sessions.mode(conv)})
-        if not result.get("ok"):
+        # The header already offers Start when the shell is in front; that refusal is not a lasting note.
+        if not result.get("ok") and result.get("category") != "terminal_not_running":
             store.update_transport(conv_id, note=result.get("reason") or "Session transport failed")
         bus.publish(conv_id, {**result, "type": "run_finished", "run_id": run_id, "status": status, "evidence": evidence})
     except Exception as exc:

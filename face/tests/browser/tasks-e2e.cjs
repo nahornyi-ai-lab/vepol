@@ -169,7 +169,7 @@ async function tableRows(page, withProject = false) {
       const ppid = spawnSync('ps', ['-o', 'ppid=', '-p', String(detail.pid)], { encoding: 'utf8' }).stdout.trim();
       const parent = spawnSync('ps', ['-o', 'command=', '-p', ppid], { encoding: 'utf8' }).stdout.trim();
       assert.equal(cmd, '/bin/cat');
-      assert.match(parent, /tmux/);
+      assert.equal(parent, '/bin/zsh -f', 'the agent runs inside the pane shell');
       evidence.cases.T4.push({ task: task.id, conversation: conv.id, target: detail.target, title: detail.title,
         composer: text, runs: detail.runs.length, userMessages: 0, agent: detail.agent, pid: detail.pid, command: cmd, parent: parent.split(" /usr/bin/env")[0] });
       return conv.id;

@@ -217,28 +217,47 @@ function processOf(pid) {
     assert.equal(g1Detail.board_stage, 'research');
     await waitUntil(async () => processOf(g1Detail.pid).cmd === '/bin/cat', `pid ${g1Detail.pid} is /bin/cat`, 5000);
     const proc = processOf(g1Detail.pid);
-    assert.match(proc.parent, /tmux/);
+    assert.equal(proc.parent, '/bin/zsh -f', 'the agent runs inside the pane shell');
     assert.equal((await api('/api/conversations')).length, countBefore + 1);
-    // TERM-09: the agent exits (its session ends on the fixture's tmux); the header offers Start, and Start brings a new agent.
+    // TERM-09 (Orca-style): the agent exits → the shell holds the pane and works as a terminal; Start types the
+    // agent in again; closing the terminal says so, and Start opens a new one.
     const gSession = `kb-gamma-${g1.runtime}`;
+    const startOf = () => page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
+    const rows = async () => await page.locator('#terminal .xterm-rows').textContent();
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
-    fixtureTmux(boot.tmux_socket, 'kill-session', '-t', gSession);
-    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running' && await page.locator('#terminal-start').isVisible(), 'Agent not running + Start', 2000);
-    await waitUntil(async () => (await page.locator('#terminal .xterm-rows').textContent()).includes('The agent has exited. Press Start above to open a new session.'), 'the terminal itself says the agent exited', 2000);
-    // The owner's 2026-09-28 path: another project is clicked while the exited session is on screen; Start still starts it.
+    const panePid = fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}');
+    fixtureTmux(boot.tmux_socket, 'send-keys', '-t', gSession, 'C-d');
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start', 8000);
+    assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'shell', 'no auto-restart');
+    await page.locator('#terminal').click();
+    await page.keyboard.type('echo vepol-shell-$((20+22))');
+    await page.keyboard.press('Enter');
+    await waitUntil(async () => (await rows()).includes('vepol-shell-42'), 'the shell runs a command typed in the window', 5000);
+    // The owner's 2026-09-28 path: another project is clicked while the session is on screen; Start still acts on it.
     await page.locator('#tree .tree-project[data-slug="delta"]').click();
     await waitUntil(async () => (await node('delta')).active, 'delta project selected');
-    assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'not_running', 'no auto-restart');
-    const restart = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
+    const restart = startOf();
     await page.locator('#terminal-start').click();
     assert((await restart).ok(), 'Start succeeded');
     let restarted;
     await waitUntil(async () => (restarted = await api(`/api/conversations/${g1.id}`)).agent === 'alive', 'gamma agent alive again');
     assert.notEqual(restarted.pid, g1Detail.pid);
-    assert.equal(String(restarted.pid), fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'));
+    assert.equal(processOf(restarted.pid).cmd, '/bin/cat');
+    assert.equal(fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'), panePid, 'same shell, same terminal');
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${restarted.pid}` && !(await page.locator('#terminal-start').isVisible()), 'header shows the new PID');
-    evidence.cases.TERM09 = { session: gSession, firstPid: g1Detail.pid, newPid: restarted.pid };
-    evidence.steps.push(`TERM-09 kill-session ${gSession}: "Agent not running" + Start; Start gives PID ${restarted.pid} (was ${g1Detail.pid}) = #{pane_pid}`);
+    // Closing the terminal (the shell's session ends) is said in the pane; Start opens a new shell with the agent.
+    await waitUntil(async () => fixtureTmux(boot.tmux_socket, 'list-clients', '-t', gSession) !== '', 'the reopened page is attached');
+    fixtureTmux(boot.tmux_socket, 'kill-session', '-t', gSession);
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running' && await page.locator('#terminal-start').isVisible(), 'Agent not running + Start', 3000);
+    await waitUntil(async () => (await rows()).includes('The terminal has closed. Press Start above to open a new one.'), 'the terminal says it closed', 3000);
+    const reopen = startOf();
+    await page.locator('#terminal-start').click();
+    assert((await reopen).ok(), 'Start reopened the terminal');
+    let reopened;
+    await waitUntil(async () => (reopened = await api(`/api/conversations/${g1.id}`)).agent === 'alive', 'a new terminal with the agent');
+    assert.notEqual(fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'), panePid, 'a new shell');
+    evidence.cases.TERM09 = { session: gSession, panePid, firstPid: g1Detail.pid, restartedPid: restarted.pid, reopenedPid: reopened.pid };
+    evidence.steps.push(`TERM-09 agent exit → "shell open", echo ran in the pane; Start in the same shell → PID ${restarted.pid} (was ${g1Detail.pid}); kill-session → "terminal has closed"; Start → new shell, PID ${reopened.pid}`);
     await page.locator('#show-board').click();
     await page.locator(`#board-columns [data-stage="research"] [data-conversation-id="${g1.id}"]`).waitFor();
     // "+" again for gamma/codex (from another column): the existing card opens, its stage stays, a note says so.

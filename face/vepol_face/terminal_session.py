@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import os
 import pathlib
+import pwd
+import shlex
 import shutil
 import subprocess
 import tempfile
+import termios
 import threading
+import time
 from typing import Callable
 
 from .sessions import attach_command, build_send_prompt_plan, session_name
@@ -14,6 +18,17 @@ from .sessions import attach_command, build_send_prompt_plan, session_name
 TMUX_CANDIDATES = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
 # tmux's own wording when there is nothing to attach to. Anything else is "unknown".
 _NOT_RUNNING_MARKERS = ("no server running", "can't find", "no such", "error connecting", "no sessions")
+# Set on every session whose pane is a login shell with the agent typed into it; the value is the shell's
+# command name. Sessions without it (created before the shell layout) run the agent as the pane process.
+SHELL_MARKER = "@vepol-shell"
+
+
+def foreground_group(pid: int) -> int | None:
+    """The foreground process group of the terminal `pid` belongs to, from `ps`."""
+    probe = subprocess.run(["/bin/ps", "-o", "tpgid=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=5)
+    out = probe.stdout.strip()
+    return int(out) if probe.returncode == 0 and out.lstrip("-").isdigit() else None
 
 
 def tmux_binary(env: dict | None = None) -> str:
@@ -28,16 +43,19 @@ def tmux_binary(env: dict | None = None) -> str:
 
 
 def liveness(name: str, env: dict | None = None) -> dict:
-    """Agent state from process evidence only: the pane PID must exist and be alive.
+    """Agent state from process evidence only.
 
-    `alive` needs a PID that answers kill(0); no server, no session or a dead PID
-    is `not_running`; every other error is `unknown` with the reason. Screen
+    No server, no session or a dead pane PID is `not_running`. A shell-layout pane
+    is `shell` while the shell holds the terminal's foreground and `alive` (PID =
+    the foreground group) while anything else does; a legacy pane is `alive` while
+    its PID answers kill(0). Every other error is `unknown` with the reason. Screen
     output, silence and control-mode events are never consulted.
     """
     env = dict(os.environ if env is None else env)
     try:
         probe = subprocess.run(
-            [tmux_binary(env), "display-message", "-p", "-t", name, "#{pane_pid}"],
+            [tmux_binary(env), "display-message", "-p", "-t", name,
+             "#{pane_pid}\t#{" + SHELL_MARKER + "}\t#{pane_current_command}"],
             env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -57,9 +75,10 @@ def liveness(name: str, env: dict | None = None) -> dict:
             return {"agent": "unknown", "pid": None, "reason": str(exc)}
         if has.returncode != 0:
             return {"agent": "not_running", "pid": None, "reason": has.stderr.strip() or "no such session"}
+    fields = probe.stdout.strip("\n").split("\t")
     try:
-        pid = int(probe.stdout.strip())
-    except ValueError:
+        pid = int(fields[0])
+    except (IndexError, ValueError):
         return {"agent": "unknown", "pid": None, "reason": f"unexpected tmux output {probe.stdout.strip()!r}"}
     try:
         os.kill(pid, 0)
@@ -69,7 +88,19 @@ def liveness(name: str, env: dict | None = None) -> dict:
         pass  # exists, owned by someone else: still alive
     except OSError as exc:
         return {"agent": "unknown", "pid": pid, "reason": str(exc)}
-    return {"agent": "alive", "pid": pid, "reason": ""}
+    shell, current = (fields + ["", "", ""])[1:3]
+    if not shell:
+        return {"agent": "alive", "pid": pid, "reason": ""}
+    try:
+        group = foreground_group(pid)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"agent": "unknown", "pid": None, "reason": str(exc)}
+    if group is None or group <= 0:
+        return {"agent": "unknown", "pid": None, "reason": "no foreground process group"}
+    if group != pid:
+        return {"agent": "alive", "pid": group, "reason": ""}
+    # The pane process holds the terminal: the shell at its prompt, unless it exec'd another program.
+    return {"agent": "shell", "pid": None, "reason": ""} if current == shell else {"agent": "alive", "pid": pid, "reason": ""}
 
 
 class TerminalSession:
@@ -90,6 +121,7 @@ class TerminalSession:
         self._lock = threading.Lock()
         self._connected = False
         self._ready = False
+        self._ready_pid: int | None = None  # the foreground process the owner confirmed
         self._tmux = self._binary("tmux")
 
     @property
@@ -102,7 +134,8 @@ class TerminalSession:
 
     @property
     def ready(self) -> bool:
-        return self._ready
+        # A new agent (or any program typed in the shell) needs its own confirmation.
+        return self._ready and liveness(self.name, self._env)["pid"] == self._ready_pid
 
     def confirm_ready(self) -> None:
         """The owner confirms startup/login/trust is complete in the terminal."""
@@ -110,17 +143,64 @@ class TerminalSession:
             if not self._connected:
                 raise RuntimeError("Open the terminal before confirming readiness")
             self._run(["has-session", "-t", self.name])
-            self._ready = True
+            self._ready, self._ready_pid = True, liveness(self.name, self._env)["pid"]
         self._on_event({"type": "progress", "text": "Terminal input readiness confirmed by the owner"})
 
     def start(self) -> dict:
-        """Create or reuse the canonical tmux session. Only the owner's click calls this."""
+        """Open the terminal if needed and type the agent's command into its shell.
+
+        Only the owner's click calls this. A running program is never typed into.
+        """
         with self._lock:
-            self._connect(create=True)
+            agent = self._agent_argv()  # a missing CLI fails here, before any terminal opens
+            created = self._connect(create=True)
             # Invisible keeper: no status bar, wheel scrolls history, Ctrl-B reaches the agent.
             for option, value in (("status", "off"), ("mouse", "on"), ("prefix", "None")):
                 self._run(["set-option", "-t", self.name, option, value])
+            # A new shell may still be running its startup files (and their programs): wait for its prompt first.
+            if created or liveness(self.name, self._env)["agent"] == "shell":
+                self._wait_for_shell_input()
+            if liveness(self.name, self._env)["agent"] == "shell":
+                self._type_agent_command(agent)
         return liveness(self.name, self._env)
+
+    def _wait_for_shell_input(self) -> None:
+        # Until the shell's line editor has the terminal, so the command is not echoed twice.
+        deadline = time.monotonic() + 5
+        while True:
+            ready = self._shell_takes_input()
+            if ready is None:
+                raise RuntimeError("The terminal closed while starting")
+            if ready or time.monotonic() > deadline:
+                return  # after 5 s the caller types anyway if the shell holds the terminal
+            time.sleep(0.05)
+
+    def _type_agent_command(self, agent: list[str]) -> None:
+        # Clear whatever the owner left on the command line, then type the agent.
+        self._run(["send-keys", "-t", self.name, "C-e", "C-u"])
+        self._run(["send-keys", "-t", self.name, "-l", shlex.join(agent)])
+        self._run(["send-keys", "-t", self.name, "Enter"])
+        # Return once the agent holds the terminal, so the caller reports it running.
+        deadline = time.monotonic() + 3
+        while liveness(self.name, self._env)["agent"] == "shell" and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def _shell_takes_input(self) -> bool | None:
+        """True when the shell holds the foreground with its line editor on (tty not canonical); None if gone."""
+        probe = self._run(["display-message", "-p", "-t", self.name, "#{pane_pid} #{pane_tty}"], check=False)
+        fields = probe.stdout.split()
+        if probe.returncode != 0 or len(fields) != 2:
+            return None
+        pid, tty = int(fields[0]), fields[1]
+        try:
+            fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError:
+            return None
+        try:
+            canonical = bool(termios.tcgetattr(fd)[3] & termios.ICANON)
+        finally:
+            os.close(fd)
+        return not canonical and foreground_group(pid) == pid
 
     def liveness(self) -> dict:
         return liveness(self.name, self._env)
@@ -153,20 +233,36 @@ class TerminalSession:
             check=check,
         )
 
-    def _runtime_command(self) -> list[str]:
+    def _shell_argv(self) -> list[str]:
+        """The account's login shell, as a Terminal window opens it."""
+        try:
+            shell = pwd.getpwuid(os.getuid()).pw_shell
+        except KeyError:
+            shell = ""
+        if not (shell and os.path.isfile(shell) and os.access(shell, os.X_OK)):
+            shell = "/bin/zsh"
+        return [shell, "-l"]
+
+    def _pane_command(self) -> list[str]:
         # Existing tmux servers retain their own environment. Give this pane a
         # deliberate nonsecret environment instead of inheriting nested-agent
-        # markers or putting API credentials into tmux/agent argv.
+        # markers or putting API credentials into tmux/agent argv. The login
+        # shell then reads the owner's own startup files, like any terminal.
+        shell = self._shell_argv()
         safe_env = {
             "HOME": self._env.get("HOME", str(pathlib.Path.home())),
             "PATH": self._env.get("PATH", "/opt/homebrew/bin:/usr/bin:/bin"),
             "TERM": "xterm-256color",
         }
-        for key in ("USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR"):
+        for key in ("USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "KB_HUB"):
             if self._env.get(key):
                 safe_env[key] = self._env[key]
-        argv = ["/usr/bin/env", "-i", *[f"{key}={value}" for key, value in safe_env.items()]]
-        argv.append(self._binary(self.runtime))
+        safe_env["SHELL"] = shell[0]
+        return ["/usr/bin/env", "-i", *[f"{key}={value}" for key, value in safe_env.items()], *shell]
+
+    def _agent_argv(self) -> list[str]:
+        """The command typed into the pane's shell."""
+        argv = [self._binary(self.runtime)]
         if self.runtime == "codex":
             # User config may default to bypass mode. Keep this invocation in
             # a workspace sandbox with the CLI's normal human approval path.
@@ -184,37 +280,51 @@ class TerminalSession:
             argv += ["--add-dir", self.cwd]
         return argv
 
-    def _connect(self, create: bool = False) -> None:
+    def _connect(self, create: bool = False) -> bool:
+        """Attach to the canonical session; True when this call created it."""
         exists = self._run(["has-session", "-t", self.name], check=False).returncode == 0
         if self._connected:
             if exists:
-                return
-            # The agent exited and took its tmux session with it: forget the old pane.
+                return False
+            # The terminal closed and took its tmux session with it: forget the old pane.
             self._connected, self._ready, self._pid = False, False, None
         if exists and self.session_id:
             raise RuntimeError(
                 "The canonical terminal already exists; its provider identity cannot be replaced"
             )
+        created = not exists
         if not exists:
             if not create:
                 # Only the owner's Start click creates a session; never an auto-restart.
                 raise RuntimeError("The agent is not running. Click Start to open a new session.")
             self._run([
                 "new-session", "-d", "-s", self.name, "-c", self.cwd,
-                "-x", "160", "-y", "48", *self._runtime_command(),
+                "-x", "160", "-y", "48", *self._pane_command(),
             ])
+            self._run(["set-option", "-t", self.name, SHELL_MARKER, os.path.basename(self._shell_argv()[0])])
         pid = self._run(["display-message", "-p", "-t", self.name, "#{pane_pid}"]).stdout.strip()
         self._pid = int(pid)
         self._connected = True
         self._on_event({
             "type": "progress", "text": f"Terminal connected. {self.command}",
         })
+        return created
 
     def execute(self, prompt: str) -> dict:
         with self._lock:
             try:
                 self._connect()
-                if not self._ready:
+                live = liveness(self.name, self._env)
+                if live["agent"] == "shell":
+                    # A prompt pasted into the shell would run as shell commands.
+                    reason = "The agent is not running in this terminal. Press Start."
+                    self._on_event({"type": "progress", "text": reason})
+                    return {
+                        "ok": False, "submitted": False, "text": "", "reason": reason,
+                        "category": "terminal_not_running", "pid": self.pid, "session_id": self.session_id,
+                        "name": self.name, "command": self.command,
+                    }
+                if not self._ready or live["pid"] != self._ready_pid:
                     reason = (
                         "Terminal opened; the prompt has not been sent. "
                         f"Open {self.command}, finish startup/login/trust, "

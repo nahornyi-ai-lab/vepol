@@ -41,6 +41,8 @@ def _fixture_binary(self, runtime: str) -> str:
 
 
 terminal_session.TerminalSession._binary = _fixture_binary
+# The pane's shell reads no startup files, so the owner's own rc never runs in a fixture.
+terminal_session.TerminalSession._shell_argv = lambda self: ["/bin/zsh", "-f"]
 
 hub = fixture_root / "hub"
 for slug in ("alpha", "beta", "gamma", "delta"):
@@ -158,6 +160,13 @@ if os.environ.get("VEPOL_FIXTURE_ORCA") == "1":
     claude_usage.write_text(json.dumps({"rate_limits": {
         "five_hour": {"used_percentage": 12, "resets_at": int(now + 3600)},
         "seven_day": {"used_percentage": 40, "resets_at": int(now + 4 * 86400)}}, "at": int(now)}), encoding="utf-8")
+    # Its own roster and broker state (claude/codex recently fine), so routing never reads the machine's.
+    roster = fixture_root / "cli-tools.tsv"
+    roster.write_text("".join(f"{name} | path-any | /bin/cat | fixture\n" for name in ("claude", "codex")), encoding="utf-8")
+    broker = fixture_root / "broker-state.json"
+    broker.write_text(json.dumps({"providers": {name: {"last_success_at": stamp} for name in ("claude", "codex")}}),
+                      encoding="utf-8")
+    runtimes_mod.CLI_TSV, runtimes_mod.BROKER_STATE = roster, broker
     orca = {"knowledge": str(knowledge), "files": files,
             "codex_rollout": str(rollout), "claude_usage": str(claude_usage)}
 
