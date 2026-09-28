@@ -31,7 +31,7 @@ def discover_targets(hub: pathlib.Path | None = None) -> list[Target]:
     hub = pathlib.Path(hub or HUB)
     targets = [
         Target(
-            slug="hub", label="Vepol (hub orchestrator)",
+            slug="hub", label="Vepol hub",
             cwd=str(hub.parent), knowledge=str(hub), kind="hub",
         )
     ]

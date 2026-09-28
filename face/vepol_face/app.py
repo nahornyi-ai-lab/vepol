@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from . import automations as automations_mod
 from . import broker as broker_mod
 from . import knowledge_files as knowledge_mod
+from . import memory as memory_mod
 from . import runtimes as runtimes_mod
 from . import targets as targets_mod
 from . import tasks as tasks_mod
@@ -229,6 +230,17 @@ def create_app(
     def api_tasks(target: str | None = None) -> dict:
         try:
             return tasks_mod.list_tasks(hub_path, target)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
+
+    @app.get("/api/memory", dependencies=auth_dep)
+    def api_memory() -> dict:
+        return memory_mod.cards(hub_path)
+
+    @app.get("/api/memory/project", dependencies=auth_dep)
+    def api_memory_project(target: str = "") -> dict:
+        try:
+            return memory_mod.project(hub_path, target)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
 

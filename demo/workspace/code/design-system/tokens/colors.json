@@ -1,0 +1,9 @@
+{
+  "version": "3.0.0",
+  "color": {
+    "text": { "default": "#1d1f24", "muted": "#5b616e", "inverse": "#ffffff" },
+    "surface": { "default": "#ffffff", "raised": "#f5f6f8", "header": "#14213d" },
+    "action": { "primary": "#2446c7", "primary-hover": "#1b379f", "danger": "#b42318" },
+    "focus": { "ring": "#f5a524" }
+  }
+}

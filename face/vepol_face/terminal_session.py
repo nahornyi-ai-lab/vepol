@@ -157,7 +157,7 @@ class TerminalSession:
             "PATH": self._env.get("PATH", "/opt/homebrew/bin:/usr/bin:/bin"),
             "TERM": "xterm-256color",
         }
-        for key in ("USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR"):
+        for key in ("USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "KB_HUB"):
             if self._env.get(key):
                 safe_env[key] = self._env[key]
         argv = ["/usr/bin/env", "-i", *[f"{key}={value}" for key, value in safe_env.items()]]
