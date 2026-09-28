@@ -224,6 +224,10 @@ function processOf(pid) {
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
     fixtureTmux(boot.tmux_socket, 'kill-session', '-t', gSession);
     await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running' && await page.locator('#terminal-start').isVisible(), 'Agent not running + Start', 2000);
+    await waitUntil(async () => (await page.locator('#terminal .xterm-rows').textContent()).includes('The agent has exited. Press Start above to open a new session.'), 'the terminal itself says the agent exited', 2000);
+    // The owner's 2026-09-28 path: another project is clicked while the exited session is on screen; Start still starts it.
+    await page.locator('#tree .tree-project[data-slug="delta"]').click();
+    await waitUntil(async () => (await node('delta')).active, 'delta project selected');
     assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'not_running', 'no auto-restart');
     const restart = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
     await page.locator('#terminal-start').click();

@@ -411,7 +411,7 @@
   </div>
 
   <div class="col center">
-    <div class="conversation-heading"><button class="ghost" id="show-board">← Sessions</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button class="ghost" id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
+    <div class="conversation-heading"><button class="ghost" id="show-board">← Sessions</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
     <div id="terminal" hidden></div>
     <div class="thread" id="thread">
       <div class="empty">Pick a target and say something.</div>
@@ -1222,6 +1222,7 @@
     const el = $("agent-state");
     el.className = "hint agent-state";
     $("terminal-start").hidden = true;
+    $("terminal-start").dataset.conv = conv.id;
     if (state.transport !== "terminal") { el.textContent = ""; return; }
     const agent = conv.agent || "unknown";
     el.classList.add(agent);
@@ -1300,7 +1301,13 @@
       if (typeof e.data === "string") {
         let ev = {};
         try { ev = JSON.parse(e.data); } catch (_) {}
-        if (ev.type === "not_running" || ev.type === "exited") { ended = true; refreshOpenConversation(id).catch(() => {}); }
+        if (ev.type === "not_running" || ev.type === "exited") {
+          ended = true;
+          // Say it where the owner is looking; hide the cursor so the pane does not look like it takes input.
+          const what = ev.type === "exited" ? "The agent has exited." : "The agent is not running.";
+          term.obj.write(`\x1b[?25l\r\n\x1b[90m${what} Press Start above to open a new session.\x1b[0m\r\n`);
+          refreshOpenConversation(id).catch(() => {});
+        }
         return;
       }
       term.obj.write(new Uint8Array(e.data));
@@ -1819,16 +1826,15 @@
     send();
   };
   $("terminal-start").onclick = async () => {
-    const id = state.conv;
+    // The session on screen: a project click clears state.conv but leaves this session shown.
+    const id = $("terminal-start").dataset.conv;
     if (!id) return;
     $("terminal-start").disabled = true;
     try {
       await api(`/api/conversations/${id}/terminal/start`, {method: "POST"});
-      const conv = await api(`/api/conversations/${id}`);
-      if (state.conv !== id) return;
+      if ($("terminal-start").dataset.conv !== id) return;  // another session was opened meanwhile
       termRefused = null;
-      applyConversation(conv);
-      attachTerminal(id);
+      await openConv(id);
     } catch (err) {
       $("session-note").hidden = false;
       $("session-note").textContent = `Could not start the agent: ${err.message}`;

@@ -129,7 +129,8 @@ class TerminalSession:
         if runtime == "tmux":
             return tmux_binary(self._env)
         candidates = {
-            "claude": ["/opt/homebrew/bin/claude", str(pathlib.Path.home() / ".local/bin/claude")],
+            # Native install first: `claude update` updates it, a Homebrew/npm copy can lag behind.
+            "claude": [str(pathlib.Path.home() / ".local/bin/claude"), "/opt/homebrew/bin/claude"],
             "codex": [str(pathlib.Path.home() / ".local/bin/codex"), "/Applications/Codex.app/Contents/Resources/codex"],
             "agy": [str(pathlib.Path.home() / ".local/bin/agy"), "/opt/homebrew/bin/agy"],
             # These open their own interactive TUI in the pane's folder with no extra arguments.
