@@ -155,9 +155,36 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   [hidden] { display: none !important; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-  .app.board-mode { display: block; }
-  .app.board-mode > .left, .app.board-mode > .center, .app.board-mode > .right { display: none; }
-  #board-view { height: 100%; display: flex; flex-direction: column; padding: 28px 30px 18px; }
+  /* Sidebar on the left in every view; a tab strip over the main area; the main area shows a section or a session. */
+  .app { grid-template-rows: auto minmax(0, 1fr); }
+  .app > .left { grid-row: 1 / -1; grid-column: 1; }
+  #tabstrip { grid-row: 1; grid-column: 2 / -1; }
+  #board-view { grid-row: 2; grid-column: 2 / -1; min-width: 0; }
+  .app > .center { grid-row: 2; grid-column: 2; min-width: 0; }
+  .app > .right { grid-row: 2; grid-column: 3; }
+  .app.board-mode > .center, .app.board-mode > .right { display: none; }
+  .app:not(.board-mode) > #board-view { display: none; }
+  #board-view { display: flex; flex-direction: column; padding: 24px 30px 18px; overflow: hidden; }
+  .nav { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+  .nav button { background: transparent; color: var(--ink-dim); text-align: left; padding: 7px 10px; font-weight: 500; border: 1px solid transparent; }
+  .nav button:hover { background: var(--panel); color: var(--ink); }
+  .nav button[aria-selected="true"] { background: var(--panel); color: var(--ink); border-color: var(--line); font-weight: 600; }
+  #tabstrip { display: flex; align-items: stretch; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); background: var(--panel-2); overflow-x: auto; min-height: 38px; }
+  .tab { display: inline-flex; align-items: center; gap: 7px; max-width: 240px; flex: 0 0 auto; padding: 0 4px 0 11px;
+    border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--ink-dim); font-size: 12px; cursor: pointer; }
+  .tab:hover { background: var(--panel); color: var(--ink); }
+  .tab[aria-selected="true"] { background: var(--panel); color: var(--ink); border-color: var(--line); margin-bottom: -1px; font-weight: 600; }
+  .tab .tab-proj { color: var(--ink-dim); font-weight: 400; flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .tab-close { background: transparent; color: var(--ink-dim); padding: 2px 6px; font-size: 14px; line-height: 1; font-weight: 400; border-radius: 5px; }
+  .tab .tab-close:hover { background: var(--panel-2); color: var(--ink); }
+  #tab-new { background: transparent; color: var(--ink-dim); padding: 0 10px; font-size: 17px; font-weight: 400; flex: 0 0 auto; }
+  #tab-new:hover { color: var(--accent); }
+  #tabs-empty { align-self: center; padding: 0 8px; }
+  #task-line { display: flex; align-items: center; gap: 10px; margin: 8px 14px 0; }
+  #task-line span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #task-line button { padding: 4px 10px; font-size: 12px; flex: none; }
+  #session-note { margin: 8px 14px 0; }
   .board-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
   .board-heading h1 { font-size: 25px; letter-spacing: -.04em; }
   .board-description { margin: 7px 0 0; color: var(--ink-dim); line-height: 1.5; font-size: 13px; }
@@ -288,8 +315,13 @@
     .auto-layout.with-detail { grid-template-columns: minmax(0, 1fr); }
   }
   @media (max-width: 560px) {
-    .app { grid-template-columns: 1fr; }
-    .left { display: none; }
+    /* Narrow: the sidebar keeps only the sections, as a row on top. */
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(0, 1fr); }
+    .app > .left { grid-row: 1; grid-column: 1; flex-direction: row; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--line); }
+    .app > .left > :not(.nav) { display: none; }
+    .nav { flex-direction: row; margin: 0; }
+    #tabstrip { grid-row: 2; grid-column: 1; }
+    #board-view, .app > .center { grid-row: 3; grid-column: 1; }
     .center { min-width: 0; }
     .board-heading h1 { font-size: 22px; }
     .board-heading button { padding: 8px 11px; white-space: nowrap; }
@@ -342,12 +374,13 @@
 </head>
 <body>
 <div class="app board-mode" id="app">
+  <div id="tabstrip" role="tablist" aria-label="Open sessions">
+    <span class="hint" id="tabs-empty">Open a session and it stays here as a tab.</span>
+    <button id="tab-new" aria-label="New session" title="New session">+</button>
+  </div>
   <section id="board-view" aria-label="Session board">
     <div class="board-heading">
       <div>
-        <div class="view-switch" role="tablist" aria-label="View">
-          <button role="tab" data-board-view="sessions" aria-selected="true">Sessions</button><button role="tab" data-board-view="tasks" aria-selected="false">Tasks</button><button role="tab" data-board-view="automations" aria-selected="false">Automations</button>
-        </div>
         <h1 id="board-title">Sessions</h1><p class="board-description" id="board-description">All your work in one place. Move cards between stages and jump back into any conversation.</p><div class="project-path" id="board-project-path" hidden></div></div>
       <button id="board-newconv">+ New session</button>
     </div>
@@ -396,28 +429,34 @@
   <div class="col left">
     <h1 id="product-name">Vepol Face</h1>
     <div class="sub" id="bind">local · loopback</div>
+    <nav class="nav" role="tablist" aria-label="Sections">
+      <button role="tab" data-board-view="sessions" aria-selected="true">Sessions</button>
+      <button role="tab" data-board-view="tasks" aria-selected="false">Tasks</button>
+      <button role="tab" data-board-view="automations" aria-selected="false">Automations</button>
+    </nav>
+    <button class="ghost" style="width:100%;margin-bottom:14px" id="newconv">+ New session</button>
 
     <h2>Projects</h2>
     <input class="filter" id="tfilter" placeholder="filter projects…" aria-label="Filter projects" />
     <div id="tree" class="scroller" aria-label="Projects and sessions"></div>
     <div id="tree-error" class="hint tone-warn" role="status" hidden>Could not refresh</div>
 
-    <h2>Runtime</h2>
-    <div id="runtimes"></div>
-    <div id="native-mode" hidden><h2>New session</h2>
+    <div id="browser-runtime"><h2>Runtime</h2>
+      <div id="runtimes"></div></div>
+    <div id="native-mode" hidden>
       <select id="transport-select" class="filter" aria-label="New session mode"><option value="terminal">Terminal · tmux</option></select>
     </div>
-    <button class="ghost" style="width:100%;margin-top:10px" id="newconv">+ New session</button>
   </div>
 
   <div class="col center">
-    <div class="conversation-heading"><button class="ghost" id="show-board">← Sessions</button><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
+    <div class="conversation-heading"><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
+    <div id="session-note" class="banner warn" hidden></div>
+    <div id="task-line" class="banner" hidden><span id="task-text"></span><button id="task-type">Type into terminal</button></div>
     <div id="terminal" hidden></div>
     <div class="thread" id="thread">
       <div class="empty">Pick a target and say something.</div>
     </div>
-    <div class="composer">
-      <div id="session-note" class="banner warn" hidden></div>
+    <div class="composer" id="composer">
       <div id="permissions" style="max-height:36vh;overflow:auto"></div>
       <textarea id="prompt" placeholder="Ask Vepol…  (⌘↵ to send)"></textarea>
       <div class="row">
@@ -499,6 +538,7 @@
   let refreshVersion = 0;
   let boardSignature = "";
   let openVersion = 0;
+  let taskLine = null;  // {id, text}: a task line offered for typing into that session's terminal
 
   const api = async (path, opts = {}) => {
     const res = await fetch(path, {
@@ -659,6 +699,14 @@
     if (open && state.view === "chat" && state.transport === "terminal" && open.agent
         && `${open.agent}:${open.pid || ""}` !== $("agent-state").dataset.shown) refreshOpenConversation(open.id).catch(() => {});
     $("tree-error").hidden = true;
+    // A session that left the list takes its tab with it.
+    const known = new Set(list.map((c) => c.id));
+    if (tabs.ids.some((id) => !known.has(id))) {
+      tabs.ids = tabs.ids.filter((id) => known.has(id));
+      if (tabs.active && !known.has(tabs.active)) tabs.active = null;
+      saveTabs();
+    }
+    paintTabs();
     paintBoard();
     paintTree();
   }
@@ -823,17 +871,82 @@
   function showBoard() {
     detachTerminal();
     state.view = "board";
+    tabs.active = null;
+    saveTabs();
+    paintTabs();
     $("app").classList.add("board-mode");
-    $("board-view").hidden = false;
     setBoardView(state.boardView);
   }
 
   function showChat() {
     state.view = "chat";
-    // The back button returns to the board view the owner came from; its label says which.
-    $("show-board").textContent = `← ${VIEWS[state.boardView][0]}`;
     $("app").classList.remove("board-mode");
-    $("board-view").hidden = true;
+    document.querySelectorAll("[data-board-view]").forEach((b) => b.setAttribute("aria-selected", "false"));
+  }
+
+  // ------------------------------------------------ open sessions as tabs
+  // Owner (2026-09-28): sections on the left, every opened session is a tab on top. Closing a tab stops nothing.
+  // The list is a per-browser convenience in localStorage; unreadable storage starts with no tabs.
+  const TABS_KEY = "vepol.tabs.v1";
+  const tabs = (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(TABS_KEY) || "{}");
+      const ids = Array.isArray(saved.ids) ? saved.ids.filter((x) => typeof x === "string") : [];
+      return { ids, active: ids.includes(saved.active) ? saved.active : null, restore: ids.includes(saved.active) ? saved.active : null };
+    } catch (_) { return { ids: [], active: null, restore: null }; }
+  })();
+  let tabsHtml = "";
+
+  function saveTabs() {
+    try { localStorage.setItem(TABS_KEY, JSON.stringify({ ids: tabs.ids, active: tabs.active })); } catch (_) {}
+  }
+
+  function paintTabs() {
+    const html = tabs.ids.map((id) => {
+      const c = conversations.find((x) => x.id === id) || {};
+      const title = c.title || "New session";
+      const name = title.length > 28 ? `${title.slice(0, 27)}…` : title;
+      const dot = c.transport === "terminal"
+        ? `<span class="dot agent-${AGENT_DOT[c.agent] || "unknown"}"></span>` : "";
+      return `<div class="tab" role="tab" tabindex="0" data-tab="${esc(id)}" aria-selected="${id === tabs.active}"
+          title="${esc(`${title} · ${c.target || ""} · ${c.runtime || ""}`)}">${dot}<span class="tab-proj">${esc(c.target || "")}</span><span class="tab-name">${esc(name)}</span>
+          <button class="tab-close" data-tab-close="${esc(id)}" aria-label="Close tab ${esc(name)}" title="Close tab (the agent keeps running)">×</button></div>`;
+    }).join("");
+    $("tabs-empty").hidden = tabs.ids.length > 0;
+    if (html === tabsHtml) return;
+    tabsHtml = html;
+    $("tabstrip").querySelectorAll(".tab").forEach((el) => el.remove());
+    $("tabs-empty").insertAdjacentHTML("afterend", html);
+    $("tabstrip").querySelectorAll(".tab").forEach((el) => {
+      const open = () => openConv(el.dataset.tab).catch((err) => boardError(`Could not open session: ${err.message}`));
+      el.onclick = (e) => { if (!e.target.closest("[data-tab-close]")) open(); };
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+    });
+    $("tabstrip").querySelectorAll("[data-tab-close]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); closeTab(b.dataset.tabClose); };
+    });
+  }
+
+  function addTab(id) {
+    if (!tabs.ids.includes(id)) tabs.ids.push(id);
+    tabs.active = id;
+    saveTabs();
+    paintTabs();
+  }
+
+  // Closing the selected tab selects its left neighbour, else its right one, else the Sessions section.
+  function closeTab(id) {
+    const i = tabs.ids.indexOf(id);
+    if (i < 0) return;
+    tabs.ids.splice(i, 1);
+    const wasActive = tabs.active === id;
+    if (wasActive) tabs.active = null;
+    saveTabs();
+    paintTabs();
+    if (!wasActive) return;
+    const next = tabs.ids[i - 1] || tabs.ids[i];
+    if (next) openConv(next).catch(() => showBoard());
+    else { state.boardView = "sessions"; showBoard(); }
   }
 
   // ------------------------------------------------ board views switch
@@ -846,7 +959,7 @@
   function setBoardView(view) {
     state.boardView = view;
     document.querySelectorAll("[data-board-view]").forEach((b) =>
-      b.setAttribute("aria-selected", String(b.dataset.boardView === view)));
+      b.setAttribute("aria-selected", String(state.view === "board" && b.dataset.boardView === view)));
     $("board-title").textContent = VIEWS[view][0];
     $("board-description").textContent = VIEWS[view][1];
     $("sessions-pane").hidden = view !== "sessions";
@@ -1090,11 +1203,17 @@
     button.disabled = true;
     $("tasks-feedback").hidden = true;
     try {
-      const conv = await createAndOpen({ target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title });
-      // Pre-typed only; the owner edits and sends it.
-      if (state.conv === conv.id) $("prompt").value = task.id
+      const text = task.id
         ? `Task ${task.id} from knowledge/backlog.md: "${task.title}".`
         : `Task from knowledge/backlog.md: "${task.title}".`;
+      const conv = await createAndOpen({ target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title });
+      // Never sent by itself: a terminal session offers "Type into terminal"; other sessions pre-type the input box.
+      if (state.conv !== conv.id) return;
+      if (state.transport === "terminal") {
+        taskLine = { id: conv.id, text };
+        $("task-line").hidden = false;
+        $("task-text").textContent = text;
+      } else $("prompt").value = text;
     } catch (err) {
       feedback($("tasks-feedback"), `Could not start session: ${err.message}`);
     } finally { button.disabled = false; }
@@ -1388,6 +1507,11 @@
     $("terminal-ready").hidden = state.transport !== "terminal" || conv.terminal_ready || state.running || !last;
     $("terminal").hidden = state.transport !== "terminal";
     $("thread").hidden = state.transport === "terminal";
+    // Owner (2026-09-28): a terminal session has no second input box; the owner types in the terminal.
+    $("composer").hidden = state.transport === "terminal";
+    const line = taskLine && taskLine.id === conv.id && state.transport === "terminal" ? taskLine.text : "";
+    $("task-line").hidden = !line;
+    $("task-text").textContent = line;
     renderAgentState(conv);
     renderPermissions(conv.pending || []);
     $("send").disabled = state.running || !state.continuation;
@@ -1442,7 +1566,9 @@
     state.running = !!(last && last.status === "running"); state.runId = state.running ? last.id : null;
     renderSession(conv); renderThread(conv); renderRun(last); renderEvidence(last && last.evidence);
     $("stop").style.display = state.running ? "" : "none"; $("stop").disabled = false;
-    $("conversation-title").textContent = `${conv.title || "New session"} · ${conv.target} · ${conv.runtime}`;
+    // The board row carries the agent's own title for terminal sessions; the header uses the same one.
+    const row = conversations.find((c) => c.id === conv.id);
+    $("conversation-title").textContent = `${(row && row.title) || conv.title || "New session"} · ${conv.target} · ${conv.runtime}`;
     renderProjectPath($("conversation-path"), conv.target);
     paintTree();
   }
@@ -1681,7 +1807,8 @@
     const h = await api("/api/health");
     state.desktop = !!h.desktop;
     renderRuntimes(runtimes);
-    $("native-mode").hidden = !state.desktop;
+    $("native-mode").hidden = true;  // one mode in the app; the picker chooses the agent
+    $("browser-runtime").hidden = state.desktop;
     if (state.desktop) { $("product-name").textContent = "Vepol"; document.title = "Vepol"; }
     $("bind").textContent = `local · ${h.host}:${h.port}`;
   }
@@ -1693,6 +1820,7 @@
     state.conv = id;
     termRefused = null;
     showChat();
+    addTab(id);
     state.target = conv.target;
     state.runtime = conv.runtime;
     applyConversation(conv);
@@ -1797,7 +1925,6 @@
   $("board-search").addEventListener("input", () => paintBoard());
   $("board-project-filter").addEventListener("change", () => paintBoard());
   $("board-columns").addEventListener("focusout", () => queueMicrotask(() => paintBoard()));
-  $("show-board").onclick = showBoard;
   $("board-newconv").onclick = () => newSessionFromBoard();
   setInterval(() => { refreshBoard(); refreshTree(); }, 5000);
   setInterval(loadUsage, 60000);
@@ -1809,7 +1936,21 @@
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
   });
-  document.querySelectorAll("[data-board-view]").forEach((b) => { b.onclick = () => setBoardView(b.dataset.boardView); });
+  document.querySelectorAll("[data-board-view]").forEach((b) => {
+    b.onclick = () => {
+      state.boardView = b.dataset.boardView;
+      if (state.view !== "board") showBoard(); else setBoardView(state.boardView);
+    };
+  });
+  $("tab-new").onclick = () => openPicker();
+  $("task-type").onclick = () => {
+    // Typed, not sent: the owner presses Enter in the terminal when the agent is ready.
+    if (!taskLine || !term.ws || term.ws.readyState !== 1 || state.conv !== taskLine.id) return;
+    term.ws.send(new TextEncoder().encode(taskLine.text));
+    taskLine = null;
+    $("task-line").hidden = true;
+    term.obj.focus();
+  };
   setInterval(() => {
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
@@ -1874,7 +2015,10 @@
   $("picker-add").onclick = addProject;
 
   loadUsage();
-  refreshAll().catch((e) => {
+  refreshAll().then(() => {
+    // Reload keeps the tabs; the tab that was selected opens again (attach only, never a start).
+    if (tabs.restore && tabs.ids.includes(tabs.restore)) openConv(tabs.restore).catch(() => {});
+  }).catch((e) => {
     document.body.innerHTML =
       `<div style="padding:40px;font-family:var(--sans)">
          <h1>Could not open Vepol</h1>

@@ -85,7 +85,7 @@ async function waitUntil(fn, label, timeout = 10000) {
         footnote: document.querySelector('#sessions-pane .board-footnote').textContent,
         title: document.querySelector('#board-title').textContent,
         description: document.querySelector('#board-description').textContent,
-        views: texts('#board-view .view-switch [data-board-view]'),
+        views: texts('.nav [data-board-view]'),
         newSession: document.querySelector('#board-newconv').textContent,
         columnAdd: [...document.querySelectorAll('#board-columns .column-add')].map(b => b.getAttribute('aria-label')),
         badges: [...new Set([...document.querySelectorAll('#board-columns .session-activity')].map(el => el.textContent.trim()))].sort(),
@@ -219,17 +219,16 @@ async function waitUntil(fn, label, timeout = 10000) {
     await page.locator('#thread').getByText(records[0].title, { exact: true }).waitFor();
     await page.locator('#thread').getByText(records[0].preview, { exact: true }).waitFor();
     assert.equal(await page.locator('#conversation-path').textContent(), pathText(opened.target).text);
-    assert.equal(await page.locator('#show-board').textContent(), '← Sessions');
-    await page.locator('#show-board').click();
+    await page.locator('[data-board-view="sessions"]').click();
     await page.locator('#board-view').waitFor({ state: 'visible' });
-    evidence.steps.push('Card preview click opens original conversation with unchanged identity/messages and its folder · project · path; "← Sessions" returns without runtime call');
+    evidence.steps.push('Card preview click opens original conversation with unchanged identity/messages and its folder · project · path; the Sessions section in the sidebar returns without runtime call');
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: path.join(OUT, 'narrow.png'), fullPage: true });
     const geometry = await page.locator('#board-columns').evaluate(el => ({ client: el.clientWidth, scroll: el.scrollWidth }));
     assert(geometry.scroll > geometry.client, 'narrow board has horizontal scrolling');
     assert(await page.evaluate(() => document.documentElement.scrollWidth) <= 390, 'no page-level horizontal scroll at 390px');
-    for (const sel of ['#board-newconv', '#board-view .view-switch [data-board-view="sessions"]', '#board-view .view-switch [data-board-view="tasks"]', '#board-view .view-switch [data-board-view="automations"]']) {
+    for (const sel of ['#board-newconv', '.nav [data-board-view="sessions"]', '.nav [data-board-view="tasks"]', '.nav [data-board-view="automations"]']) {
       const box = await page.locator(sel).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `${sel} not clipped at 390px: ${JSON.stringify(box)}`);
     }

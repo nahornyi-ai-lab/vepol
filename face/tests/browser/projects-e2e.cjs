@@ -121,7 +121,6 @@ async function waitUntil(fn, label, timeout = 10000) {
       assert.equal(r.status, 0, r.stderr);
     }
     assert.equal(kb('check', board).status, 0);
-    await page.locator('#show-board').click();
     await page.locator('[data-board-view="sessions"]').click();
     await page.locator('#sessions-pane').waitFor({ state: 'visible' });
     await page.locator(`#board-view [data-conversation-id="${freshConv.id}"]`).waitFor();
@@ -156,7 +155,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     evidence.steps.push('P6 column «+» Research → picker → beta session in Research');
 
     // 7. Another agent CLI: hermes in delta runs in its own tmux session kb-delta-hermes.
-    await page.locator('#show-board').click();
+    await page.locator('[data-board-view="sessions"]').click();
     await page.locator('#board-newconv').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
     await page.locator('#picker-runtimes [data-pick-runtime="hermes"]').click();

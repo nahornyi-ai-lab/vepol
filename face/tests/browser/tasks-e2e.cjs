@@ -150,7 +150,7 @@ async function tableRows(page, withProject = false) {
     const startTask = async (task, expectedTitle = task.title) => {
       await page.locator(`#tasks-table tr[data-task-project="alpha"][data-task-id="${task.id}"] [data-start-task]`).click();
       const text = `Task ${task.id} from knowledge/backlog.md: "${task.title}".`;
-      await waitUntil(async () => await page.locator('#prompt').inputValue() === text, `pre-typed text for ${task.id}`);
+      await waitUntil(async () => await page.locator('#task-line').isVisible() && await page.locator('#task-text').textContent() === text, `task line for ${task.id}`);
       const conv = (await api('/api/conversations')).find(c => c.target === 'alpha');
       assert(conv, 'an alpha conversation exists');
       const detail = await api(`/api/conversations/${conv.id}`);
@@ -179,14 +179,14 @@ async function tableRows(page, withProject = false) {
     await page.locator('#tasks-project').selectOption('alpha');
     await page.locator('#tasks-table tr[data-task-id="alpha-2"]').waitFor();
     const first = await startTask(byId['alpha-2']);
-    // The back button returns to Tasks and says so; a second task reuses the one alpha terminal and keeps its title.
-    assert.equal(await page.locator('#show-board').textContent(), '← Tasks');
-    await page.locator('#show-board').click();
+    // No input box under a terminal; Tasks in the sidebar returns; a second task reuses the one alpha terminal and keeps its title.
+    assert(await page.locator('#composer').isHidden(), 'no Send box under a terminal session');
+    await page.locator('[data-board-view="tasks"]').click();
     await page.locator('#tasks-pane').waitFor({ state: 'visible' });
     await page.locator('#tasks-table tr[data-task-id="alpha-1"]').waitFor();
     assert.equal(await startTask(byId['alpha-1'], byId['alpha-2'].title), first);
     await page.screenshot({ path: path.join(OUT, 'tasks-start-session.png'), fullPage: true });
-    evidence.steps.push('T4 Start session opens an alpha chat named after the task with the pre-typed text; no run, no message sent');
+    evidence.steps.push('T4 Start session opens an alpha chat named after the task with the task line offered for typing (no Send box); no run, no message sent');
 
     // 5. The app never wrote a board.
     assert.deepEqual(boardHashes(), hashesBefore);
@@ -194,7 +194,7 @@ async function tableRows(page, withProject = false) {
     evidence.steps.push('T5 sha256 of every fixture backlog.md unchanged');
 
     // TASK-07: without kb-board the view says so in red and clears the table; the session board is unaffected.
-    await page.locator('#show-board').click();
+    await page.locator('[data-board-view="tasks"]').click();
     await page.locator('#tasks-pane').waitFor({ state: 'visible' });
     const kbBoard = path.join(OUT, 'hub', 'bin', 'kb-board');
     fs.unlinkSync(kbBoard);

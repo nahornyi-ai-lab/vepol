@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import automations as automations_mod
 from . import broker as broker_mod
+from . import claude_titles
 from . import knowledge_files as knowledge_mod
 from . import runtimes as runtimes_mod
 from . import targets as targets_mod
@@ -145,7 +146,29 @@ def create_app(
             # Process evidence replaces the run-derived state for terminal conversations.
             row.update(agent=details["agent"], pid=details["pid"], agent_reason=details.get("agent_reason", ""))
             row["activity"] = details["agent"]
+            if conv.runtime == "claude":
+                claude_card(conv, row, details)
         return row
+
+    def claude_card(conv, row, details):
+        """Claude's own name and last message for a terminal card; display only, never raises."""
+        try:
+            sid = conv.claude_transcript_id
+            if details.get("agent") == "alive":
+                found = claude_titles.session_for_pid(details.get("pid"))
+                if found and found != sid:
+                    # The newest agent in the pane wins, so the card follows an in-shell restart.
+                    app.state.store.set_claude_transcript(conv.id, found)
+                    sid = found
+            info = claude_titles.read(sid)
+        except Exception:  # noqa: BLE001 - the board must render whatever happens here
+            return
+        if not info:
+            return
+        if info["title"]:
+            row["title"] = info["title"]
+        if info["preview"]:
+            row["preview"] = info["preview"]
 
     def desktop_status():
         convs = app.state.store.list_conversations()
