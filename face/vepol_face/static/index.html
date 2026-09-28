@@ -49,13 +49,8 @@
   #tree { flex: 1; margin-bottom: 4px; }
   .tree-project { display: flex; align-items: center; gap: 6px; }
   .tree-project .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .tree-project .count { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+  .tree-project .nodot { width: 8px; flex: 0 0 8px; }
   .item.tree-project.active { border-color: var(--accent); }
-  .tree-sessions { margin: 0 0 6px 10px; padding-left: 4px; border-left: 1px solid var(--line); }
-  .tree-session { display: flex; align-items: flex-start; gap: 7px; padding: 5px 8px; font-size: 13px; }
-  .tree-session .dot { margin-top: 5px; }
-  .tree-session .nodot { width: 8px; flex: 0 0 8px; }
-  .tree-session .t { min-width: 0; overflow-wrap: anywhere; }
   .dot.agent-alive { background: var(--ok); }
   .dot.agent-not_running { background: var(--unknown); }
   .dot.agent-unknown { background: var(--warn); }
@@ -440,6 +435,7 @@
   .picker-sub { padding: 0 20px; margin: 0 0 10px; }
   .picker-bar { display: flex; gap: 10px; align-items: center; padding: 0 20px; }
   .picker-bar { flex-wrap: wrap; }
+  #picker.one .picker-bar { padding-bottom: 20px; }
   .picker-bar .filter { flex: 1 1 220px; margin: 0; font-size: 13px; padding: 8px 10px; }
   #picker-runtimes button { display: inline-flex; align-items: center; gap: 6px; }
   #picker-feedback { margin: 10px 20px 0; }
@@ -613,14 +609,14 @@
 </div>
 <dialog id="picker" aria-labelledby="picker-title">
   <div class="picker-head"><h1 id="picker-title">New session</h1><button class="ghost" id="picker-close" aria-label="Close">Close</button></div>
-  <p class="hint picker-sub">Pick a project to work in. Recently used projects are on top.</p>
+  <p class="hint picker-sub" id="picker-sub">Pick a project to work in. Recently used projects are on top.</p>
   <div class="picker-bar">
     <input type="search" class="filter" id="picker-search" placeholder="Find a project…" aria-label="Find a project" />
     <div class="chips" role="group" aria-label="Agent" id="picker-runtimes"></div>
   </div>
   <div id="picker-feedback" class="banner bad" role="alert" hidden></div>
   <div id="picker-list" class="picker-list" aria-label="Projects"></div>
-  <div class="picker-foot"><button id="picker-add">Add project…</button><span class="hint" id="picker-add-hint">Open any folder, or create a new one. It becomes a Vepol project with its own knowledge/ folder.</span></div>
+  <div class="picker-foot" id="picker-foot"><button id="picker-add">Add project…</button><span class="hint" id="picker-add-hint">Open any folder, or create a new one. It becomes a Vepol project with its own knowledge/ folder.</span></div>
 </dialog>
 <footer class="usage-bar" id="usage-bar" aria-label="Usage limits">
   <span class="usage-part" id="usage-claude"></span><span class="usage-sep" id="usage-sep" hidden>|</span><span class="usage-part" id="usage-codex"></span><span id="usage-error" hidden>Could not refresh</span>
@@ -732,46 +728,47 @@
     return new Date(t).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
   }
 
-  // Project → sessions tree: every project, newest activity first, its sessions nested under it.
+  // Owner (2026-09-28): the sidebar lists projects only, like Orca; open sessions live in the tabs.
+  // A green dot marks a project where an agent is running; the selected tab's project is highlighted.
   const AGENT_DOT = { alive: "alive", not_running: "not_running", shell: "not_running" };
   let treeHtml = "";
+
+  // Terminal sessions whose terminal is open (agent running, or back at the shell prompt), newest first.
+  const runningSessions = (slug) => conversations
+    .filter((c) => c.target === slug && c.transport === "terminal" && (c.agent === "alive" || c.agent === "shell"))
+    .sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
 
   function paintTree() {
     const q = ($("tfilter").value || "").trim().toLowerCase();
     const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
-    const bySlug = new Map();
-    conversations.forEach((c) => { if (!bySlug.has(c.target)) bySlug.set(c.target, []); bySlug.get(c.target).push(c); });
     const matches = (slug) => !q || slug.toLowerCase().includes(q) || String(label(slug)).toLowerCase().includes(q);
     const slugs = projectsByActivity().filter(matches);
+    const shown = tabs.active ? (conversations.find((c) => c.id === tabs.active) || {}).target : null;
     const html = slugs.length ? slugs.map((slug) => {
-      const sessions = (bySlug.get(slug) || []).slice()
-        .sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
-      return `<div class="item tree-project ${slug === state.target ? "active" : ""}" data-slug="${esc(slug)}" role="button" tabindex="0" title="Target for a new conversation">
-          <span class="name">${esc(label(slug))}</span><span class="count">${sessions.length ? esc(sessions.length) : ""}</span>
-        </div>${sessions.length ? `<div class="tree-sessions">${sessions.map((c) => {
-          const dot = c.transport === "terminal"
-            ? `<span class="dot agent-${AGENT_DOT[c.agent] || "unknown"}" title="${esc(ACTIVITY[c.agent] || ACTIVITY.unknown)}"></span>`
-            : `<span class="nodot"></span>`;
-          return `<div class="item tree-session ${c.id === state.conv ? "active" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">
-            ${dot}<span class="t">${esc(c.title || "New session")}<div class="meta">${esc(c.runtime)}</div></span>
-          </div>`;
-        }).join("")}</div>` : ""}`;
+      const live = conversations.some((c) => c.target === slug && c.transport === "terminal" && c.agent === "alive");
+      const dot = live ? `<span class="dot agent-alive" title="Agent running"></span>` : `<span class="nodot"></span>`;
+      return `<div class="item tree-project ${slug === shown ? "active" : ""}" data-slug="${esc(slug)}" role="button" tabindex="0" title="Open this project's running agents, or start one">
+          ${dot}<span class="name">${esc(label(slug))}</span>
+        </div>`;
     }).join("") : `<div class="hint">${q ? "no match" : "No projects yet"}</div>`;
     if (html === treeHtml) return;
     treeHtml = html;
     $("tree").innerHTML = html;
-    const activate = (el, fn) => {
-      el.onclick = fn;
-      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } };
-    };
-    $("tree").querySelectorAll(".tree-project").forEach((el) => activate(el, () => {
-      state.target = el.dataset.slug;
-      state.conv = null;
-      paintTree();
-      updateRouting(lastRuntimes);
-    }));
-    $("tree").querySelectorAll(".tree-session").forEach((el) => activate(el, () =>
-      openConv(el.dataset.id).catch((err) => showDegraded({ reason: `Could not open session: ${err.message}` }))));
+    $("tree").querySelectorAll(".tree-project").forEach((el) => {
+      const open = () => openProject(el.dataset.slug).catch((err) => showDegraded({ reason: `Could not open session: ${err.message}` }));
+      el.onclick = open;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+    });
+  }
+
+  // A project click opens its running sessions as tabs (the newest selected); with none running it offers the agents.
+  async function openProject(slug) {
+    const running = runningSessions(slug);
+    if (!running.length) return openPicker(null, slug);
+    running.forEach((c) => { if (!tabs.ids.includes(c.id)) tabs.ids.push(c.id); });
+    saveTabs();
+    paintTabs();
+    await openConv(running[0].id);
   }
 
   // The native app's terminal runs any installed agent CLI; one-shot runs in a browser need a brokered one.
@@ -809,7 +806,7 @@
     conversations = list;
     // The open terminal's header follows the agent (exit to the shell, a restart) without a reload. A list that
     // differs only triggers a fresh read: a list requested before a change may arrive after it.
-    // The session on screen, which a project click leaves shown although it clears state.conv.
+    // The session on screen (data-conv), which can differ from state.conv.
     const open = list.find((c) => c.id === $("terminal-start").dataset.conv);
     if (open && state.view === "chat" && state.transport === "terminal" && open.agent
         && `${open.agent}:${open.pid || ""}` !== $("agent-state").dataset.shown) refreshOpenConversation(open.id).catch(() => {});
@@ -989,6 +986,7 @@
     tabs.active = null;
     saveTabs();
     paintTabs();
+    paintTree();
     $("app").classList.add("board-mode");
     setBoardView(state.boardView);
   }
@@ -1231,11 +1229,19 @@
   }
 
   // ------------------------------------------------ new-session project picker
-  const picker = { stage: null, busy: false };
+  // One-project mode (a sidebar click on a project with nothing running): only the agent buttons, a click starts it there.
+  const picker = { stage: null, busy: false, project: null };
 
   function paintPicker() {
     const q = $("picker-search").value.trim().toLocaleLowerCase();
     const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
+    const one = picker.project;
+    $("picker-title").textContent = one ? `New session in ${label(one)}` : "New session";
+    $("picker-sub").textContent = one ? "Pick the agent to start here." : "Pick a project to work in. Recently used projects are on top.";
+    $("picker-search").hidden = !!one;
+    $("picker-list").hidden = !!one;
+    $("picker-foot").hidden = !!one;
+    $("picker").classList.toggle("one", !!one);
     const slugs = projectsByActivity().filter((slug) => {
       const t = allTargets.find((x) => x.slug === slug);
       return !q || [slug, label(slug), t ? t.cwd : ""].join(" ").toLocaleLowerCase().includes(q);
@@ -1258,7 +1264,11 @@
     $("picker-runtimes").innerHTML = lastRuntimes.filter(pickable).map((r) =>
       `<button data-pick-runtime="${esc(r.name)}" aria-pressed="${r.name === state.runtime}" title="${esc(`${r.name}: ${r.state}${r.reason ? ` — ${r.reason}` : ""}`)}"><span class="dot ${esc(r.state)}"></span>${esc(r.name)}</button>`).join("");
     $("picker-runtimes").querySelectorAll("[data-pick-runtime]").forEach((b) => {
-      b.onclick = () => { state.runtime = b.dataset.pickRuntime; renderRuntimes(lastRuntimes); paintPicker(); };
+      b.onclick = () => {
+        state.runtime = b.dataset.pickRuntime;
+        renderRuntimes(lastRuntimes);
+        if (one) pickProject(one); else paintPicker();
+      };
     });
   }
 
@@ -1267,13 +1277,15 @@
     $("picker-feedback").hidden = !message;
   }
 
-  async function openPicker(stage = null) {
+  async function openPicker(stage = null, project = null) {
     picker.stage = stage;
+    picker.project = project;
     pickerError("");
     $("picker-search").value = "";
     paintPicker();
     if (!$("picker").open) $("picker").showModal();
-    $("picker-search").focus();
+    if (project) { const first = $("picker-runtimes").querySelector("button"); if (first) first.focus(); }
+    else $("picker-search").focus();
     try {
       renderTargets(await api("/api/targets"));
       paintPicker();
