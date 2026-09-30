@@ -120,35 +120,45 @@ function processOf(pid) {
     await page.locator('[data-board-view="sessions"]').click();
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 2, 'two cards');
 
-    // O1. Tree: projects by name, sessions nested with the board's liveness dot; session opens, project picks the target.
+    // O1. Tree: every project, newest activity first (beta's session is the newest, projects without
+    // activity keep discovery order), sessions nested with the board's liveness dot; a session opens.
     await page.locator(`[data-open-conversation="${a1.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const wantTree = [
-      { slug: 'alpha', active: true, sessions: [{ id: a1.id, dot: 'agent-alive', active: true }] },
       { slug: 'beta', active: false, sessions: [{ id: b1.id, dot: 'agent-not_running', active: false }] },
+      { slug: 'alpha', active: true, sessions: [{ id: a1.id, dot: 'agent-alive', active: true }] },
+      { slug: 'hub', active: false, sessions: [] },
+      { slug: 'delta', active: false, sessions: [] },
+      { slug: 'gamma', active: false, sessions: [] },
     ];
-    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'alpha/beta tree with dots');
+    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'every project in the tree, sessions with dots')
+      .catch(async (e) => { throw new Error(`${e.message}; tree: ${JSON.stringify(await treeShape(page))}`); });
+    const node = async (slug) => (await treeShape(page)).find(p => p.slug === slug);
     await page.screenshot({ path: path.join(OUT, 'tree.png'), fullPage: true });
     const opened = page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname === `/api/conversations/${b1.id}`);
     await page.locator(`#tree .tree-session[data-id="${b1.id}"]`).click();
     assert.equal((await (await opened).json()).id, b1.id);
     await waitUntil(async () => {
-      const t = await treeShape(page);
-      return t[1].sessions[0].active && !t[0].sessions[0].active && t[1].active;
+      const [a, b] = [await node('alpha'), await node('beta')];
+      return b.sessions[0].active && !a.sessions[0].active && b.active;
     }, 'beta session selected in the tree');
     assert.equal((await api(`/api/conversations/${b1.id}`)).agent, 'not_running', 'opening never starts an agent');
     await page.locator('#tree .tree-project[data-slug="alpha"]').click();
-    await waitUntil(async () => (await treeShape(page))[0].active, 'alpha project selected');
+    await waitUntil(async () => (await node('alpha')).active, 'alpha project selected');
     assert.equal(await page.locator('#routing').textContent(), '→ codex · alpha');
+    // «+ New session» asks for the project; the agent choice carries over.
     const created = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#newconv').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#picker-runtimes [aria-pressed="true"]').textContent(), 'codex');
+    await page.locator('#picker-list [data-pick="alpha"]').click();
     const c1 = await (await created).json();
     assert.equal(c1.target, 'alpha');
     assert.equal(c1.runtime, 'codex');
     assert.equal(c1.existing, false);
-    await waitUntil(async () => (await treeShape(page))[0].sessions.some(s => s.id === c1.id && s.active), 'new alpha session in the tree');
+    await waitUntil(async () => (await node('alpha')).sessions.some(s => s.id === c1.id && s.active), 'new alpha session in the tree');
     evidence.cases.O1 = { tree: wantTree, newConversation: c1 };
-    evidence.steps.push('O1 tree nests alpha/beta sessions with alive/not-running dots; a session row opens it; the alpha row targets "New conversation"');
+    evidence.steps.push('O1 tree lists every project newest first and nests sessions with alive/not-running dots; a session row opens it; «+ New session» → picker → alpha');
 
     // O2. Knowledge panel: read-only tree of alpha's knowledge/, filter, exact file text, no escape, nothing written.
     await page.locator('[data-panel="knowledge"]').click();
@@ -195,15 +205,14 @@ function processOf(pid) {
     evidence.cases.O2 = { entries: kbEntries, filtered: ['decisions/a.md'], escapeStatus: escape.status, hugeStatus: 413, treeRefreshError: 'Could not refresh', mtimes: mtimesBefore };
     evidence.steps.push('O2 knowledge tree lists the fixture files, filter narrows to one, click shows it rendered (heading and paragraph); ../../etc/hosts is 404; huge.md is 413 "too large to show"; a failed list poll keeps the tree with "Could not refresh"; mtimes unchanged');
 
-    // O3. Column "+": gamma has no terminal; picked in the tree, "+" in Research creates, starts and places it there.
-    await page.locator('#tfilter').fill('gamma');
-    await page.locator('#tree .tree-project[data-slug="gamma"]').click();
-    await page.locator('#tfilter').fill('');
-    await page.locator('#show-board').click();
+    // O3. Column "+": gamma has no terminal; "+" in Research asks for the project, then creates, starts and places it there.
+    await page.locator('[data-board-view="sessions"]').click();
     await page.locator('#board-view').waitFor({ state: 'visible' });
     const countBefore = (await api('/api/conversations')).length;
     const createdG = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#board-columns [data-new-in="research"]').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    await page.locator('#picker-list [data-pick="gamma"]').click();
     const g1 = await (await createdG).json();
     assert.equal(g1.target, 'gamma');
     assert.equal(g1.existing, false);
@@ -213,29 +222,54 @@ function processOf(pid) {
     assert.equal(g1Detail.board_stage, 'research');
     await waitUntil(async () => processOf(g1Detail.pid).cmd === '/bin/cat', `pid ${g1Detail.pid} is /bin/cat`, 5000);
     const proc = processOf(g1Detail.pid);
-    assert.match(proc.parent, /tmux/);
+    assert.equal(proc.parent, '/bin/zsh -f', 'the agent runs inside the pane shell');
     assert.equal((await api('/api/conversations')).length, countBefore + 1);
-    // TERM-09: the agent exits (its session ends on the fixture's tmux); the header offers Start, and Start brings a new agent.
+    // TERM-09 (Orca-style): the agent exits → the shell holds the pane and works as a terminal; Start types the
+    // agent in again; closing the terminal says so, and Start opens a new one.
     const gSession = `kb-gamma-${g1.runtime}`;
+    const startOf = () => page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
+    const rows = async () => await page.locator('#terminal .xterm-rows').textContent();
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
-    fixtureTmux(boot.tmux_socket, 'kill-session', '-t', gSession);
-    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running' && await page.locator('#terminal-start').isVisible(), 'Agent not running + Start', 2000);
-    assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'not_running', 'no auto-restart');
-    const restart = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
+    const panePid = fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}');
+    fixtureTmux(boot.tmux_socket, 'send-keys', '-t', gSession, 'C-d');
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start', 8000);
+    assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'shell', 'no auto-restart');
+    await page.locator('#terminal').click();
+    await page.keyboard.type('echo vepol-shell-$((20+22))');
+    await page.keyboard.press('Enter');
+    await waitUntil(async () => (await rows()).includes('vepol-shell-42'), 'the shell runs a command typed in the window', 5000);
+    // The owner's 2026-09-28 path: another project is clicked while the session is on screen; Start still acts on it.
+    await page.locator('#tree .tree-project[data-slug="delta"]').click();
+    await waitUntil(async () => (await node('delta')).active, 'delta project selected');
+    const restart = startOf();
     await page.locator('#terminal-start').click();
     assert((await restart).ok(), 'Start succeeded');
     let restarted;
     await waitUntil(async () => (restarted = await api(`/api/conversations/${g1.id}`)).agent === 'alive', 'gamma agent alive again');
     assert.notEqual(restarted.pid, g1Detail.pid);
-    assert.equal(String(restarted.pid), fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'));
+    assert.equal(processOf(restarted.pid).cmd, '/bin/cat');
+    assert.equal(fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'), panePid, 'same shell, same terminal');
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${restarted.pid}` && !(await page.locator('#terminal-start').isVisible()), 'header shows the new PID');
-    evidence.cases.TERM09 = { session: gSession, firstPid: g1Detail.pid, newPid: restarted.pid };
-    evidence.steps.push(`TERM-09 kill-session ${gSession}: "Agent not running" + Start; Start gives PID ${restarted.pid} (was ${g1Detail.pid}) = #{pane_pid}`);
-    await page.locator('#show-board').click();
+    // Closing the terminal (the shell's session ends) is said in the pane; Start opens a new shell with the agent.
+    await waitUntil(async () => fixtureTmux(boot.tmux_socket, 'list-clients', '-t', gSession) !== '', 'the reopened page is attached');
+    fixtureTmux(boot.tmux_socket, 'kill-session', '-t', gSession);
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running' && await page.locator('#terminal-start').isVisible(), 'Agent not running + Start', 3000);
+    await waitUntil(async () => (await rows()).includes('The terminal has closed. Press Start above to open a new one.'), 'the terminal says it closed', 3000);
+    const reopen = startOf();
+    await page.locator('#terminal-start').click();
+    assert((await reopen).ok(), 'Start reopened the terminal');
+    let reopened;
+    await waitUntil(async () => (reopened = await api(`/api/conversations/${g1.id}`)).agent === 'alive', 'a new terminal with the agent');
+    assert.notEqual(fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}'), panePid, 'a new shell');
+    evidence.cases.TERM09 = { session: gSession, panePid, firstPid: g1Detail.pid, restartedPid: restarted.pid, reopenedPid: reopened.pid };
+    evidence.steps.push(`TERM-09 agent exit → "shell open", echo ran in the pane; Start in the same shell → PID ${restarted.pid} (was ${g1Detail.pid}); kill-session → "terminal has closed"; Start → new shell, PID ${reopened.pid}`);
+    await page.locator('[data-board-view="sessions"]').click();
     await page.locator(`#board-columns [data-stage="research"] [data-conversation-id="${g1.id}"]`).waitFor();
     // "+" again for gamma/codex (from another column): the existing card opens, its stage stays, a note says so.
     const again = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#board-columns [data-new-in="working"]').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    await page.locator('#picker-list [data-pick="gamma"]').click();
     const g2 = await (await again).json();
     assert.equal(g2.id, g1.id);
     assert.equal(g2.existing, true);
@@ -245,10 +279,44 @@ function processOf(pid) {
     assert.equal((await api(`/api/conversations/${g1.id}`)).board_stage, 'research');
     assert.equal((await api('/api/conversations')).length, countBefore + 1);
     await page.screenshot({ path: path.join(OUT, 'column-plus-existing.png'), fullPage: true });
-    await page.locator('#show-board').click();
+    await page.locator('[data-board-view="sessions"]').click();
     await page.locator(`#board-columns [data-stage="research"] [data-conversation-id="${g1.id}"]`).waitFor();
     evidence.cases.O3 = { conversation: g1.id, stage: 'research', pid: g1Detail.pid, command: proc.cmd, parent: proc.parent.split(' /usr/bin/env')[0], note };
     evidence.steps.push('O3 "+" in Research makes a gamma card in Research with a live /bin/cat under tmux; "+" again opens it, stage unchanged, note shown');
+
+    // TABS. Every tabsOpened session is a tab; a tab switches the terminal, "×" selects the neighbour, sections keep
+    // the tabs, reload restores them. A terminal session has no Send box.
+    const tabIds = () => page.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
+    const activeTab = () => page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
+    await page.locator(`[data-open-conversation="${a1.id}"]`).click();
+    await page.locator('#board-view').waitFor({ state: 'hidden' });
+    await page.locator('[data-board-view="sessions"]').click();
+    await page.locator(`[data-open-conversation="${g1.id}"]`).click();
+    await waitUntil(async () => (await activeTab())[0] === g1.id, 'gamma tab selected');
+    const tabsOpened = await tabIds();
+    assert(tabsOpened.includes(a1.id) && tabsOpened.includes(g1.id), JSON.stringify(tabsOpened));
+    await page.locator(`#tabstrip .tab[data-tab="${a1.id}"]`).click();
+    await waitUntil(async () => (await activeTab())[0] === a1.id && / · alpha · claude$/.test(await page.locator('#conversation-title').textContent()), 'alpha tab shows alpha');
+    assert(await page.locator('#terminal').isVisible(), 'terminal shown');
+    assert(await page.locator('#composer').isHidden(), 'no Send box under a terminal session');
+    assert.equal(await page.locator('.nav [aria-selected="true"]').count(), 0, 'no section selected while a tab is');
+    await page.reload();
+    await waitUntil(async () => (await activeTab())[0] === a1.id && JSON.stringify(await tabIds()) === JSON.stringify(tabsOpened), 'tabs restored after reload');
+    await page.locator('#board-view').waitFor({ state: 'hidden' });
+    const ti = tabsOpened.indexOf(a1.id);
+    const neighbour = tabsOpened[ti - 1] || tabsOpened[ti + 1];
+    await page.locator(`#tabstrip [data-tab-close="${a1.id}"]`).click();
+    await waitUntil(async () => (await activeTab())[0] === neighbour && !(await tabIds()).includes(a1.id), 'closing selects the neighbour');
+    assert.equal((await api('/api/conversations')).find(c => c.id === a1.id).agent, 'alive', 'closing a tab stops nothing');
+    await page.locator('[data-board-view="tasks"]').click();
+    await page.locator('#tasks-pane').waitFor({ state: 'visible' });
+    assert.deepEqual(await activeTab(), []);
+    assert.deepEqual(await tabIds(), tabsOpened.filter(id => id !== a1.id));
+    await page.screenshot({ path: path.join(OUT, 'tabs.png'), fullPage: true });
+    await page.locator('[data-board-view="sessions"]').click();
+    await page.locator('#board-view').waitFor({ state: 'visible' });
+    evidence.cases.TABS = { tabsOpened, neighbour, afterClose: await tabIds() };
+    evidence.steps.push('TABS sessions open as tabs; a tab switches the terminal (no Send box); reload restores tabs and the selected one; "×" selects the neighbour and leaves the agent alive; Tasks keeps the tabs');
 
     // O4. Status bar from the fixture files; with the Claude file malformed and the Codex rollout removed, "no data" for both.
     const usageText = async (key) => (await page.locator(`#usage-${key}`).textContent()) || '';

@@ -151,6 +151,59 @@ def test_terminal_bridge_moves_bytes_and_resizes_without_touching_the_agent(tmp_
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
+def test_terminal_shell_outlives_the_agent_and_start_brings_it_back(tmp_path, monkeypatch):
+    """The in-app terminal is a shell with the agent typed in: without this the
+    agent's exit leaves a dead pane and no way back. Real tmux on a private
+    socket; `zsh -f` stands in for the login shell and `cat` for the agent."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    import time
+
+    from vepol_face import terminal_session
+    from vepol_face.terminal_session import TerminalSession, liveness
+
+    sock_dir = tempfile.mkdtemp(prefix="vt-")
+    monkeypatch.setenv("TMUX_TMPDIR", sock_dir)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    real_binary = TerminalSession._binary
+    monkeypatch.setattr(TerminalSession, "_binary", lambda self, rt: real_binary(self, rt) if rt == "tmux" else "/bin/cat")
+    monkeypatch.setattr(TerminalSession, "_shell_argv", lambda self: ["/bin/zsh", "-f"])
+    tmux = terminal_session.tmux_binary()
+    env = dict(os.environ)
+    session = TerminalSession(cwd=str(tmp_path), project="hub", runtime="hermes", on_event=lambda e: None, env=env)
+
+    def ps(field, pid):
+        return subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+    try:
+        first = session.start()
+        assert first["agent"] == "alive", first
+        pane = subprocess.run([tmux, "display-message", "-p", "-t", session.name, "#{pane_pid}"],
+                              env=env, capture_output=True, text=True).stdout.strip()
+        assert ps("comm", first["pid"]) == "/bin/cat" and ps("ppid", first["pid"]) == pane
+
+        # The agent exits: the shell holds the terminal and the session stays.
+        subprocess.run([tmux, "send-keys", "-t", session.name, "C-d"], env=env, check=True)
+        deadline = time.monotonic() + 5
+        while liveness(session.name, env)["agent"] != "shell":
+            assert time.monotonic() < deadline, liveness(session.name, env)
+            time.sleep(0.05)
+        assert subprocess.run([tmux, "has-session", "-t", session.name], env=env).returncode == 0
+
+        refused = session.execute("ls")
+        assert refused["submitted"] is False and "Press Start" in refused["reason"], refused
+
+        second = session.start()
+        assert second["agent"] == "alive" and second["pid"] != first["pid"], second
+        assert ps("comm", second["pid"]) == "/bin/cat" and ps("ppid", second["pid"]) == pane
+    finally:
+        subprocess.run([tmux, "kill-server"], env=env, capture_output=True)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 def test_knowledge_panel_reads_project_files_and_stays_inside_the_root(tmp_path):
     """Without this route the Knowledge panel shows nothing of the project's knowledge."""
     hub = tmp_path / "hub"

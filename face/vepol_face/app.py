@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import automations as automations_mod
 from . import broker as broker_mod
+from . import claude_titles
 from . import knowledge_files as knowledge_mod
 from . import memory as memory_mod
 from . import runtimes as runtimes_mod
@@ -35,7 +36,7 @@ from .auth import Auth
 from .config import Config
 from .evidence import diff_kb
 from .runs import BOARD_STAGES, Conversation, RunStore
-from .sessions import UnsafeSessionName, attach_command, session_name
+from .sessions import RUNTIME_SUFFIX, UnsafeSessionName, attach_command, session_name
 from .session_manager import SessionManager
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -146,7 +147,29 @@ def create_app(
             # Process evidence replaces the run-derived state for terminal conversations.
             row.update(agent=details["agent"], pid=details["pid"], agent_reason=details.get("agent_reason", ""))
             row["activity"] = details["agent"]
+            if conv.runtime == "claude":
+                claude_card(conv, row, details)
         return row
+
+    def claude_card(conv, row, details):
+        """Claude's own name and last message for a terminal card; display only, never raises."""
+        try:
+            sid = conv.claude_transcript_id
+            if details.get("agent") == "alive":
+                found = claude_titles.session_for_pid(details.get("pid"))
+                if found and found != sid:
+                    # The newest agent in the pane wins, so the card follows an in-shell restart.
+                    app.state.store.set_claude_transcript(conv.id, found)
+                    sid = found
+            info = claude_titles.read(sid)
+        except Exception:  # noqa: BLE001 - the board must render whatever happens here
+            return
+        if not info:
+            return
+        if info["title"]:
+            row["title"] = info["title"]
+        if info["preview"]:
+            row["preview"] = info["preview"]
 
     def desktop_status():
         convs = app.state.store.list_conversations()
@@ -196,7 +219,20 @@ def create_app(
 
     @app.get("/api/targets", dependencies=auth_dep)
     def api_targets() -> list[dict]:
-        return [t.as_dict() for t in targets_mod.discover_targets(hub=hub_path)]
+        convs = [_conversation_summary(c) for c in app.state.store.list_conversations()]
+        return targets_mod.with_last_active(targets_mod.discover_targets(hub=hub_path), convs)
+
+    # «Add project…»: the chosen folder becomes a project through the hub's own new-wiki.
+    @app.post("/api/projects", dependencies=auth_dep)
+    async def api_add_project(request: Request) -> dict:
+        body = await _json_body(request, cfg.max_body_bytes)
+        try:
+            target, created = await asyncio.to_thread(targets_mod.add_project, hub_path, str(body.get("path") or ""))
+        except targets_mod.ProjectRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {**target.as_dict(), "created": created}
 
     @app.get("/api/runtimes", dependencies=auth_dep)
     def api_runtimes() -> list[dict]:
@@ -275,10 +311,12 @@ def create_app(
         title = title.strip()[:200] if isinstance(title, str) else ""
         if mode not in ({"session", "terminal"} if cfg.desktop else {"oneshot", "session", "terminal"}):
             raise HTTPException(status_code=400, detail="unknown transport")
-        if runtime not in cfg.allowed_runtimes:
+        # The in-app terminal runs any listed agent CLI; structured sessions and one-shot runs need Claude or Codex.
+        allowed = RUNTIME_SUFFIX if mode == "terminal" else cfg.allowed_runtimes
+        if runtime not in allowed:
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown runtime {runtime!r}; allowed: {list(cfg.allowed_runtimes)}",
+                detail=f"unknown runtime {runtime!r}; allowed: {list(allowed)}",
             )
         board_stage = body.get("board_stage")
         if board_stage is not None and (not isinstance(board_stage, str) or board_stage not in BOARD_STAGES):
@@ -433,7 +471,7 @@ def create_app(
         conv = app.state.store.get_conversation(conv_id)
         if conv is None:
             raise HTTPException(status_code=404, detail="no such conversation")
-        if conv.runtime not in ("claude", "codex", "agy"):
+        if conv.runtime not in RUNTIME_SUFFIX:
             raise HTTPException(
                 status_code=400,
                 detail=f"conversation runtime {conv.runtime!r} has no interactive session form",
@@ -584,10 +622,10 @@ def create_app(
                 if reading in done:
                     data = reading.result()
                     if not data:
-                        # Our tmux client ended. An external detach leaves the agent alive:
-                        # close without "exited" so the page reconnects. Otherwise it is gone.
+                        # Our tmux client ended. An external detach leaves the terminal open (agent or
+                        # shell): close without "exited" so the page reconnects. Otherwise it is gone.
                         live = await loop.run_in_executor(None, terminal_mod.liveness, name, env)
-                        if live["agent"] != "alive":
+                        if live["agent"] not in ("alive", "shell"):
                             await websocket.send_json({"type": "exited"})
                         break
                     await websocket.send_bytes(data)
@@ -596,10 +634,13 @@ def create_app(
                     message = receiving.result()
                     if message["type"] == "websocket.disconnect":
                         break
-                    if message.get("bytes"):
-                        os.write(master, message["bytes"])
-                    elif message.get("text"):
-                        _apply_resize(master, message["text"])
+                    # A frame racing the tmux client's exit must not end the bridge before the EOF
+                    # branch decides between "exited" and a silent reconnect.
+                    with contextlib.suppress(OSError):
+                        if message.get("bytes"):
+                            os.write(master, message["bytes"])
+                        elif message.get("text"):
+                            _apply_resize(master, message["text"])
                     receiving = asyncio.create_task(websocket.receive())
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
@@ -783,6 +824,7 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
             # The paste is the whole job: the terminal shows the rest, so the
             # run closes now and never marks the app busy.
             reason = result.get("reason") or "Message sent to the terminal."
+            store.update_transport(conv_id, note="")  # an earlier "press Start" no longer applies
             store.finish_run(conv_id, run_id, "submitted", reason=reason, category="submitted",
                              evidence={"pid": result.get("pid"), "lane": "terminal"})
             bus.publish(conv_id, {"type": "run_finished", "run_id": run_id, "status": "submitted",
@@ -793,7 +835,8 @@ def _execute_session(app, conv_id, run_id, prompt, target_slug, runtime, target)
         store.finish_run(conv_id, run_id, status, text=result.get("text", ""),
                          reason=result.get("reason", ""), category=result.get("category"),
                          evidence={**evidence, "pid": result.get("pid"), "provider_session_id": result.get("session_id"), "lane": app.state.sessions.mode(conv)})
-        if not result.get("ok"):
+        # The header already offers Start when the shell is in front; that refusal is not a lasting note.
+        if not result.get("ok") and result.get("category") != "terminal_not_running":
             store.update_transport(conv_id, note=result.get("reason") or "Session transport failed")
         bus.publish(conv_id, {**result, "type": "run_finished", "run_id": run_id, "status": status, "evidence": evidence})
     except Exception as exc:

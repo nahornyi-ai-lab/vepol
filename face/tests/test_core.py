@@ -369,6 +369,49 @@ def test_targets_survive_broken_symlink(tmp_path):
     assert [t.slug for t in discover_targets(hub=hubdir)] == ["hub"]
 
 
+def test_add_project_registers_a_folder_and_lists_it_by_activity(tmp_path, monkeypatch):
+    """Critical: without it «Add project…» cannot bring a folder into Vepol."""
+    from fastapi.testclient import TestClient
+
+    from vepol_face.app import create_app
+
+    # The hub's own new-wiki and template: this repo's when it carries them, else ~/knowledge.
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    kb_root = repo if (repo / "bin" / "new-wiki").is_file() and (repo / "_template").is_dir() \
+        else pathlib.Path.home() / "knowledge"
+    hub = tmp_path / "knowledge"
+    (hub / "bin").mkdir(parents=True)
+    (hub / "projects").mkdir()
+    (hub / "bin" / "new-wiki").symlink_to(kb_root / "bin" / "new-wiki")
+    (hub / "_template").symlink_to(kb_root / "_template")
+    old = tmp_path / "old-project" / "knowledge"
+    old.mkdir(parents=True)
+    (old / "log.md").write_text("# Log\n", encoding="utf-8")
+    os.utime(old / "log.md", (1_000_000_000, 1_000_000_000))
+    os.symlink(old, hub / "projects" / "old-project")
+    folder = tmp_path / "My New App"
+    folder.mkdir()
+
+    monkeypatch.setenv("VEPOL_FACE_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(hub=hub)
+    c = TestClient(app)
+    h = {"X-Vepol-Token": app.state.auth.token}
+
+    r = c.post("/api/projects", json={"path": str(folder)}, headers=h)
+    assert r.status_code == 200, r.text
+    added = r.json()
+    assert (added["slug"], added["created"]) == ("my-new-app", True)
+    assert (folder / "AGENTS.md").is_file() and (folder / "knowledge" / "backlog.md").is_file()
+    assert (hub / "projects" / "my-new-app").resolve() == (folder / "knowledge").resolve()
+
+    # Picking the same project again (even its knowledge/ folder) opens it, never a second copy.
+    again = c.post("/api/projects", json={"path": str(folder / "knowledge")}, headers=h).json()
+    assert (again["slug"], again["created"]) == ("my-new-app", False)
+
+    slugs = [t["slug"] for t in c.get("/api/targets", headers=h).json()]
+    assert slugs.index("my-new-app") < slugs.index("old-project") == len(slugs) - 1
+
+
 # ------------------------------------------------------------------ HTTP API
 
 @pytest.fixture()
@@ -393,6 +436,32 @@ def test_api_accepts_minted_token(client):
     r = c.get("/api/targets", headers={"X-Vepol-Token": app.state.auth.token})
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+def test_every_listed_agent_cli_opens_as_a_terminal_session(client, monkeypatch):
+    """Critical: without it only Claude and Codex can be started in the app."""
+    from vepol_face.sessions import RUNTIME_SUFFIX, session_name
+    from vepol_face.terminal_session import TerminalSession
+
+    c, app = client
+    h = {"X-Vepol-Token": app.state.auth.token}
+    assert {"agy", "hermes", "opencode", "grok"} <= set(RUNTIME_SUFFIX)
+    for runtime in RUNTIME_SUFFIX:
+        r = c.post("/api/conversations", json={"target": "hub", "runtime": runtime, "transport": "terminal"}, headers=h)
+        assert r.status_code == 201, (runtime, r.text)
+        assert c.get(f"/api/conversations/{r.json()['id']}/attach", headers=h).json()["session"] == session_name("hub", runtime)
+    # Structured sessions still need Claude or Codex.
+    assert c.post("/api/conversations", json={"target": "hub", "runtime": "agy", "transport": "session"},
+                  headers=h).status_code == 400
+
+    # The pane's shell gets the agent's own interactive CLI typed in; the newer agents take no extra arguments.
+    monkeypatch.setattr(TerminalSession, "_binary", lambda self, rt: f"/fake/{rt}")
+    for runtime in ("hermes", "opencode", "grok"):
+        session = TerminalSession(cwd="/tmp/project", project="hub", runtime=runtime,
+                                  on_event=lambda e: None, env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
+        assert session._agent_argv() == [f"/fake/{runtime}"]
+        pane = session._pane_command()
+        assert pane[0] == "/usr/bin/env" and pane[-2:] == session._shell_argv(), pane
 
 
 def test_api_rejects_oversized_payload(client):

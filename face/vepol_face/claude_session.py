@@ -26,9 +26,10 @@ def _runtime_env(base: dict | None) -> dict[str, str]:
 
 
 def _claude_binary(env: dict) -> str:
+    # The native install first: it is what `claude update` updates; a Homebrew/npm copy can lag behind it.
     for candidate in (
-        "/opt/homebrew/bin/claude",
         str(pathlib.Path.home() / ".local/bin/claude"),
+        "/opt/homebrew/bin/claude",
     ):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate

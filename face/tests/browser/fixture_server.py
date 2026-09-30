@@ -21,7 +21,9 @@ os.environ.pop("TMUX", None)
 os.environ.pop("TMUX_PANE", None)
 
 import uvicorn
+from vepol_face import runtimes as runtimes_mod
 from vepol_face import terminal_session
+from vepol_face.sessions import RUNTIME_SUFFIX
 from vepol_face.app import create_app
 from vepol_face.config import Config
 
@@ -35,10 +37,12 @@ _real_binary = terminal_session.TerminalSession._binary
 
 
 def _fixture_binary(self, runtime: str) -> str:
-    return str(standin) if runtime in ("claude", "codex", "agy") else _real_binary(self, runtime)
+    return str(standin) if runtime in RUNTIME_SUFFIX else _real_binary(self, runtime)
 
 
 terminal_session.TerminalSession._binary = _fixture_binary
+# The pane's shell reads no startup files, so the owner's own rc never runs in a fixture.
+terminal_session.TerminalSession._shell_argv = lambda self: ["/bin/zsh", "-f"]
 
 WORKSPACE = os.environ.get("VEPOL_FIXTURE_WORKSPACE")
 if WORKSPACE:
@@ -169,8 +173,45 @@ if os.environ.get("VEPOL_FIXTURE_ORCA") == "1":
     claude_usage.write_text(json.dumps({"rate_limits": {
         "five_hour": {"used_percentage": 12, "resets_at": int(now + 3600)},
         "seven_day": {"used_percentage": 40, "resets_at": int(now + 4 * 86400)}}, "at": int(now)}), encoding="utf-8")
+    # Its own roster and broker state (claude/codex recently fine), so routing never reads the machine's.
+    roster = fixture_root / "cli-tools.tsv"
+    roster.write_text("".join(f"{name} | path-any | /bin/cat | fixture\n" for name in ("claude", "codex")), encoding="utf-8")
+    broker = fixture_root / "broker-state.json"
+    broker.write_text(json.dumps({"providers": {name: {"last_success_at": stamp} for name in ("claude", "codex")}}),
+                      encoding="utf-8")
+    runtimes_mod.CLI_TSV, runtimes_mod.BROKER_STATE = roster, broker
     orca = {"knowledge": str(knowledge), "files": files,
             "codex_rollout": str(rollout), "claude_usage": str(claude_usage)}
+
+projects = None
+if os.environ.get("VEPOL_FIXTURE_PROJECTS") == "1":
+    # The hub's own kb-board and new-wiki; logs of different ages; one plain folder to add.
+    import datetime
+    import time
+    (hub / "bin").mkdir(parents=True, exist_ok=True)
+    for tool in ("kb-board", "new-wiki"):
+        (hub / "bin" / tool).symlink_to(REAL_HUB / "bin" / tool)
+    (hub / "_template").symlink_to(REAL_HUB / "_template")
+    now = time.time()
+    for slug, age_hours in (("gamma", 1), ("alpha", 48), ("beta", 240)):
+        log = hub / "projects" / slug / "log.md"
+        log.write_text("# Log\n", encoding="utf-8")
+        os.utime(log, (now - age_hours * 3600, now - age_hours * 3600))
+    fresh = fixture_root / "work" / "Fresh App"
+    fresh.mkdir(parents=True)
+    # No log anywhere else: hub and delta have no activity and keep discovery order at the end.
+    # The fixture's own agent roster and broker state: claude/codex brokered and recently fine, two more
+    # terminal agents installed but never observed, and notebooklm (not a terminal agent).
+    roster = fixture_root / "cli-tools.tsv"
+    roster.write_text("".join(f"{name} | path-any | /bin/cat | fixture\n"
+                              for name in ("claude", "codex", "agy", "hermes", "notebooklm")), encoding="utf-8")
+    broker = fixture_root / "broker-state.json"
+    seen = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    broker.write_text(json.dumps({"providers": {name: {"last_success_at": seen} for name in ("claude", "codex")}}),
+                      encoding="utf-8")
+    runtimes_mod.CLI_TSV, runtimes_mod.BROKER_STATE = roster, broker
+    projects = {"order": ["gamma", "alpha", "beta", "hub", "delta"], "fresh": str(fresh),
+                "agents": ["agy", "claude", "codex", "hermes"]}
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
@@ -183,6 +224,8 @@ if expected is not None:
     print(json.dumps({"tasks": expected}), flush=True)
 if orca is not None:
     print(json.dumps({"orca": orca}), flush=True)
+if projects is not None:
+    print(json.dumps({"projects": projects}), flush=True)
 if memory is not None:
     print(json.dumps({"memory": memory}), flush=True)
 # uvicorn re-raises SIGTERM after shutdown; exiting through Python runs the cleanup below.

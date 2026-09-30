@@ -56,6 +56,8 @@ class Conversation:
     transport: str = "oneshot"
     provider_session_id: str | None = None
     transport_note: str = ""
+    # Display only: the Claude session behind a terminal card, for its title and preview.
+    claude_transcript_id: str | None = None
 
 
 class RunStore:
@@ -178,6 +180,15 @@ class RunStore:
             self._save(conv)
             return conv
 
+    def set_claude_transcript(self, conv_id: str, session_id: str) -> Conversation:
+        with self._lock:
+            conv = self.get_conversation(conv_id)
+            if conv is None:
+                raise KeyError(conv_id)
+            conv.claude_transcript_id = session_id
+            self._save(conv)
+            return conv
+
     def _save(self, conv: Conversation) -> None:
         path = self._path(conv.id)
         tmp = path.with_suffix(".tmp")
@@ -205,6 +216,7 @@ class RunStore:
             transport=blob.get("transport", "oneshot"),
             provider_session_id=blob.get("provider_session_id"),
             transport_note=blob.get("transport_note", ""),
+            claude_transcript_id=blob.get("claude_transcript_id"),
         )
 
     def get_run(self, conv_id: str, run_id: str) -> Run | None:
