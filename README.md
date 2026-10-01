@@ -110,12 +110,15 @@ ships a CLI, a markdown schema agents read natively, and at minimum
 unit tests. The list grows release by release; see
 [`CHANGELOG.md`](CHANGELOG.md) for per-release history.
 
-- **Vepol Desktop** — a native macOS app in [`face/`](face/README.md). Your
-  agent runs in a real terminal inside the window, next to a session board
-  with manual stages, every project's tasks, every scheduled routine with its
-  state and history, and a read-only view of each project's knowledge. Local
-  only; for Apple Silicon Macs, built from source with the Command Line Tools
-  (needs `tmux` and Python 3.11 or later — see the app's README).
+- **Vepol Desktop** — a native macOS app in [`face/`](face/README.md). It
+  opens on Memory, what every project remembers, and one click on a project
+  shows its state, its sessions and its task board on one screen. Your agent
+  (Claude Code, Codex, agy, Hermes, OpenCode or Grok) runs in a real terminal
+  inside the window, with open sessions as tabs, next to a session board with
+  manual stages, every project's tasks and every scheduled routine with its
+  state and history. Local only; for Apple Silicon Macs, built from source with
+  the Command Line Tools (needs `tmux` and Python 3.11 or later — see the app's
+  README).
 
 - **Runtime registry** — `kb-runtime-registry` shows which of your agent CLIs
   can actually work right now (installed, logged in, within quota,
