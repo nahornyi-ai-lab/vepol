@@ -118,7 +118,8 @@ function processOf(pid) {
 
     // O1. Sidebar (owner 2026-09-28, like Orca): projects only, newest activity first (beta's session is the newest,
     // projects without activity keep discovery order); a green dot where an agent runs; the shown tab's project is
-    // highlighted. A project click opens its running sessions as tabs, or offers the agents when nothing runs there.
+    // highlighted. A project click opens the project screen (owner 2026-10-01); its sessions open from there, and
+    // «New session here» offers the agents for that project.
     await page.locator(`[data-open-conversation="${a1.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const wantTree = [
@@ -134,8 +135,14 @@ function processOf(pid) {
     const tabIds = () => page.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
     const activeTab = () => page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
     await page.screenshot({ path: path.join(OUT, 'tree.png'), fullPage: true });
-    // beta has only a stopped session: the click offers the agents for beta alone and starts nothing by itself.
+    // beta has only a stopped session: the click opens beta's screen, which lists it as not running; nothing starts.
     await page.locator('#tree .tree-project[data-slug="beta"]').click();
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    assert(await page.locator('#picker').isHidden(), 'a project click opens no dialog');
+    await waitUntil(async () => (await node('beta')).active && !(await node('alpha')).active, 'beta highlighted while its screen is shown');
+    const betaCard = page.locator(`#mem-sessions [data-project-session="${b1.id}"] .ps-state`);
+    await waitUntil(async () => await betaCard.count() === 1 && await betaCard.textContent() === 'Agent not running', 'beta screen lists its stopped session');
+    await page.locator('#mem-newconv').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#picker-title').textContent(), 'New session in beta');
     assert(await page.locator('#picker-list').isHidden() && await page.locator('#picker-search').isHidden(), 'one-project mode hides the project list');
@@ -150,10 +157,15 @@ function processOf(pid) {
     await page.locator('#picker').waitFor({ state: 'hidden' });
     await waitUntil(async () => (await api(`/api/conversations/${bc.id}`)).agent === 'alive', 'beta/claude started');
     await waitUntil(async () => (await activeTab())[0] === bc.id && (await node('beta')).dot === 'agent-alive' && (await node('beta')).active, 'beta tab selected, beta has a dot');
-    // alpha has a running agent: the click selects its tab and shows its terminal.
+    // alpha has a running agent: its screen lists it first as running; the card selects its tab and shows its terminal.
     await page.locator('#tree .tree-project[data-slug="alpha"]').click();
-    await waitUntil(async () => (await activeTab())[0] === a1.id && (await node('alpha')).active && / · alpha · claude$/.test(await page.locator('#conversation-title').textContent()), 'alpha click opens its running session');
-    assert(await page.locator('#picker').isHidden(), 'no dialog for a project with a running agent');
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    const alphaFirst = page.locator('#mem-sessions [data-project-session]').first();
+    await waitUntil(async () => await alphaFirst.count() === 1 && await alphaFirst.getAttribute('data-project-session') === a1.id
+      && await alphaFirst.locator('.ps-state').textContent() === 'Agent running', 'alpha screen lists its running session first');
+    await alphaFirst.click();
+    await waitUntil(async () => (await activeTab())[0] === a1.id && (await node('alpha')).active && / · alpha · claude$/.test(await page.locator('#conversation-title').textContent()), 'the card opens its running session');
+    assert(await page.locator('#picker').isHidden(), 'no dialog for a session card');
     // «+ New session» still asks for any project; a new agent in alpha becomes a tab.
     const created = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#newconv').click();
@@ -175,7 +187,7 @@ function processOf(pid) {
     assert.equal(await page.locator('#tree .tree-session').count(), 0, 'no session rows in the sidebar');
     assert.deepEqual((await treeShape(page)).filter(p => p.other), [], 'nothing but project rows');
     evidence.cases.O1 = { tree: wantTree, betaAgent: bc.id, tabs: await tabIds(), newConversation: c1 };
-    evidence.steps.push('O1 sidebar lists projects only, newest first, dot where an agent runs; beta (stopped session) → «New session in beta» → claude starts there as a tab; alpha (running) → its tab; «+ New session» → picker → alpha/codex tab');
+    evidence.steps.push('O1 sidebar lists projects only, newest first, dot where an agent runs; beta → its screen (stopped session listed, nothing started) → «New session here» → «New session in beta» → claude starts there as a tab; alpha → its screen, running session first → its tab; «+ New session» → picker → alpha/codex tab');
 
     // O2. Knowledge panel: read-only tree of alpha's knowledge/, filter, exact file text, no escape, nothing written.
     await page.locator('[data-panel="knowledge"]').click();
@@ -256,15 +268,17 @@ function processOf(pid) {
     await page.keyboard.type('echo vepol-shell-$((20+22))');
     await page.keyboard.press('Enter');
     await waitUntil(async () => (await rows()).includes('vepol-shell-42'), 'the shell runs a command typed in the window', 5000);
-    // The owner's 2026-09-28 path: another project is clicked while the session is on screen; Start still acts on it.
-    // delta has nothing running, so the click offers its agents; closing that choice creates nothing.
+    // The owner's 2026-09-28 path, with the 2026-10-01 project screen: another project is clicked while the session is
+    // on screen → that project's screen (delta: no sessions; nothing created); back through the tab, Start still acts on gamma.
     const convCount = (await api('/api/conversations')).length;
     await page.locator('#tree .tree-project[data-slug="delta"]').click();
-    await page.locator('#picker').waitFor({ state: 'visible' });
-    assert.equal(await page.locator('#picker-title').textContent(), 'New session in delta');
-    await page.locator('#picker-close').click();
-    await page.locator('#picker').waitFor({ state: 'hidden' });
-    assert.equal((await api('/api/conversations')).length, convCount, 'closing the agent choice creates nothing');
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    assert(await page.locator('#picker').isHidden(), 'a project click opens no dialog');
+    await waitUntil(async () => (await page.locator('#mem-sessions').textContent()).includes('No sessions in this project yet.'), 'delta screen: no sessions');
+    assert.equal((await api('/api/conversations')).length, convCount, 'a project click creates nothing');
+    await page.locator(`#tabstrip .tab[data-tab="${g1.id}"]`).click();
+    await page.locator('#terminal').waitFor({ state: 'visible' });
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'back on gamma: shell open + Start');
     const restart = startOf();
     await page.locator('#terminal-start').click();
     assert((await restart).ok(), 'Start succeeded');

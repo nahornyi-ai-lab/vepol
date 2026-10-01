@@ -367,6 +367,34 @@
   .mem-row:hover, .mem-row[aria-expanded="true"] { background: var(--panel-2); }
   .mem-row .when { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); white-space: nowrap; }
   .mem-inline { padding: 12px 14px; border-top: 1px solid var(--line); }
+  .state-box { border-color: var(--accent); }
+  .state-now { font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .state-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; margin-top: 8px; font-size: 12px; color: var(--ink-dim); }
+  .state-meta .next { color: var(--ink); font-weight: 600; }
+  .state-full { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .ps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+  .ps-card { display: flex; flex-direction: column; gap: 3px; min-width: 0; text-align: left; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; font-weight: 400; cursor: pointer; }
+  .ps-card:hover, .ps-card:focus-visible { border-color: var(--accent); outline: none; }
+  .ps-card.tone-ok { border-color: var(--ok); }
+  .ps-card.tone-warn { border-color: var(--warn); }
+  .ps-state { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--ink-dim); }
+  .ps-card.tone-ok .ps-state { color: var(--ok); }
+  .ps-card.tone-warn .ps-state { color: var(--warn); }
+  .ps-card.tone-active .ps-state { color: var(--accent); }
+  .ps-card.tone-bad .ps-state { color: var(--bad); }
+  .ps-title { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .ps-meta { font-size: 11px; color: var(--ink-dim); }
+  button.more { background: transparent; border: 0; color: var(--accent); padding: 4px 2px; font-size: 12px; font-weight: 500; }
+  button.more:hover { text-decoration: underline; }
+  .kb-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; align-items: start; }
+  .kb-col { min-width: 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px; }
+  .kb-col h3 { display: flex; align-items: center; gap: 6px; margin: 2px 2px 8px; font-size: 12px; }
+  .kb-col h3 .count { margin-left: auto; color: var(--ink-dim); font-weight: 500; }
+  .kb-task { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; margin-bottom: 6px;
+    font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+  .kb-task .owner { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-dim); }
+  .kb-empty { padding: 2px 4px 4px; font-size: 12px; color: var(--ink-dim); }
   details.mem-row-d { border-top: 1px solid var(--line); }
   details.mem-row-d:first-child { border-top: 0; }
   details.mem-row-d > summary { list-style: none; border-top: 0; }
@@ -483,8 +511,10 @@
           <button id="mem-newconv">New session here</button>
         </div>
         <div id="mem-feedback" class="banner bad" role="alert" hidden style="margin-top:14px"></div>
-        <section class="mem-section" aria-label="State"><h2 class="section">State</h2><div class="mem-box" id="mem-state"></div></section>
-        <section class="mem-section" aria-label="Plans"><div class="mem-section-head"><h2 class="section">Plans</h2><button class="ghost" id="mem-open-tasks">Open in Tasks</button></div><div class="mem-box" id="mem-plans"></div></section>
+        <section class="mem-section" aria-label="State"><h2 class="section">State</h2>
+          <div class="mem-box state-box"><div class="state-now" id="mem-now"></div><div class="state-meta" id="mem-state-meta"></div><div class="state-full" id="mem-state" hidden></div></div></section>
+        <section class="mem-section" aria-label="Sessions"><h2 class="section">Sessions</h2><div id="mem-sessions"></div></section>
+        <section class="mem-section" aria-label="Board"><div class="mem-section-head"><h2 class="section">Board</h2><button class="ghost" id="mem-open-tasks">Open in Tasks</button></div><div id="mem-plans"></div></section>
         <section class="mem-section" aria-label="Decisions"><h2 class="section">Decisions</h2><div id="mem-decisions"></div></section>
         <section class="mem-section" aria-label="History"><h2 class="section">History</h2><div id="mem-history"></div></section>
         <section class="mem-section" aria-label="Lessons"><h2 class="section">Lessons</h2><div class="mem-box" id="mem-lessons"></div></section>
@@ -732,25 +762,22 @@
   }
 
   // Owner (2026-09-28): the sidebar lists projects only, like Orca; open sessions live in the tabs.
-  // A green dot marks a project where an agent is running; the selected tab's project is highlighted.
+  // A green dot marks a project where an agent is running. Highlighted: the selected tab's project, else the
+  // project whose screen is shown (owner 2026-10-01: a project click opens its screen).
   const AGENT_DOT = { alive: "alive", not_running: "not_running", shell: "not_running" };
   let treeHtml = "";
-
-  // Terminal sessions whose terminal is open (agent running, or back at the shell prompt), newest first.
-  const runningSessions = (slug) => conversations
-    .filter((c) => c.target === slug && c.transport === "terminal" && (c.agent === "alive" || c.agent === "shell"))
-    .sort((a, b) => String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
 
   function paintTree() {
     const q = ($("tfilter").value || "").trim().toLowerCase();
     const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
     const matches = (slug) => !q || slug.toLowerCase().includes(q) || String(label(slug)).toLowerCase().includes(q);
     const slugs = projectsByActivity().filter(matches);
-    const shown = tabs.active ? (conversations.find((c) => c.id === tabs.active) || {}).target : null;
+    const shown = tabs.active ? (conversations.find((c) => c.id === tabs.active) || {}).target
+      : state.view === "board" && state.boardView === "memory" ? state.memorySlug : null;
     const html = slugs.length ? slugs.map((slug) => {
       const live = conversations.some((c) => c.target === slug && c.transport === "terminal" && c.agent === "alive");
       const dot = live ? `<span class="dot agent-alive" title="Agent running"></span>` : `<span class="nodot"></span>`;
-      return `<div class="item tree-project ${slug === shown ? "active" : ""}" data-slug="${esc(slug)}" role="button" tabindex="0" title="Open this project's running agents, or start one">
+      return `<div class="item tree-project ${slug === shown ? "active" : ""}" data-slug="${esc(slug)}" role="button" tabindex="0" title="Open project">
           ${dot}<span class="name">${esc(label(slug))}</span>
         </div>`;
     }).join("") : `<div class="hint">${q ? "no match" : "No projects yet"}</div>`;
@@ -758,20 +785,10 @@
     treeHtml = html;
     $("tree").innerHTML = html;
     $("tree").querySelectorAll(".tree-project").forEach((el) => {
-      const open = () => openProject(el.dataset.slug).catch((err) => showDegraded({ reason: `Could not open session: ${err.message}` }));
+      const open = () => openMemoryProject(el.dataset.slug);
       el.onclick = open;
       el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
     });
-  }
-
-  // A project click opens its running sessions as tabs (the newest selected); with none running it offers the agents.
-  async function openProject(slug) {
-    const running = runningSessions(slug);
-    if (!running.length) return openPicker(null, slug);
-    running.forEach((c) => { if (!tabs.ids.includes(c.id)) tabs.ids.push(c.id); });
-    saveTabs();
-    paintTabs();
-    await openConv(running[0].id);
   }
 
   // The native app's terminal runs any installed agent CLI; one-shot runs in a browser need a brokered one.
@@ -827,6 +844,8 @@
     paintTabs();
     paintBoard();
     paintTree();
+    mem.sessionsError = false;
+    paintProjectSessions();
   }
 
   // Manual stages belong to conversations; runtime activity never accepts a task.
@@ -1100,6 +1119,7 @@
     $("tasks-pane").hidden = view !== "tasks";
     $("automations-pane").hidden = view !== "automations";
     $("board-newconv").hidden = view !== "sessions";
+    paintTree();
     if (view === "sessions") { paintBoard(true); refreshBoard(); return; }
     $("board-project-path").hidden = true;
     if (view === "memory") { if (page) loadMemoryProject(); else loadMemory(); }
@@ -1108,6 +1128,7 @@
   }
 
   const viewVisible = (view) => state.view === "board" && state.boardView === view && !document.hidden;
+  const projectScreen = () => viewVisible("memory") && !!state.memorySlug;
 
   function feedback(el, message, retry) {
     el.textContent = message;
@@ -1496,8 +1517,13 @@
   // Read only: /api/memory for the cards, /api/memory/project and /api/tasks for one project's page.
   const MEM_STATUS = { up_to_date: ["Up to date", "st-ok"], needs_review: ["Needs review", "st-warn"],
     no_state: ["No state file", "st-idle"] };
-  const PLAN_GROUPS = ["In Progress", "Review", "Blocked", "Ready"];
-  const mem = { cards: null, signature: "", version: 0, page: null, plans: null, pageVersion: 0 };
+  // The project screen (owner 2026-10-01): State box, the project's sessions, its board. Blocked only when it has tasks.
+  const BOARD_COLUMNS = ["In Progress", "Review", "Blocked", "Ready", "Backlog"];
+  const COLUMN_LIMIT = 5;
+  const SESSIONS_LIMIT = 6;
+  const mem = { cards: null, signature: "", version: 0, page: null, plans: null, pageVersion: 0,
+    shown: {}, stateOpen: false, allSessions: false, openColumns: new Set(), doneOpen: false,
+    sessionsError: false, sessionsHtml: "" };
 
   function statusChip(status) {
     const [text, dot] = MEM_STATUS[status] || MEM_STATUS.no_state;
@@ -1572,18 +1598,24 @@
   function openMemoryProject(slug) {
     state.memorySlug = slug;
     mem.page = null; mem.plans = null;
+    // Folds start closed for every project; a refresh of the same project keeps them as they are.
+    Object.assign(mem, { shown: {}, stateOpen: false, allSessions: false, openColumns: new Set(), doneOpen: false, sessionsHtml: "" });
     $("mem-feedback").hidden = true;
     if (state.view === "board") { setBoardView("memory"); return; }
     state.boardView = "memory";
     showBoard();
   }
 
-  async function loadMemoryProject() {
+  // refresh: the 30-second reload of the screen already shown; it keeps the Files tree and every open fold.
+  async function loadMemoryProject(refresh = false) {
     const slug = state.memorySlug;
     const version = ++mem.pageVersion;
-    // The Files section is the knowledge panel's own tree and viewer, moved here.
-    knowledgeFor(slug, $("mem-files"));
-    paintMemoryProject();
+    if (!refresh) {
+      // The Files section is the knowledge panel's own tree and viewer, moved here.
+      knowledgeFor(slug, $("mem-files"));
+      paintMemoryProject();
+      refreshTree();
+    }
     const target = encodeURIComponent(slug);
     const [page, plans] = await Promise.allSettled([api(`/api/memory/project?target=${target}`), api(`/api/tasks?target=${target}`)]);
     if (version !== mem.pageVersion || slug !== state.memorySlug) return;
@@ -1606,42 +1638,135 @@
     $("mem-status").innerHTML = head.status ? statusChip(head.status) : "";
     $("mem-folder").textContent = head.folder || "";
     $("mem-folder").title = head.folder || "";
+    paintProjectSessions();
     const loading = `<div class="hint">Loading…</div>`;
     if (!p) {
-      ["mem-state", "mem-plans", "mem-decisions", "mem-history", "mem-lessons"].forEach((id) => { $(id).innerHTML = loading; });
+      mem.shown = {};
+      ["mem-now", "mem-plans", "mem-decisions", "mem-history", "mem-lessons"].forEach((id) => { $(id).innerHTML = loading; });
+      $("mem-state-meta").innerHTML = "";
+      $("mem-state").hidden = true;
       return;
     }
-    const st = $("mem-state");
-    if (p.state && p.state.text !== null && p.state.text !== undefined) st.replaceChildren(renderMarkdown(p.state.text, slug, "state.md"));
-    else st.innerHTML = `<div class="muted">${esc((p.state && p.state.note) || "No state file")}</div>`;
-    paintPlans(slug);
-    paintDecisions(slug, p.decisions || []);
-    paintHistory(slug, p.history || []);
-    const lessons = $("mem-lessons");
-    if (p.lessons && p.lessons.trim()) lessons.replaceChildren(renderMarkdown(p.lessons, slug, "incidents.md"));
-    else lessons.innerHTML = `<div class="muted">No lessons recorded yet</div>`;
+    const tasks = projectTasks(slug);
+    // A section repaints only when its data changed, so a refresh never closes what the owner opened.
+    const changed = (key, value) => {
+      const sig = JSON.stringify(value);
+      if (mem.shown[key] === sig) return false;
+      mem.shown[key] = sig;
+      return true;
+    };
+    if (changed("state", [p.state, p.now, p.state_date, tasks && nextTask(tasks), new Date().toDateString()])) paintStateBox(slug, p, tasks);
+    if (changed("plans", mem.plans)) paintPlans(slug);
+    if (changed("decisions", p.decisions)) paintDecisions(slug, p.decisions || []);
+    if (changed("history", p.history)) paintHistory(slug, p.history || []);
+    if (changed("lessons", p.lessons)) {
+      const lessons = $("mem-lessons");
+      if (p.lessons && p.lessons.trim()) lessons.replaceChildren(renderMarkdown(p.lessons, slug, "incidents.md"));
+      else lessons.innerHTML = `<div class="muted">No lessons recorded yet</div>`;
+    }
+  }
+
+  // This project's tasks from the /api/tasks answer, or null when plans are missing or unavailable.
+  function projectTasks(slug) {
+    const project = ((mem.plans || {}).projects || []).find((x) => x.project === slug);
+    return project && project.state === "ok" ? project.tasks : null;
+  }
+
+  const nextTask = (tasks) => (tasks.find((t) => t.status === "In Progress") || tasks.find((t) => t.status === "Ready") || {}).title || null;
+
+  // State box: the snapshot, the next task, when state.md changed, and the whole state.md folded underneath.
+  function paintStateBox(slug, p, tasks) {
+    const hasState = p.state && p.state.text !== null && p.state.text !== undefined;
+    $("mem-now").innerHTML = !hasState ? `<span class="muted">${esc((p.state && p.state.note) || "No state file")}</span>`
+      : p.now ? esc(p.now) : `<span class="muted">No snapshot yet</span>`;
+    const next = tasks && nextTask(tasks);
+    $("mem-state-meta").innerHTML = [
+      next ? `<span>Next: <span class="next">${esc(next)}</span></span>` : "",
+      p.state_date ? `<span title="${esc(p.state_date)}">updated ${esc(dayText(p.state_date))}</span>` : "",
+      hasState ? `<button class="link" id="mem-state-toggle" aria-expanded="${mem.stateOpen}" aria-controls="mem-state">${mem.stateOpen ? "Hide full state" : "Show full state"}</button>` : "",
+    ].join("");
+    const full = $("mem-state");
+    if (hasState) full.replaceChildren(renderMarkdown(p.state.text, slug, "state.md"));
+    else full.replaceChildren();
+    full.hidden = !(hasState && mem.stateOpen);
+    const toggle = $("mem-state-toggle");
+    if (toggle) toggle.onclick = () => {
+      mem.stateOpen = !mem.stateOpen;
+      full.hidden = !mem.stateOpen;
+      toggle.setAttribute("aria-expanded", String(mem.stateOpen));
+      toggle.textContent = mem.stateOpen ? "Hide full state" : "Show full state";
+    };
+  }
+
+  // Sessions block: waiting for the owner first, then agent running, then shell open, then the rest; newest first inside.
+  const SESSION_TONE = { alive: "ok", running: "ok", waiting: "warn", shell: "active", failed: "bad", degraded: "bad", interrupted: "bad" };
+  const sessionRank = (c) => c.activity === "waiting" ? 0 : c.agent === "alive" || c.activity === "running" ? 1 : c.agent === "shell" ? 2 : 3;
+  const TONE_DOT = { ok: "st-ok", warn: "st-warn", active: "st-active", bad: "st-bad" };
+
+  function paintProjectSessions() {
+    const slug = state.memorySlug;
+    if (!slug || $("memory-project").hidden) return;
+    const list = conversations.filter((c) => c.target === slug)
+      .sort((a, b) => sessionRank(a) - sessionRank(b) || String(b.last_activity_at).localeCompare(String(a.last_activity_at)));
+    const shown = mem.allSessions ? list : list.slice(0, SESSIONS_LIMIT);
+    const card = (c) => {
+      const activity = c.activity || "idle";
+      const tone = SESSION_TONE[activity] || "idle";
+      const stage = (STAGES.find(([value]) => value === c.board_stage) || [])[1] || "";
+      const meta = [c.runtime, stage, fmtAgo(c.last_activity_at)].filter(Boolean).join(" · ");
+      return `<button class="ps-card tone-${tone}" data-project-session="${esc(c.id)}">
+          <span class="ps-state"><span class="dot ${TONE_DOT[tone] || "st-idle"}"></span>${esc(ACTIVITY[activity] || activity)}</span>
+          <span class="ps-title">${esc(c.title || "New session")}</span><span class="ps-meta">${esc(meta)}</span></button>`;
+    };
+    const html = (list.length
+      ? `<div class="ps-grid">${shown.map(card).join("")}</div>` +
+        (list.length > shown.length ? `<button class="more" id="mem-sessions-more">Show ${list.length - shown.length} more</button>` : "")
+      : `<div class="mem-box muted">No sessions in this project yet.</div>`) +
+      (mem.sessionsError ? `<div class="hint tone-warn" role="status">Could not refresh sessions</div>` : "");
+    if (html === mem.sessionsHtml) return;
+    mem.sessionsHtml = html;
+    const box = $("mem-sessions");
+    box.innerHTML = html;
+    // Opening only attaches, the same path a tab click takes; it never starts an agent.
+    box.querySelectorAll("[data-project-session]").forEach((el) => {
+      el.onclick = () => openConv(el.dataset.projectSession).catch((err) => feedback($("mem-feedback"), `Could not open session: ${err.message}`));
+    });
+    const more = $("mem-sessions-more");
+    if (more) more.onclick = () => { mem.allSessions = true; paintProjectSessions(); };
   }
 
   function taskList(list) {
     return `<ul class="mem-list">${list.map((t) => `<li><span class="dot ${TASK_DOT[t.status] || "st-idle"}"></span><span>${esc(t.title)}${t.id ? ` <span class="mono muted">${esc(t.id)}</span>` : ""}${t.owner ? ` <span class="muted">· ${esc(t.owner)}</span>` : ""}</span></li>`).join("")}</ul>`;
   }
 
+  // Board: read-only columns from kb-board; the first COLUMN_LIMIT cards, then «+N more»; Done folded.
   function paintPlans(slug) {
     const box = $("mem-plans");
     const data = mem.plans || {};
     const project = (data.projects || []).find((x) => x.project === slug);
-    if (data.error || !project) { box.innerHTML = `<div class="tone-warn">Plans unavailable: ${esc(data.error || "no answer for this project")}</div>`; return; }
-    if (project.state === "none") { box.innerHTML = `<div class="muted">No plans file</div>`; return; }
-    if (project.state !== "ok") { box.innerHTML = `<div class="tone-warn">Plans unavailable: ${esc(project.reason)}</div>`; return; }
+    const note = (cls, text) => { box.innerHTML = `<div class="mem-box ${cls}">${esc(text)}</div>`; };
+    if (data.error || !project) return note("tone-warn", `Plans unavailable: ${data.error || "no answer for this project"}`);
+    if (project.state === "none") return note("muted", "No plans file");
+    if (project.state !== "ok") return note("tone-warn", `Plans unavailable: ${project.reason}`);
     const of = (status) => project.tasks.filter((t) => t.status === status);
-    const groups = PLAN_GROUPS.map((g) => [g, of(g)]).filter(([, list]) => list.length);
-    box.innerHTML = (groups.length
-      ? groups.map(([g, list]) => `<div class="mem-group">${esc(g)} · ${list.length}</div>${taskList(list)}`).join("")
-      : `<div class="muted">Nothing in progress, in review, blocked or ready</div>`) +
-      ["Backlog", "Done"].map((g) => {
-        const list = of(g);
-        return `<details class="mem-fold"><summary>${esc(g)} · ${list.length}</summary>${list.length ? taskList(list) : ""}</details>`;
-      }).join("");
+    const columns = BOARD_COLUMNS.filter((status) => status !== "Blocked" || of(status).length).map((status) => {
+      const list = of(status);
+      const open = mem.openColumns.has(status);
+      const shown = open ? list : list.slice(0, COLUMN_LIMIT);
+      return `<section class="kb-col" data-column="${esc(status)}" aria-label="${esc(status)}">
+          <h3><span class="dot ${TASK_DOT[status] || "st-idle"}"></span>${esc(status)}<span class="count">${list.length}</span></h3>
+          ${shown.map((t) => `<div class="kb-task"${t.id ? ` title="${esc(t.id)}"` : ""}>${esc(t.title)}${t.owner ? `<span class="owner">${esc(t.owner)}</span>` : ""}</div>`).join("")
+            || `<div class="kb-empty">Nothing here</div>`}
+          ${list.length > shown.length ? `<button class="more" data-more-column="${esc(status)}">+${list.length - shown.length} more</button>` : ""}
+        </section>`;
+    }).join("");
+    const done = of("Done");
+    box.innerHTML = `<div class="kb-cols">${columns}</div>
+      <details class="mem-fold" id="mem-done"${mem.doneOpen ? " open" : ""}><summary>Done · ${done.length}</summary>${done.length ? taskList(done) : ""}</details>`;
+    box.querySelectorAll("[data-more-column]").forEach((b) => {
+      b.onclick = () => { mem.openColumns.add(b.dataset.moreColumn); paintPlans(slug); };
+    });
+    $("mem-done").addEventListener("toggle", (e) => { mem.doneOpen = e.target.open; });
   }
 
   function paintDecisions(slug, decisions) {
@@ -1969,12 +2094,14 @@
 
   // The board polls sessions while it is shown; the tree needs the same list in the chat view.
   async function refreshTree() {
-    if (state.view !== "chat" || document.hidden) return;
+    if ((state.view !== "chat" && !projectScreen()) || document.hidden) return;
     try { renderConvs(await api("/api/conversations")); }
     catch (err) {
-      // The last tree stays on screen with a note; the next good list clears it.
+      // The last tree and the last Sessions block stay on screen with a note; the next good list clears it.
       $("tree-error").hidden = false;
       $("tree-error").title = err.message;
+      mem.sessionsError = true;
+      paintProjectSessions();
     }
   }
 
@@ -2379,6 +2506,7 @@
     refreshTree();
     loadUsage();
     if (viewVisible("memory") && !state.memorySlug) loadMemory();
+    if (projectScreen()) loadMemoryProject(true);
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
   });
@@ -2401,6 +2529,7 @@
   };
   setInterval(() => {
     if (viewVisible("memory") && !state.memorySlug) loadMemory();
+    if (projectScreen()) loadMemoryProject(true);
     if (viewVisible("tasks")) loadTasks();
     if (viewVisible("automations")) loadAutomations();
   }, 30000);
@@ -2416,15 +2545,8 @@
   });
   $("memory-filter").addEventListener("input", paintMemory);
   $("memory-back").onclick = () => { state.memorySlug = null; setBoardView("memory"); };
-  $("mem-newconv").onclick = async () => {
-    const button = $("mem-newconv");
-    button.disabled = true;
-    $("mem-feedback").hidden = true;
-    state.target = state.memorySlug;
-    try { await createAndOpen({ target: state.target, runtime: state.runtime, transport: newTransport() }, true); }
-    catch (err) { feedback($("mem-feedback"), `Could not create session: ${err.message}`); }
-    finally { button.disabled = false; }
-  };
+  // The agent is chosen in the one-project dialog, the same choice a sidebar click offered before 2026-10-01.
+  $("mem-newconv").onclick = () => openPicker(null, state.memorySlug);
   $("mem-open-tasks").onclick = () => {
     paintTaskProjects();
     $("tasks-project").value = state.memorySlug;

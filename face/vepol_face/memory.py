@@ -285,6 +285,8 @@ def project(hub: pathlib.Path, slug: str) -> dict:
         state = {"text": None, "note": "too large to show" if too_large else "No state file"}
     page.update({
         "state": state,
+        "now": _now(state_text) if state_text is not None else None,
+        "state_date": _mtime_date(real_root, "state.md"),
         "decisions": _decisions(real_root),
         "history": entries[:HISTORY_LIMIT],
         "lessons": _lessons(real_root),

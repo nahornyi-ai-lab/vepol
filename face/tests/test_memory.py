@@ -1,6 +1,7 @@
 """Memory Home on the sample workspace (spec: Vepol Desktop Memory Home, "How we verify" 1)."""
 from __future__ import annotations
 
+import datetime
 import os
 import pathlib
 import shutil
@@ -74,6 +75,10 @@ def test_memory_cards_match_the_sample_workspace(tmp_path, monkeypatch):
     r = client.get("/api/memory/project", params={"target": "acme-web"}, headers=headers)
     assert r.status_code == 200, r.text
     page = r.json()
+    # The project screen's State box: the same snapshot as the card, dated by state.md.
+    assert page["now"] == cards["acme-web"]["now"]
+    state_md = workspace / "code" / "acme-web" / "knowledge" / "state.md"
+    assert page["state_date"] == datetime.date.fromtimestamp(state_md.stat().st_mtime).isoformat()
     assert page["history"][0]["date"] == "2026-09-26"
     assert page["history"][0]["heading"] == 'progress | acme-web | "Saved addresses started"'
     assert page["lessons"].startswith(
