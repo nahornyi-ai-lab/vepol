@@ -26,6 +26,62 @@ this one.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-01
+
+Vepol Desktop only. The stable core, the other `kb-*` commands and
+`processes.yaml` are unchanged.
+
+### Added
+- **Memory.** Vepol Desktop opens on Memory: one card per knowledge base, the
+  hub first, then each project by latest activity, with a status (Up to date,
+  Needs review, No state file), what is happening now (`state.md`), what is
+  next (`kb-board`), the last decision and the last activity. Read at request
+  time from files that already exist; nothing new is required in the knowledge
+  layout. ([v1.1.0](docs/releases/v1.1.0.md))
+- **Project screen.** A click on a project in the sidebar or on its Memory card
+  opens one screen for it: a State box (the snapshot from `state.md`, the next
+  task, when `state.md` changed, and «Show full state»), the project's sessions
+  with their states in colour (waiting for you or running first; a click opens
+  the session in a tab), its tasks as a read-only board (In Progress, Review,
+  Blocked, Ready, Backlog; Done folded), then decisions, history, lessons and
+  files. It refreshes every 30 seconds while shown.
+- **Any project, or a new one.** «+ New session» asks for the project: the hub
+  and every project linked into it, most recent activity first, with search.
+  «Add project…» opens the macOS folder panel and turns the chosen folder into a
+  Vepol project through the hub's `new-wiki`, which adds what is missing and
+  never overwrites a file; the session starts there.
+- **More agents in the terminal.** Besides Claude Code and Codex, the in-app
+  terminal starts agy (Antigravity), Hermes, OpenCode and Grok, chosen from the
+  installed agents in the hub roster; their availability is shown but never
+  blocks. Every agent is shown as its icon (sources and licences in
+  `face/vepol_face/static/vendor/agent-icons/LICENSE.md`).
+- **Tabs.** Every opened session is a tab. Closing a tab stops nothing, and the
+  same tabs come back after you quit and reopen the app.
+- Knowledge is rendered as Markdown (vendored marked 16.4.2 and DOMPurify
+  3.4.10, served locally; raw HTML and images are dropped).
+- A sample workspace in `demo/workspace/` and `face/demo.sh`, which opens it on
+  port 8782 with its own state and tmux server, apart from your own data.
+
+### Changed
+- The sidebar holds the app's sections and lists projects only; a green dot
+  marks a project where an agent is running.
+- The in-app terminal runs your login shell and types the agent command into
+  it, so leaving the agent drops back to a working prompt. When the agent
+  exits, the terminal says so and Start opens a new one for the session on
+  screen; nothing restarts on its own.
+- Claude terminal sessions take their title from Claude's own transcript
+  (`/rename`, then Claude's generated title, then the first prompt) instead of
+  «(new conversation)».
+- The session header follows the agent's start and exit within a second.
+- Claude is started from its native install (`~/.local/bin/claude`) before a
+  Homebrew copy, so `claude update` takes effect.
+- The session side tab «Knowledge» is now «Memory»; `kb-board` lock files are
+  no longer listed in it.
+
+### Fixed
+- The app icon is drawn on the exact macOS icon shape, so macOS 26 no longer
+  shows it as a small V inside a grey tile.
+
 ## [1.0.0] — 2026-09-26
 
 ### Added
@@ -628,7 +684,8 @@ v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
 **2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.1...v1.0.0
 [0.8.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.7.2...v0.8.0
