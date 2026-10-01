@@ -172,6 +172,7 @@
   .tab:hover { background: var(--panel); color: var(--ink); }
   .tab[aria-selected="true"] { background: var(--panel); color: var(--ink); border-color: var(--line); margin-bottom: -1px; font-weight: 600; }
   .tab .tab-proj { color: var(--ink-dim); font-weight: 400; flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab .tab-agent { color: var(--ink-dim); font-weight: 400; font-size: 11px; flex: none; }
   .tab .tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab .tab-close { background: transparent; color: var(--ink-dim); padding: 2px 6px; font-size: 14px; line-height: 1; font-weight: 400; border-radius: 5px; }
   .tab .tab-close:hover { background: var(--panel-2); color: var(--ink); }
@@ -580,6 +581,7 @@
       <button role="tab" data-panel="session" aria-selected="true">Session</button><button role="tab" data-panel="knowledge" aria-selected="false">Memory</button>
     </div>
     <div id="panel-session">
+      <div id="panel-run">
       <h2>Run</h2>
       <div id="runstate" class="card">idle</div>
 
@@ -589,6 +591,7 @@
       <p class="hint" id="checkpoint-note" hidden>In a persistent session the summary is saved when you ask for it.</p>
       <h2>Progress</h2>
       <div id="steps" class="card" style="max-height:28vh;overflow:auto;white-space:pre-wrap"></div>
+      </div>
 
       <h2>Interactive</h2>
       <div id="attach" class="card">—</div>
@@ -683,7 +686,7 @@
     const t = allTargets.find((x) => x.slug === slug);
     if (!t) return null;
     const folder = t.cwd.split("/").filter(Boolean).pop() || t.cwd;
-    return { text: `${folder} · ${t.slug} · ${t.cwd}`, cwd: t.cwd };
+    return { text: folder === t.slug ? `${t.slug} · ${t.cwd}` : `${folder} · ${t.slug} · ${t.cwd}`, cwd: t.cwd };
   }
 
   function renderProjectPath(el, slug) {
@@ -811,6 +814,9 @@
     if (open && state.view === "chat" && state.transport === "terminal" && open.agent
         && `${open.agent}:${open.pid || ""}` !== $("agent-state").dataset.shown) refreshOpenConversation(open.id).catch(() => {});
     $("tree-error").hidden = true;
+    const head = $("conversation-title").dataset;
+    const headRow = list.find((c) => c.id === head.conv);
+    if (headRow) paintHeaderTitle(headRow.id, headRow.title, head.target, head.runtime);
     // A session that left the list takes its tab with it.
     const known = new Set(list.map((c) => c.id));
     if (tabs.ids.some((id) => !known.has(id))) {
@@ -999,19 +1005,27 @@
 
   // ------------------------------------------------ open sessions as tabs
   // Owner (2026-09-28): sections on the left, every opened session is a tab on top. Closing a tab stops nothing.
-  // The list is a per-browser convenience in localStorage; unreadable storage starts with no tabs.
-  const TABS_KEY = "vepol.tabs.v1";
-  const tabs = (() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(TABS_KEY) || "{}");
-      const ids = Array.isArray(saved.ids) ? saved.ids.filter((x) => typeof x === "string") : [];
-      return { ids, active: ids.includes(saved.active) ? saved.active : null, restore: ids.includes(saved.active) ? saved.active : null };
-    } catch (_) { return { ids: [], active: null, restore: null }; }
-  })();
+  // The list lives on the app's server (ui-tabs.json), so the tabs come back after ⌘Q + reopen: the native
+  // web view forgets its own storage on every launch. An unreadable list starts with no tabs.
+  const tabs = { ids: [], active: null, restore: null, loaded: false };
   let tabsHtml = "";
+  let tabsSaving = Promise.resolve();
 
+  async function loadTabs() {
+    try {
+      const saved = await api("/api/ui/tabs");
+      const ids = Array.isArray(saved.ids) ? saved.ids.filter((x) => typeof x === "string") : [];
+      tabs.ids = ids;
+      tabs.active = tabs.restore = ids.includes(saved.active) ? saved.active : null;
+    } catch (_) {}
+    tabs.loaded = true;
+  }
+
+  // Saves run one after another, so the last change wins; nothing is written before the saved list was read.
   function saveTabs() {
-    try { localStorage.setItem(TABS_KEY, JSON.stringify({ ids: tabs.ids, active: tabs.active })); } catch (_) {}
+    if (!tabs.loaded) return;
+    const body = JSON.stringify({ ids: tabs.ids, active: tabs.active });
+    tabsSaving = tabsSaving.then(() => api("/api/ui/tabs", { method: "PUT", body })).catch(() => {});
   }
 
   function paintTabs() {
@@ -1022,7 +1036,7 @@
       const dot = c.transport === "terminal"
         ? `<span class="dot agent-${AGENT_DOT[c.agent] || "unknown"}"></span>` : "";
       return `<div class="tab" role="tab" tabindex="0" data-tab="${esc(id)}" aria-selected="${id === tabs.active}"
-          title="${esc(`${title} · ${c.target || ""} · ${c.runtime || ""}`)}">${dot}<span class="tab-proj">${esc(c.target || "")}</span><span class="tab-name">${esc(name)}</span>
+          title="${esc(`${title} · ${c.target || ""} · ${c.runtime || ""}`)}">${dot}<span class="tab-proj">${esc(c.target || "")}</span><span class="tab-agent">${esc(c.runtime || "")}</span><span class="tab-name">${esc(name)}</span>
           <button class="tab-close" data-tab-close="${esc(id)}" aria-label="Close tab ${esc(name)}" title="Close tab (the agent keeps running)">×</button></div>`;
     }).join("");
     $("tabs-empty").hidden = tabs.ids.length > 0;
@@ -1206,6 +1220,8 @@
       try { await api(`/api/conversations/${conv.id}/terminal/start`, {method: "POST"}); }
       catch (err) { startError = err.message; }
     }
+    // The new tab takes its project, agent and title from the session list, so read it before opening.
+    await refreshSidebars().catch(() => {});
     await openConv(conv.id);
     const note = startError ? `Could not start the agent: ${startError}`
       : noteExisting && conv.existing ? `A terminal for ${conv.target} · ${conv.runtime} already exists — opened it.` : "";
@@ -1762,6 +1778,11 @@
       if (typeof e.data === "string") {
         let ev = {};
         try { ev = JSON.parse(e.data); } catch (_) {}
+        if (ev.type === "agent") {
+          refreshOpenConversation(id).catch(() => {});
+          refreshSidebars().catch(() => {});
+          return;
+        }
         if (ev.type === "not_running" || ev.type === "exited") {
           ended = true;
           // Say it where the owner is looking; hide the cursor so the pane does not look like it takes input.
@@ -1843,6 +1864,8 @@
     $("thread").hidden = state.transport === "terminal";
     // Owner (2026-09-28): a terminal session has no second input box; the owner types in the terminal.
     $("composer").hidden = state.transport === "terminal";
+    // Run, KB write-back and Progress describe one-shot and persistent runs; a terminal has none of them.
+    $("panel-run").hidden = state.transport === "terminal";
     const line = taskLine && taskLine.id === conv.id && state.transport === "terminal" ? taskLine.text : "";
     $("task-line").hidden = !line;
     $("task-text").textContent = line;
@@ -1895,6 +1918,14 @@
     });
   }
 
+  function paintHeaderTitle(id, title, target, runtime) {
+    const el = $("conversation-title");
+    el.dataset.conv = id;
+    el.dataset.target = target;
+    el.dataset.runtime = runtime;
+    el.textContent = `${title || "New session"} · ${target} · ${runtime}`;
+  }
+
   function applyConversation(conv) {
     const last = conv.runs[conv.runs.length - 1];
     state.running = !!(last && last.status === "running"); state.runId = state.running ? last.id : null;
@@ -1902,7 +1933,7 @@
     $("stop").style.display = state.running ? "" : "none"; $("stop").disabled = false;
     // The board row carries the agent's own title for terminal sessions; the header uses the same one.
     const row = conversations.find((c) => c.id === conv.id);
-    $("conversation-title").textContent = `${(row && row.title) || conv.title || "New session"} · ${conv.target} · ${conv.runtime}`;
+    paintHeaderTitle(conv.id, (row && row.title) || conv.title, conv.target, conv.runtime);
     renderProjectPath($("conversation-path"), conv.target);
     paintTree();
   }
@@ -2451,8 +2482,8 @@
 
   loadUsage();
   loadMemory();
-  refreshAll().then(() => {
-    // Reload keeps the tabs; the tab that was selected opens again (attach only, never a start).
+  loadTabs().then(refreshAll).then(() => {
+    // Reload and a restart keep the tabs; the tab that was selected opens again (attach only, never a start).
     if (tabs.restore && tabs.ids.includes(tabs.restore)) openConv(tabs.restore).catch(() => {});
   }).catch((e) => {
     document.body.innerHTML =

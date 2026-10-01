@@ -166,6 +166,12 @@ function processOf(pid) {
     assert.equal(c1.runtime, 'codex');
     assert.equal(c1.existing, false);
     await waitUntil(async () => (await activeTab())[0] === c1.id, 'new alpha session is the selected tab');
+    const tabAgent = (id) => page.locator(`#tabstrip .tab[data-tab="${id}"] .tab-agent`).textContent();
+    assert.equal(await tabAgent(a1.id), 'claude', 'a tab names its agent');
+    assert.equal(await tabAgent(c1.id), 'codex', 'a tab names its agent');
+    await waitUntil(async () => await page.locator('#conversation-title').textContent() === 'New session · alpha · codex'
+      && await page.locator(`#tabstrip .tab[data-tab="${c1.id}"] .tab-name`).textContent() === 'New session', 'header and tab use one title');
+    assert(await page.locator('#panel-run').isHidden(), 'a terminal session shows no Run / KB write-back / Progress');
     assert.equal(await page.locator('#tree .tree-session').count(), 0, 'no session rows in the sidebar');
     assert.deepEqual((await treeShape(page)).filter(p => p.other), [], 'nothing but project rows');
     evidence.cases.O1 = { tree: wantTree, betaAgent: bc.id, tabs: await tabIds(), newConversation: c1 };
@@ -174,6 +180,7 @@ function processOf(pid) {
     // O2. Knowledge panel: read-only tree of alpha's knowledge/, filter, exact file text, no escape, nothing written.
     await page.locator('[data-panel="knowledge"]').click();
     const kbPaths = () => page.locator('#kb-tree .kb-entry').evaluateAll(els => els.map(e => e.title));
+    // The fixture also holds backlog.md.lock, which is never listed.
     const kbEntries = ['decisions', 'decisions/a.md', 'huge.md', 'log.md'];
     // Folders start collapsed; a click expands one, a second click collapses it again.
     await waitUntil(async () => JSON.stringify(await kbPaths()) === JSON.stringify(['decisions', 'huge.md', 'log.md']), 'knowledge tree lists the top level with decisions/ collapsed');
@@ -243,7 +250,7 @@ function processOf(pid) {
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
     const panePid = fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}');
     fixtureTmux(boot.tmux_socket, 'send-keys', '-t', gSession, 'C-d');
-    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start', 8000);
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start within 2 s', 2000);
     assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'shell', 'no auto-restart');
     await page.locator('#terminal').click();
     await page.keyboard.type('echo vepol-shell-$((20+22))');
@@ -317,6 +324,17 @@ function processOf(pid) {
     assert.equal(await page.locator('.nav [aria-selected="true"]').count(), 0, 'no section selected while a tab is');
     await page.reload();
     await waitUntil(async () => (await activeTab())[0] === a1.id && JSON.stringify(await tabIds()) === JSON.stringify(tabsOpened), 'tabs restored after reload');
+    // ⌘Q + reopen: the native web view starts with empty storage every launch; the tabs come from the app's server.
+    const relaunch = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
+    await relaunch.addInitScript(token => { window.__VEPOL_TOKEN__ = token; }, boot.token);
+    const fresh = await relaunch.newPage();
+    fresh.on('pageerror', e => evidence.pageErrors.push(e.message));
+    await fresh.goto(base);
+    const freshTabs = () => fresh.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
+    const freshActive = () => fresh.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
+    await waitUntil(async () => (await freshActive())[0] === a1.id && JSON.stringify(await freshTabs()) === JSON.stringify(tabsOpened)
+      && / · alpha · claude$/.test(await fresh.locator('#conversation-title').textContent()), 'tabs back in a fresh browser (app relaunch)');
+    await relaunch.close();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const ti = tabsOpened.indexOf(a1.id);
     const neighbour = tabsOpened[ti - 1] || tabsOpened[ti + 1];
