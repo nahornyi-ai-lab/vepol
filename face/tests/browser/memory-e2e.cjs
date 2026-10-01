@@ -135,12 +135,17 @@ async function waitUntil(fn, label, timeout = 10000) {
     await waitUntil(async () => (await sessionCards()).length === 2, 'two session cards');
     const shownSessions = await sessionCards();
     assert.deepEqual(shownSessions.map(([id, label]) => [id, label]), [[live.id, 'Agent running'], [idle.id, 'Agent not running']]);
-    assert(shownSessions[1][2].startsWith('codex · Review · '), `stopped card meta: ${shownSessions[1][2]}`);
+    assert(shownSessions[1][2].startsWith('codex Review · '), `stopped card meta: ${shownSessions[1][2]}`);
+    // Owner 2026-10-01: Claude and Codex show their marks, not their names (the name stays in the icon's <title>).
+    for (const [id, agent] of [[live.id, 'claude'], [idle.id, 'codex']]) {
+      assert.equal(await page.locator(`#mem-sessions [data-project-session="${id}"] .ps-meta svg.agent-icon[aria-label="${agent}"]`).count(), 1, `${agent} mark on its card`);
+    }
     assert(await page.locator(`#mem-sessions [data-project-session="${live.id}"]`).evaluate(e => e.classList.contains('tone-ok')), 'running card highlighted');
     await page.locator(`#mem-sessions [data-project-session="${live.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     await page.locator('#terminal').waitFor({ state: 'visible' });
     await waitUntil(async () => (await page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab)))[0] === live.id, 'its tab is selected');
+    assert.equal(await page.locator(`#tabstrip .tab[data-tab="${live.id}"] .tab-agent svg.agent-icon[aria-label="claude"]`).count(), 1, 'the tab shows the Claude mark');
     assert.equal((await api(`/api/conversations/${idle.id}`)).agent, 'not_running', 'opening a card starts nothing else');
     // Back to the screen through the sidebar (switching projects is the same click).
     await page.locator('#tree .tree-project[data-slug="acme-web"]').click();
