@@ -51,7 +51,7 @@ def _conversation_summary(conv: Conversation) -> dict:
     timestamps.extend(run.finished_at for run in conv.runs if run.finished_at)
     return {
         "id": conv.id, "target": conv.target, "runtime": conv.runtime,
-        "title": conv.title or "(new conversation)", "created_at": conv.created_at,
+        "title": conv.title or "New session", "created_at": conv.created_at,
         "messages": len(conv.messages), "running": running,
         "board_stage": conv.board_stage, "board_updated_at": conv.board_updated_at,
         "preview": preview[:200],
@@ -260,6 +260,38 @@ def create_app(
     @app.get("/api/usage", dependencies=auth_dep)
     def api_usage() -> dict:
         return usage_mod.read_usage(state_dir, os.environ.get("CODEX_HOME"))
+
+    # Open tabs live next to the conversation store: the native web view forgets its storage on every launch
+    # (it keeps no token on disk), and the owner wants the tabs back after ⌘Q + reopen. Ids only, never secrets.
+    tabs_file = state_dir / "ui-tabs.json"
+    empty_tabs = {"ids": [], "active": None}
+
+    @app.get("/api/ui/tabs", dependencies=auth_dep)
+    def api_ui_tabs() -> dict:
+        try:
+            saved = json.loads(tabs_file.read_text(encoding="utf-8"))
+            ids, active = saved["ids"], saved["active"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return dict(empty_tabs)
+        if not (isinstance(ids, list) and all(isinstance(x, str) for x in ids) and (active is None or active in ids)):
+            return dict(empty_tabs)
+        return {"ids": ids, "active": active}
+
+    @app.put("/api/ui/tabs", dependencies=auth_dep)
+    async def api_ui_tabs_save(request: Request) -> dict:
+        try:
+            body = await request.json()
+            ids, active = body["ids"], body["active"]
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(status_code=400, detail="expected {ids, active}")
+        if not (isinstance(ids, list) and len(ids) <= 50 and all(isinstance(x, str) and 0 < len(x) <= 200 for x in ids)
+                and (active is None or active in ids)):
+            raise HTTPException(status_code=400, detail="ids must be at most 50 strings and active one of them or null")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tabs_file.with_name(f"{tabs_file.name}.tmp")
+        tmp.write_text(json.dumps({"ids": ids, "active": active}), encoding="utf-8")
+        os.replace(tmp, tabs_file)
+        return {"ids": ids, "active": active}
 
     # Read-only views: plain `def` so blocking kb-board calls and ledger scans run in the threadpool.
     @app.get("/api/tasks", dependencies=auth_dep)
@@ -616,9 +648,25 @@ def create_app(
         threading.Thread(target=pump, daemon=True).start()
         receiving = asyncio.create_task(websocket.receive())
         reading = asyncio.create_task(queue.get())
+        # The header follows the agent at once (an exit to the shell, a restart): liveness once a second,
+        # a message only when the state or the PID changes. The first tick always sends, so a change between the
+        # page's own read and this attach is not lost. The page's 5-second list refresh stays the fallback.
+        ticking = asyncio.create_task(asyncio.sleep(1.0))
+        shown: tuple | None = None
         try:
             while True:
-                done, _ = await asyncio.wait({receiving, reading}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait({receiving, reading, ticking}, return_when=asyncio.FIRST_COMPLETED)
+                if ticking in done:
+                    try:
+                        live = await loop.run_in_executor(None, terminal_mod.liveness, name, env)
+                    except Exception:  # a liveness error only skips this tick
+                        live = None
+                    if live is not None:
+                        now = (live.get("agent"), live.get("pid"))
+                        if now != shown:
+                            await websocket.send_json({"type": "agent", "agent": now[0], "pid": now[1]})
+                        shown = now
+                    ticking = asyncio.create_task(asyncio.sleep(1.0))
                 if reading in done:
                     data = reading.result()
                     if not data:
@@ -647,7 +695,8 @@ def create_app(
         finally:
             receiving.cancel()
             reading.cancel()
-            await asyncio.gather(receiving, reading, return_exceptions=True)
+            ticking.cancel()
+            await asyncio.gather(receiving, reading, ticking, return_exceptions=True)
             await loop.run_in_executor(None, _release_client, proc, master)
             with contextlib.suppress(Exception):
                 await websocket.close()

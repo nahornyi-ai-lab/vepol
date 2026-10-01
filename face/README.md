@@ -39,10 +39,21 @@ every project with the newest activity first. A card shows the project's
 progress, else the first ready one, with counts from `kb-board`), the **Last
 decision** in `decisions/` and the **Last activity** in `log.md`, plus a status
 chip: «Up to date», «Needs review» (the log is more than 3 days newer than
-`state.md`) or «No state file». Clicking a card opens the project's memory page:
-State, Plans, Decisions, History, Lessons (the prevention rules in
-`incidents.md`) and Files, all rendered as Markdown and read-only; «New session
-here» opens a terminal in that project.
+`state.md`) or «No state file».
+
+Clicking a card, or a project in the sidebar, opens the **project screen**:
+
+- **State**: the snapshot from `state.md`, the next task and when `state.md`
+  changed; «Show full state» unfolds the whole file.
+- **Sessions**: every session of the project, the ones waiting for you or with
+  a running agent first, each with its state; a click opens it in a tab.
+- **Board**: the project's tasks from `kb-board` in columns (In Progress,
+  Review, Blocked, Ready, Backlog), Done folded.
+- **Decisions, History, Lessons** (the prevention rules in `incidents.md`) and
+  **Files**.
+
+Everything is rendered as Markdown and read-only; «New session here» asks which
+agent to start in that project.
 
 ### Sample workspace
 

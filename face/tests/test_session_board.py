@@ -7,7 +7,8 @@ from vepol_face.app import create_app
 
 
 def test_board_stages_preserve_conversation_across_app_restart(tmp_path):
-    """Losing saved stages would lose the board's central organizing value."""
+    """Losing saved stages would lose the board's central organizing value; losing the open tabs on ⌘Q + reopen
+    would make the owner reopen every session by hand (the native web view keeps no storage between launches)."""
     state_dir = tmp_path / "state"
     app = create_app(hub=tmp_path / "knowledge", store_dir=state_dir)
     with TestClient(app) as client:
@@ -42,6 +43,8 @@ def test_board_stages_preserve_conversation_across_app_restart(tmp_path):
         assert card["running"] is False
         assert card["preview"] == "The research is ready"
         assert card["last_activity_at"] == before["messages"][-1]["at"]
+        tabs = {"ids": [conv_id], "active": conv_id}
+        assert client.put("/api/ui/tabs", json=tabs).json() == tabs
 
     reopened = create_app(hub=tmp_path / "knowledge", store_dir=state_dir)
     with TestClient(reopened) as client:
@@ -55,6 +58,7 @@ def test_board_stages_preserve_conversation_across_app_restart(tmp_path):
         assert detail["messages"] == before["messages"]
         assert detail["runs"] == before["runs"]
         assert client.get("/api/conversations").json()[0] == card
+        assert client.get("/api/ui/tabs").json() == tabs
 
 
 def test_terminal_bridge_moves_bytes_and_resizes_without_touching_the_agent(tmp_path, monkeypatch):

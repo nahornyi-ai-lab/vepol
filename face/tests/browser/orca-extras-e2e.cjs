@@ -36,18 +36,14 @@ function mtimes(root) {
   return out;
 }
 
-// The sidebar tree as { project: [{ id, dot, active }] }, in page order.
+// The sidebar as [{ slug, active, dot }] in page order; `other` counts any child that is not a project row.
 async function treeShape(page) {
   return page.locator('#tree').evaluate(tree => {
     const out = [];
     for (const el of tree.children) {
-      if (el.classList.contains('tree-project')) out.push({ slug: el.dataset.slug, active: el.classList.contains('active'), sessions: [] });
-      else if (el.classList.contains('tree-sessions') && out.length) {
-        out[out.length - 1].sessions = [...el.querySelectorAll('.tree-session')].map(s => {
-          const dot = s.querySelector('.dot');
-          return { id: s.dataset.id, dot: dot ? [...dot.classList].find(c => c.startsWith('agent-')) : null, active: s.classList.contains('active') };
-        });
-      }
+      if (!el.classList.contains('tree-project')) { out.push({ other: el.className }); continue; }
+      const dot = el.querySelector('.dot');
+      out.push({ slug: el.dataset.slug, active: el.classList.contains('active'), dot: dot ? [...dot.classList].find(c => c.startsWith('agent-')) : null });
     }
     return out;
   });
@@ -120,49 +116,83 @@ function processOf(pid) {
     await page.locator('[data-board-view="sessions"]').click();
     await waitUntil(async () => await page.locator('#board-view [data-conversation-id]').count() === 2, 'two cards');
 
-    // O1. Tree: every project, newest activity first (beta's session is the newest, projects without
-    // activity keep discovery order), sessions nested with the board's liveness dot; a session opens.
+    // O1. Sidebar (owner 2026-09-28, like Orca): projects only, newest activity first (beta's session is the newest,
+    // projects without activity keep discovery order); a green dot where an agent runs; the shown tab's project is
+    // highlighted. A project click opens the project screen (owner 2026-10-01); its sessions open from there, and
+    // «New session here» offers the agents for that project.
     await page.locator(`[data-open-conversation="${a1.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const wantTree = [
-      { slug: 'beta', active: false, sessions: [{ id: b1.id, dot: 'agent-not_running', active: false }] },
-      { slug: 'alpha', active: true, sessions: [{ id: a1.id, dot: 'agent-alive', active: true }] },
-      { slug: 'hub', active: false, sessions: [] },
-      { slug: 'delta', active: false, sessions: [] },
-      { slug: 'gamma', active: false, sessions: [] },
+      { slug: 'beta', active: false, dot: null },
+      { slug: 'alpha', active: true, dot: 'agent-alive' },
+      { slug: 'hub', active: false, dot: null },
+      { slug: 'delta', active: false, dot: null },
+      { slug: 'gamma', active: false, dot: null },
     ];
-    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'every project in the tree, sessions with dots')
+    await waitUntil(async () => JSON.stringify(await treeShape(page)) === JSON.stringify(wantTree), 'projects only, a dot where an agent runs')
       .catch(async (e) => { throw new Error(`${e.message}; tree: ${JSON.stringify(await treeShape(page))}`); });
     const node = async (slug) => (await treeShape(page)).find(p => p.slug === slug);
+    const tabIds = () => page.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
+    const activeTab = () => page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
     await page.screenshot({ path: path.join(OUT, 'tree.png'), fullPage: true });
-    const opened = page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname === `/api/conversations/${b1.id}`);
-    await page.locator(`#tree .tree-session[data-id="${b1.id}"]`).click();
-    assert.equal((await (await opened).json()).id, b1.id);
-    await waitUntil(async () => {
-      const [a, b] = [await node('alpha'), await node('beta')];
-      return b.sessions[0].active && !a.sessions[0].active && b.active;
-    }, 'beta session selected in the tree');
-    assert.equal((await api(`/api/conversations/${b1.id}`)).agent, 'not_running', 'opening never starts an agent');
+    // beta has only a stopped session: the click opens beta's screen, which lists it as not running; nothing starts.
+    await page.locator('#tree .tree-project[data-slug="beta"]').click();
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    assert(await page.locator('#picker').isHidden(), 'a project click opens no dialog');
+    await waitUntil(async () => (await node('beta')).active && !(await node('alpha')).active, 'beta highlighted while its screen is shown');
+    const betaCard = page.locator(`#mem-sessions [data-project-session="${b1.id}"] .ps-state`);
+    await waitUntil(async () => await betaCard.count() === 1 && await betaCard.textContent() === 'Agent not running', 'beta screen lists its stopped session');
+    await page.locator('#mem-newconv').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#picker-title').textContent(), 'New session in beta');
+    assert(await page.locator('#picker-list').isHidden() && await page.locator('#picker-search').isHidden(), 'one-project mode hides the project list');
+    await page.screenshot({ path: path.join(OUT, 'project-agents.png'), fullPage: true });
+    assert.equal((await api(`/api/conversations/${b1.id}`)).agent, 'not_running', 'a project click never starts an agent');
+    const createdBeta = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
+    await page.locator('#picker-runtimes [data-pick-runtime="claude"]').click();
+    const bc = await (await createdBeta).json();
+    assert.equal(bc.target, 'beta');
+    assert.equal(bc.runtime, 'claude');
+    assert.equal(bc.existing, false);
+    await page.locator('#picker').waitFor({ state: 'hidden' });
+    await waitUntil(async () => (await api(`/api/conversations/${bc.id}`)).agent === 'alive', 'beta/claude started');
+    await waitUntil(async () => (await activeTab())[0] === bc.id && (await node('beta')).dot === 'agent-alive' && (await node('beta')).active, 'beta tab selected, beta has a dot');
+    // alpha has a running agent: its screen lists it first as running; the card selects its tab and shows its terminal.
     await page.locator('#tree .tree-project[data-slug="alpha"]').click();
-    await waitUntil(async () => (await node('alpha')).active, 'alpha project selected');
-    assert.equal(await page.locator('#routing').textContent(), '→ codex · alpha');
-    // «+ New session» asks for the project; the agent choice carries over.
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    const alphaFirst = page.locator('#mem-sessions [data-project-session]').first();
+    await waitUntil(async () => await alphaFirst.count() === 1 && await alphaFirst.getAttribute('data-project-session') === a1.id
+      && await alphaFirst.locator('.ps-state').textContent() === 'Agent running', 'alpha screen lists its running session first');
+    await alphaFirst.click();
+    await waitUntil(async () => (await activeTab())[0] === a1.id && (await node('alpha')).active && / · alpha · claude$/.test(await page.locator('#conversation-title').textContent()), 'the card opens its running session');
+    assert(await page.locator('#picker').isHidden(), 'no dialog for a session card');
+    // «+ New session» still asks for any project; a new agent in alpha becomes a tab.
     const created = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#newconv').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
-    assert.equal(await page.locator('#picker-runtimes [aria-pressed="true"]').textContent(), 'codex');
+    assert.equal(await page.locator('#picker-title').textContent(), 'New session');
+    await page.locator('#picker-runtimes [data-pick-runtime="codex"]').click();
     await page.locator('#picker-list [data-pick="alpha"]').click();
     const c1 = await (await created).json();
     assert.equal(c1.target, 'alpha');
     assert.equal(c1.runtime, 'codex');
     assert.equal(c1.existing, false);
-    await waitUntil(async () => (await node('alpha')).sessions.some(s => s.id === c1.id && s.active), 'new alpha session in the tree');
-    evidence.cases.O1 = { tree: wantTree, newConversation: c1 };
-    evidence.steps.push('O1 tree lists every project newest first and nests sessions with alive/not-running dots; a session row opens it; «+ New session» → picker → alpha');
+    await waitUntil(async () => (await activeTab())[0] === c1.id, 'new alpha session is the selected tab');
+    const tabAgent = (id) => page.locator(`#tabstrip .tab[data-tab="${id}"] .tab-agent`).textContent();
+    assert.equal(await tabAgent(a1.id), 'claude', 'a tab names its agent');
+    assert.equal(await tabAgent(c1.id), 'codex', 'a tab names its agent');
+    await waitUntil(async () => await page.locator('#conversation-title').textContent() === 'New session · alpha · codex'
+      && await page.locator(`#tabstrip .tab[data-tab="${c1.id}"] .tab-name`).textContent() === 'New session', 'header and tab use one title');
+    assert(await page.locator('#panel-run').isHidden(), 'a terminal session shows no Run / KB write-back / Progress');
+    assert.equal(await page.locator('#tree .tree-session').count(), 0, 'no session rows in the sidebar');
+    assert.deepEqual((await treeShape(page)).filter(p => p.other), [], 'nothing but project rows');
+    evidence.cases.O1 = { tree: wantTree, betaAgent: bc.id, tabs: await tabIds(), newConversation: c1 };
+    evidence.steps.push('O1 sidebar lists projects only, newest first, dot where an agent runs; beta → its screen (stopped session listed, nothing started) → «New session here» → «New session in beta» → claude starts there as a tab; alpha → its screen, running session first → its tab; «+ New session» → picker → alpha/codex tab');
 
     // O2. Knowledge panel: read-only tree of alpha's knowledge/, filter, exact file text, no escape, nothing written.
     await page.locator('[data-panel="knowledge"]').click();
     const kbPaths = () => page.locator('#kb-tree .kb-entry').evaluateAll(els => els.map(e => e.title));
+    // The fixture also holds backlog.md.lock, which is never listed.
     const kbEntries = ['decisions', 'decisions/a.md', 'huge.md', 'log.md'];
     // Folders start collapsed; a click expands one, a second click collapses it again.
     await waitUntil(async () => JSON.stringify(await kbPaths()) === JSON.stringify(['decisions', 'huge.md', 'log.md']), 'knowledge tree lists the top level with decisions/ collapsed');
@@ -232,15 +262,23 @@ function processOf(pid) {
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
     const panePid = fixtureTmux(boot.tmux_socket, 'display-message', '-p', '-t', gSession, '#{pane_pid}');
     fixtureTmux(boot.tmux_socket, 'send-keys', '-t', gSession, 'C-d');
-    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start', 8000);
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'shell open + Start within 2 s', 2000);
     assert.equal((await api(`/api/conversations/${g1.id}`)).agent, 'shell', 'no auto-restart');
     await page.locator('#terminal').click();
     await page.keyboard.type('echo vepol-shell-$((20+22))');
     await page.keyboard.press('Enter');
     await waitUntil(async () => (await rows()).includes('vepol-shell-42'), 'the shell runs a command typed in the window', 5000);
-    // The owner's 2026-09-28 path: another project is clicked while the session is on screen; Start still acts on it.
+    // The owner's 2026-09-28 path, with the 2026-10-01 project screen: another project is clicked while the session is
+    // on screen → that project's screen (delta: no sessions; nothing created); back through the tab, Start still acts on gamma.
+    const convCount = (await api('/api/conversations')).length;
     await page.locator('#tree .tree-project[data-slug="delta"]').click();
-    await waitUntil(async () => (await node('delta')).active, 'delta project selected');
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    assert(await page.locator('#picker').isHidden(), 'a project click opens no dialog');
+    await waitUntil(async () => (await page.locator('#mem-sessions').textContent()).includes('No sessions in this project yet.'), 'delta screen: no sessions');
+    assert.equal((await api('/api/conversations')).length, convCount, 'a project click creates nothing');
+    await page.locator(`#tabstrip .tab[data-tab="${g1.id}"]`).click();
+    await page.locator('#terminal').waitFor({ state: 'visible' });
+    await waitUntil(async () => await page.locator('#agent-state').textContent() === 'Agent not running · shell open' && await page.locator('#terminal-start').isVisible(), 'back on gamma: shell open + Start');
     const restart = startOf();
     await page.locator('#terminal-start').click();
     assert((await restart).ok(), 'Start succeeded');
@@ -286,8 +324,6 @@ function processOf(pid) {
 
     // TABS. Every tabsOpened session is a tab; a tab switches the terminal, "×" selects the neighbour, sections keep
     // the tabs, reload restores them. A terminal session has no Send box.
-    const tabIds = () => page.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
-    const activeTab = () => page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
     await page.locator(`[data-open-conversation="${a1.id}"]`).click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     await page.locator('[data-board-view="sessions"]').click();
@@ -302,6 +338,17 @@ function processOf(pid) {
     assert.equal(await page.locator('.nav [aria-selected="true"]').count(), 0, 'no section selected while a tab is');
     await page.reload();
     await waitUntil(async () => (await activeTab())[0] === a1.id && JSON.stringify(await tabIds()) === JSON.stringify(tabsOpened), 'tabs restored after reload');
+    // ⌘Q + reopen: the native web view starts with empty storage every launch; the tabs come from the app's server.
+    const relaunch = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
+    await relaunch.addInitScript(token => { window.__VEPOL_TOKEN__ = token; }, boot.token);
+    const fresh = await relaunch.newPage();
+    fresh.on('pageerror', e => evidence.pageErrors.push(e.message));
+    await fresh.goto(base);
+    const freshTabs = () => fresh.locator('#tabstrip .tab').evaluateAll(t => t.map(x => x.dataset.tab));
+    const freshActive = () => fresh.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab));
+    await waitUntil(async () => (await freshActive())[0] === a1.id && JSON.stringify(await freshTabs()) === JSON.stringify(tabsOpened)
+      && / · alpha · claude$/.test(await fresh.locator('#conversation-title').textContent()), 'tabs back in a fresh browser (app relaunch)');
+    await relaunch.close();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     const ti = tabsOpened.indexOf(a1.id);
     const neighbour = tabsOpened[ti - 1] || tabsOpened[ti + 1];

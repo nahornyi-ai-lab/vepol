@@ -39,7 +39,8 @@ def knowledge_tree(hub: pathlib.Path, target_slug: str) -> dict:
         nonlocal truncated
         try:
             with os.scandir(directory) as it:
-                children = [c for c in it if not c.name.startswith(".")]
+                # Dot-files and kb-board lock files (backlog.md.lock) are not knowledge.
+                children = [c for c in it if not c.name.startswith(".") and not c.name.endswith(".lock")]
         except OSError:
             return
         children.sort(key=lambda c: (not c.is_dir(), c.name.lower()))

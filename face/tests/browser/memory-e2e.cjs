@@ -1,4 +1,4 @@
-/* One real-app E2E for Memory Home and the Project Memory page on a copy of demo/workspace. */
+/* One real-app E2E for Memory Home and the project screen (state box, sessions, board) on a copy of demo/workspace. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -22,6 +22,8 @@ const SAMPLE = {
   now: 'Checkout v2 is live for 20% of shoppers behind the checkout-v2 flag. Card payments work; saved addresses are the last missing piece before a full rollout.',
   stateHeading: 'acme-web — current state',
   inProgress: 'Saved addresses in checkout v2',
+  columns: [['In Progress', 1], ['Review', 0], ['Blocked', 1], ['Ready', 1], ['Backlog', 1]],
+  done: 3,
   decisions: ['Feature flags live in a config file, not a flag service', 'Server-render the checkout pages'],
   newestHistory: ['2026-09-26', 'progress | acme-web | "Saved addresses started"'],
   rule: 'Lock every payment submit button on the first click and send an idempotency key with each payment request',
@@ -55,13 +57,19 @@ async function waitUntil(fn, label, timeout = 10000) {
     });
     assert.deepEqual(fixture.memory.slugs, ['acme-web', 'billing-api', 'design-system']);
     const base = `http://127.0.0.1:${boot.port}`;
-    const api = async (url) => {
-      const res = await fetch(base + url, { headers: { 'X-Vepol-Token': boot.token } });
-      assert(res.ok, `GET ${url}: ${res.status}`);
+    const api = async (url, method = 'GET', data) => {
+      const res = await fetch(base + url, { method, headers: { 'X-Vepol-Token': boot.token, 'Content-Type': 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) });
+      assert(res.ok, `${method} ${url}: ${res.status}`);
       return res.json();
     };
     await waitUntil(async () => { try { return (await api('/api/health')).ok; } catch { return false; } }, 'fixture health');
-    evidence.steps.push(`Fixture: a copy of demo/workspace at ${fixture.memory.workspace}, the repo's kb-board linked into its hub`);
+    // Two acme-web terminal sessions: one never started, then one started (the /bin/cat stand-in).
+    const idle = await api('/api/conversations', 'POST', { target: 'acme-web', runtime: 'codex', transport: 'terminal' });
+    const live = await api('/api/conversations', 'POST', { target: 'acme-web', runtime: 'claude', transport: 'terminal' });
+    await api(`/api/conversations/${live.id}/terminal/start`, 'POST');
+    await waitUntil(async () => (await api(`/api/conversations/${live.id}`)).agent === 'alive', 'acme-web/claude started');
+    await api(`/api/conversations/${idle.id}/board`, 'PATCH', { board_stage: 'review' });
+    evidence.steps.push(`Fixture: a copy of demo/workspace at ${fixture.memory.workspace}, the repo's kb-board linked into its hub; acme-web sessions: claude started, codex not started`);
 
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 });
@@ -86,23 +94,69 @@ async function waitUntil(fn, label, timeout = 10000) {
     evidence.cases.M1 = { cards: SAMPLE.order };
     evidence.steps.push('M1 the app opens on Memory with 4 cards: hub, acme-web, billing-api, design-system');
 
-    // M2. acme-web page: State rendered, no raw '##' or frontmatter.
-    await acmeCard.click();
+    // M2. A sidebar click opens the acme-web screen (owner 2026-10-01): no dialog, no terminal; the row is highlighted.
+    // The State box shows the snapshot, Next and the date; «Show full state» unfolds state.md rendered, no raw '##' or frontmatter.
+    await page.locator('#tree .tree-project[data-slug="acme-web"]').click();
     await page.locator('#memory-project').waitFor({ state: 'visible' });
     assert(await page.locator('#memory-pane').isHidden());
+    assert(await page.locator('#picker').isHidden(), 'a project click opens no dialog');
+    assert(await page.locator('#terminal').isHidden(), 'a project click opens no terminal');
+    assert.equal((await api(`/api/conversations/${idle.id}`)).agent, 'not_running', 'a project click starts nothing');
     assert.equal(await page.locator('#mem-name').textContent(), 'acme-web');
+    assert.deepEqual(await page.locator('#tree .tree-project.active').evaluateAll(els => els.map(e => e.dataset.slug)), ['acme-web']);
+    await waitUntil(async () => (await page.locator('#mem-now').textContent()) === SAMPLE.now, 'state box snapshot');
+    const meta = await page.locator('#mem-state-meta').textContent();
+    assert(meta.includes(`Next: ${SAMPLE.inProgress}`) && meta.includes('updated today'), `state box meta: ${meta}`);
+    assert(await page.locator('#mem-state').isHidden(), 'full state folded by default');
+    await page.locator('#mem-state-toggle').click();
+    await page.locator('#mem-state').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#mem-state-toggle').textContent(), 'Hide full state');
     await waitUntil(async () => await page.locator('#mem-state h1').count() === 1, 'state heading rendered');
     assert.equal(await page.locator('#mem-state h1').textContent(), SAMPLE.stateHeading);
     assert(await page.locator('#mem-state h2', { hasText: 'Current Snapshot' }).count() === 1);
     const stateText = await page.locator('#mem-state').textContent();
     assert(!stateText.includes('##') && !stateText.includes('---'), 'no raw markdown or frontmatter in State');
-    evidence.steps.push(`M2 State renders "${SAMPLE.stateHeading}" as a heading; no raw ## or frontmatter`);
+    evidence.steps.push(`M2 sidebar click → acme-web screen (no dialog/terminal, row highlighted); State box: snapshot, Next, «updated today»; Show full state renders "${SAMPLE.stateHeading}", no raw ## or frontmatter`);
 
-    // M3. Plans list the In Progress task.
-    await waitUntil(async () => (await page.locator('#mem-plans').textContent()).includes(SAMPLE.inProgress), 'plans loaded');
-    assert.equal(await page.locator('#mem-plans .mem-group').first().textContent(), 'In Progress · 1');
-    assert((await page.locator('#mem-plans .mem-list').first().textContent()).includes(SAMPLE.inProgress));
-    evidence.steps.push(`M3 Plans: In Progress · 1 "${SAMPLE.inProgress}"`);
+    // M3. Board: columns with counts (Blocked shown because it has a task), the In Progress task with its owner, Done folded.
+    const columns = () => page.locator('#mem-plans .kb-col').evaluateAll(els => els.map(e => [e.dataset.column, +e.querySelector('.count').textContent]));
+    await waitUntil(async () => JSON.stringify(await columns()) === JSON.stringify(SAMPLE.columns), 'board columns')
+      .catch(async (e) => { throw new Error(`${e.message}; columns: ${JSON.stringify(await columns())}`); });
+    const inProgress = page.locator('#mem-plans .kb-col[data-column="In Progress"] .kb-task');
+    assert.equal(await inProgress.count(), 1);
+    assert.equal(await inProgress.first().textContent(), `${SAMPLE.inProgress}claude`);
+    assert.equal(await page.locator('#mem-done summary').textContent(), `Done · ${SAMPLE.done}`);
+    assert.equal(await page.locator('#mem-done').getAttribute('open'), null, 'Done folded');
+    evidence.cases.M3 = { columns: await columns() };
+    evidence.steps.push(`M3 Board: ${SAMPLE.columns.map(([c, n]) => `${c} ${n}`).join(' · ')}; "${SAMPLE.inProgress}" (claude) under In Progress; Done · ${SAMPLE.done} folded`);
+
+    // M3b. Sessions: the running one first with «Agent running», then the stopped one; a card click opens its tab and terminal.
+    const sessionCards = () => page.locator('#mem-sessions [data-project-session]').evaluateAll(els => els.map(e => [e.dataset.projectSession, e.querySelector('.ps-state').textContent, e.querySelector('.ps-meta').textContent]));
+    await waitUntil(async () => (await sessionCards()).length === 2, 'two session cards');
+    const shownSessions = await sessionCards();
+    assert.deepEqual(shownSessions.map(([id, label]) => [id, label]), [[live.id, 'Agent running'], [idle.id, 'Agent not running']]);
+    assert(shownSessions[1][2].startsWith('codex Review · '), `stopped card meta: ${shownSessions[1][2]}`);
+    // Owner 2026-10-01: Claude and Codex show their marks, not their names (the name stays in the icon's <title>).
+    for (const [id, agent] of [[live.id, 'claude'], [idle.id, 'codex']]) {
+      assert.equal(await page.locator(`#mem-sessions [data-project-session="${id}"] .ps-meta svg.agent-icon[aria-label="${agent}"]`).count(), 1, `${agent} mark on its card`);
+    }
+    assert(await page.locator(`#mem-sessions [data-project-session="${live.id}"]`).evaluate(e => e.classList.contains('tone-ok')), 'running card highlighted');
+    await page.locator(`#mem-sessions [data-project-session="${live.id}"]`).click();
+    await page.locator('#board-view').waitFor({ state: 'hidden' });
+    await page.locator('#terminal').waitFor({ state: 'visible' });
+    await waitUntil(async () => (await page.locator('#tabstrip .tab[aria-selected="true"]').evaluateAll(t => t.map(x => x.dataset.tab)))[0] === live.id, 'its tab is selected');
+    assert.equal(await page.locator(`#tabstrip .tab[data-tab="${live.id}"] .tab-agent svg.agent-icon[aria-label="claude"]`).count(), 1, 'the tab shows the Claude mark');
+    assert.equal((await api(`/api/conversations/${idle.id}`)).agent, 'not_running', 'opening a card starts nothing else');
+    // Back to the screen through the sidebar (switching projects is the same click).
+    await page.locator('#tree .tree-project[data-slug="acme-web"]').click();
+    await page.locator('#memory-project').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#tabstrip .tab[aria-selected="true"]').count(), 0, 'the screen releases the selected tab');
+    await waitUntil(async () => (await sessionCards()).length === 2, 'sessions again');
+    await waitUntil(async () => await page.locator('#mem-decisions [data-decision]').count() === SAMPLE.decisions.length, 'page data again');
+    assert(await page.locator('#mem-state').isHidden(), 'another visit starts with the full state folded');
+    await page.screenshot({ path: path.join(OUT, 'project-screen.png'), fullPage: true });
+    evidence.cases.M3b = { sessions: shownSessions };
+    evidence.steps.push('M3b Sessions: claude «Agent running» (green) first, codex «Agent not running» · Review second; a card click opens its tab and terminal; the sidebar click returns to the screen');
 
     // M4. Decisions newest first; one opens rendered with its frontmatter folded into Details.
     const decisionTitles = await page.locator('#mem-decisions [data-decision]').evaluateAll(els => els.map(e => e.children[1].textContent.replace(/^· /, '')));
@@ -141,13 +195,19 @@ async function waitUntil(fn, label, timeout = 10000) {
     assert.deepEqual(await cardSlugs(), SAMPLE.order);
     evidence.steps.push('M8 "← Memory" returns to the four cards');
 
-    // M9. The right-panel Memory tab renders the same markdown; a session opens from the page (the /bin/cat stand-in).
+    // M9. «New session here» offers the agents for this project; the new session opens (the /bin/cat stand-in);
+    // the right-panel Memory tab renders the same markdown.
     await acmeCard.click();
     await page.locator('#memory-project').waitFor({ state: 'visible' });
+    const before = new Set((await api('/api/conversations')).map(c => c.id));
     await page.locator('#mem-newconv').click();
+    await page.locator('#picker').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#picker-title').textContent(), 'New session in acme-web');
+    await page.locator('#picker-runtimes button').first().click();
     await page.locator('#board-view').waitFor({ state: 'hidden' });
-    const conv = (await api('/api/conversations')).find(c => c.target === 'acme-web');
-    assert(conv, 'an acme-web session exists');
+    let conv;
+    await waitUntil(async () => { conv = (await api('/api/conversations')).find(c => !before.has(c.id)); return !!conv; }, 'a new session');
+    assert.equal(conv.target, 'acme-web');
     const panelTab = page.locator('[data-panel="knowledge"]');
     assert.equal(await panelTab.textContent(), 'Memory');
     await panelTab.click();
@@ -160,7 +220,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     await page.locator('#memory-project').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#mem-name').textContent(), 'acme-web');
     evidence.cases.M9 = { conversation: conv.id, target: conv.target };
-    evidence.steps.push('M9 the right-panel "Memory" tab renders state.md the same way; "Open project memory" returns to the acme-web page');
+    evidence.steps.push('M9 «New session here» → «New session in acme-web» → an agent click opens a new acme-web session; the right-panel "Memory" tab renders state.md the same way; "Open project memory" returns to the acme-web page');
 
     assert.deepEqual(evidence.pageErrors, [], 'No browser exceptions');
     assert.deepEqual(evidence.httpErrors, [], 'No HTTP errors');

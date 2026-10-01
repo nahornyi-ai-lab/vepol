@@ -154,6 +154,8 @@ if os.environ.get("VEPOL_FIXTURE_ORCA") == "1":
     for rel, text in files.items():
         (knowledge / rel).parent.mkdir(parents=True, exist_ok=True)
         (knowledge / rel).write_text(text, encoding="utf-8")
+    # A kb-board lock file is not knowledge: the panel never lists it.
+    (knowledge / "backlog.md.lock").write_text("", encoding="utf-8")
     # Over the 512 KB read limit: the panel lists it, opening it is 413.
     (knowledge / "huge.md").write_text("# Huge\n" + "x" * (600 * 1024) + "\n", encoding="utf-8")
     now = time.time()
