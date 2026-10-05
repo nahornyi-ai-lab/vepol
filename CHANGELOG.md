@@ -26,6 +26,49 @@ this one.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-05
+
+A fix release for the first five minutes after install and for honest failure
+reasons. The stable core keeps its contracts; `upgrade.sh` now follows release
+tags (below).
+
+### Fixed
+- **`kb-doctor` is green on a correct fresh install.** A hub with no projects
+  yet reports one info line («no projects registered yet — create one with
+  new-wiki») instead of a P0. A registry whose rows are present but unparseable
+  still reports the P0.
+- **`kb-demo brief` is built from the demo wiki.** `kb-brief` now finds its
+  helpers (agenda, mail, ideas, preflight, sender) next to itself when the hub
+  has no `bin/`, so the demo prompt carries the demo projects instead of empty
+  fallbacks. `kb-demo` keeps the demo synthetic: the calendar reader is disabled
+  and `brief` runs dry (prints the brief, delivers nowhere).
+- **Portable Python.** `kb-orchestrator-cycle` and the
+  `kb-multibot-*` scripts use `#!/usr/bin/env python3` instead of Apple's
+  `/usr/bin/python3`, which exits 69 until the Xcode licence is accepted.
+- **`new-wiki` speaks English and fails clearly.** A missing folder gives
+  `new-wiki: folder not found: <path>` and exit 1 with nothing created. It no
+  longer writes a project `CLAUDE.md`: Claude Code 2.1.277+ reads `AGENTS.md`
+  directly, and a `CLAUDE.md` anywhere above a project disables that.
+- **Failure reasons are the real cause.** A shared rule (`_kb_failure_reason.py`)
+  picks the quota / unsupported-model / auth / network / timeout line out of a
+  provider's output instead of the first or last line. The orchestrator broker
+  records it as `reason_code`, treats Codex's «you've hit your usage limit» as a
+  rate limit with the real «try again at …» reset time (and Gemini «retry in …»
+  hints), and records an empty Codex answer as a failure, not a success. The
+  mail reader reports `gmail_unavailable:quota` / `:model`, the calendar reader
+  prefixes its error with `quota:` / `model:`, and the brief says why mail is
+  unavailable and for how many days in a row.
+
+### Changed
+- **`upgrade.sh` upgrades to the newest release tag** (`vX.Y.Z`, pre-release
+  tags skipped) instead of pulling the tip of `main`; `--check` compares the
+  current release with the newest tag. A clone with local edits still stops with
+  the manual-resolve message.
+
+Not in this release (live on the maintainers' hub, ships with the next full
+sync): bounded quota-aware retries in `kb-tick`, the local-Qwen voice fallback
+in the morning digest.
+
 ## [1.1.0] — 2026-10-01
 
 Vepol Desktop only. The stable core, the other `kb-*` commands and

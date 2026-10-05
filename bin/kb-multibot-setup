@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """kb-multibot-setup — first-time setup CLI.
 
 Interactive Telethon login (handles the verification code Telegram sends to

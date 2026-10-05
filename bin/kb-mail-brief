@@ -159,10 +159,31 @@ def _reason_code(exc) -> str:
     m = str(exc).lower()
     if "not ok" in m or "notok" in m:
         return "not-ok"
+    cause = _provider_cause(exc)
     for r in _KNOWN_REASONS:
+        # quota/model rank after the provider-diagnosed classes and ahead of the
+        # generic wrapper words: the host chain wraps every failure in "both
+        # hosts failed", which would otherwise hide them behind "host".
+        if r == "unavailable" and cause:
+            return cause
         if r in m:
             return r
-    return "error"
+    return cause or "error"
+
+
+def _provider_cause(exc) -> str:
+    """"quota" / "model" when Codex's own error text says so, else "". The
+    shared rule lives in _kb_failure_reason. Only the Codex lane of the host
+    chain is read (the Claude lane's message can carry its stdout, i.e. mail
+    text), and a missing module (older seed copy) must never break the
+    always-exit-0 guarantee — it just yields no cause."""
+    text = str(exc).split("; codex: ", 1)[-1]
+    try:
+        from _kb_failure_reason import failure_reason
+        code = failure_reason(text)[0]
+    except Exception:  # noqa: BLE001
+        return ""
+    return code if code in ("quota", "model") else ""
 
 
 def main() -> int:

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# new-wiki — bootstrap локальной вики в проекте и регистрация в хабе.
-# Создаёт <project>/AGENTS.md (canonical), <project>/CLAUDE.md (Claude Code adapter)
-# и <project>/knowledge/ со всей структурой, симлинкает knowledge/ в
-# ~/knowledge/projects/<slug> и логирует в хаб.
-# Antigravity CLI (`agy`) читает project AGENTS.md нативно через `agy --add-dir <path>` —
-# отдельный GEMINI.md adapter не создаётся (Gemini CLI deprecation 2026-06-18).
+# new-wiki — bootstrap a local wiki inside a project and register it in the hub.
+# Creates <project>/AGENTS.md (canonical; Claude Code reads it directly, no CLAUDE.md needed)
+# and <project>/knowledge/ with the full structure, symlinks knowledge/ into
+# ~/knowledge/projects/<slug> and logs the event in the hub.
+# Antigravity CLI (`agy`) reads the project AGENTS.md natively via `agy --add-dir <path>` —
+# no separate GEMINI.md adapter is created (Gemini CLI deprecation 2026-06-18).
 #
 # Usage: new-wiki <path-to-project> [slug] [category]
-#   category: lab | order | pet | personal (по умолчанию — personal)
+#   category: lab | order | pet | personal (default: personal)
 
 set -euo pipefail
 
@@ -16,6 +16,11 @@ TEMPLATE="$HUB/_template"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: new-wiki <project-path> [slug] [category]" >&2
+  exit 1
+fi
+
+if [[ ! -d "$1" ]]; then
+  echo "new-wiki: folder not found: $1" >&2
   exit 1
 fi
 
@@ -30,7 +35,7 @@ echo "→ Path:     $PROJECT_PATH"
 echo "→ Slug:     $SLUG"
 echo "→ Category: $CATEGORY"
 
-# 1. Создать структуру knowledge/
+# 1. Create the knowledge/ structure
 mkdir -p "$PROJECT_PATH/knowledge/raw/assets"
 mkdir -p "$PROJECT_PATH/knowledge/sources"
 mkdir -p "$PROJECT_PATH/knowledge/daily"
@@ -39,7 +44,7 @@ mkdir -p "$PROJECT_PATH/knowledge/agents"
 : > "$PROJECT_PATH/knowledge/daily/.gitkeep"
 : > "$PROJECT_PATH/knowledge/reports/.gitkeep"
 
-# 2. Рендер шаблонов
+# 2. Render templates
 render() {
   local src="$1" dst="$2"
   if [[ -e "$dst" ]]; then
@@ -55,7 +60,8 @@ render() {
 }
 
 render "$TEMPLATE/AGENTS.md"            "$PROJECT_PATH/AGENTS.md"
-render "$TEMPLATE/CLAUDE.md"            "$PROJECT_PATH/CLAUDE.md"
+# Project CLAUDE.md adapter retired 2026-10-01: Claude Code >= 2.1.277 reads
+# AGENTS.md natively, and a CLAUDE.md anywhere above a project disables it.
 # Project-level GEMINI.md adapter removed 2026-05-22 — Antigravity CLI reads
 # AGENTS.md natively via `agy --add-dir <path>`. Legacy template guarded for
 # backward compatibility with old `~/knowledge/_template/` checkouts.
@@ -81,7 +87,7 @@ fi
 render "$TEMPLATE/knowledge/reports/_template.md" "$PROJECT_PATH/knowledge/reports/_template.md"
 render "$TEMPLATE/knowledge/.orchestration.yaml"  "$PROJECT_PATH/knowledge/.orchestration.yaml"
 
-# 2.5. Добавить knowledge/ и .kb-ignore в .gitignore (вика не трекается git).
+# 2.5. Add knowledge/ and .kb-ignore to .gitignore (the wiki is not tracked by git).
 GITIGNORE="$PROJECT_PATH/.gitignore"
 ensure_gitignore_line() {
   local line="$1"
@@ -100,7 +106,7 @@ ensure_gitignore_line() {
 ensure_gitignore_line "knowledge/"
 ensure_gitignore_line ".kb-ignore"
 
-# 3. Симлинк в хаб (target = knowledge/, НЕ корень проекта — чтобы код не попал в Obsidian)
+# 3. Symlink into the hub (target = knowledge/, NOT the project root — so code stays out of Obsidian)
 LINK="$HUB/projects/$SLUG"
 if [[ -L "$LINK" || -e "$LINK" ]]; then
   echo "  ⚠ symlink exists: $LINK"
@@ -109,16 +115,16 @@ else
   echo "  ✓ symlink: $LINK → $PROJECT_PATH/knowledge"
 fi
 
-# 4. Запись в лог хаба
+# 4. Log entry in the hub
 {
   echo ""
-  echo "## [$DATE] hub | $SLUG | Вика заведена через new-wiki ($CATEGORY)"
-  echo "Путь: \`$PROJECT_PATH\`. Симлинк: \`projects/$SLUG → $PROJECT_PATH/knowledge\`."
+  echo "## [$DATE] hub | $SLUG | wiki created via new-wiki ($CATEGORY)"
+  echo "Path: \`$PROJECT_PATH\`. Symlink: \`projects/$SLUG → $PROJECT_PATH/knowledge\`."
 } >> "$HUB/log.md"
 
 echo ""
-echo "✅ Вика заведена. Дальше:"
-echo "  1. Открой $PROJECT_PATH/AGENTS.md и заполни «О проекте» и «Категории»."
-echo "  2. Открой $PROJECT_PATH/knowledge/README.md и напиши 1–2 предложения описания."
-echo "  3. Обнови запись в $HUB/registry.md (статус seeded/live, описание)."
-echo "  4. Дропни первый источник в $PROJECT_PATH/knowledge/raw/ и скажи Claude «ingest»."
+echo "✅ Wiki created. Next steps:"
+echo "  1. Open $PROJECT_PATH/AGENTS.md and fill in the project description and categories sections."
+echo "  2. Open $PROJECT_PATH/knowledge/README.md and write 1-2 sentences describing the project."
+echo "  3. Update the entry in $HUB/registry.md (status seeded/live, description)."
+echo "  4. Drop your first source into $PROJECT_PATH/knowledge/raw/ and tell your agent \"ingest\"."

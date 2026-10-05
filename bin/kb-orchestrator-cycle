@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """kb-orchestrator-cycle — N-level evening retro + (Phase 5) morning plan.
 
 Spec: ~/.claude/plans/rustling-marinating-sketch.md (Phase 3).

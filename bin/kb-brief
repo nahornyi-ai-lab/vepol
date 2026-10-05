@@ -6,7 +6,10 @@ set -euo pipefail
 HUB="${KB_HUB:-$HOME/knowledge}"
 BRIEF_TIMEOUT="${BRIEF_TIMEOUT:-360}"
 BRIEF_CHAR_LIMIT="${BRIEF_CHAR_LIMIT:-3500}"
-ORCH="$HUB/bin/kb-orchestrator-run"
+SCRIPT_DIR="${0:A:h}"
+# Helper lookup: the hub copy wins; a hub without bin/<helper> (the demo hub) falls back to the script directory.
+kb_helper() { [[ -x "$HUB/bin/$1" ]] && print -r -- "$HUB/bin/$1" || print -r -- "$SCRIPT_DIR/$1"; }
+ORCH="$(kb_helper kb-orchestrator-run)"
 LOG="$HUB/logs/brief.log"
 TODAY=$(date +%Y-%m-%d)
 NOW=$(date +%H:%M)
@@ -44,12 +47,11 @@ PY
 [[ -n "${USER_CITY:-}" ]] || USER_CITY=$(read_secret_value USER_CITY)
 export TELEGRAM_TOKEN TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
 
-SCRIPT_DIR="${0:A:h}"
 PROFILE_PY="$SCRIPT_DIR/_kb_profile.py"
 [[ -f "$PROFILE_PY" ]] || PROFILE_PY="$HUB/bin/_kb_profile.py"
 DELIVERY_HELPER="$SCRIPT_DIR/_kb_brief_delivery.py"
 [[ -f "$DELIVERY_HELPER" ]] || DELIVERY_HELPER="$HUB/bin/_kb_brief_delivery.py"
-TEXT_SENDER="$HUB/bin/kb-channel-send-text"
+TEXT_SENDER="$(kb_helper kb-channel-send-text)"
 UI_LANG=$(python3 "$PROFILE_PY" "$HUB" 2>/dev/null || echo en)
 UI_LANG_NAME=$(python3 "$PROFILE_PY" "$HUB" --name 2>/dev/null || echo English)
 
@@ -103,11 +105,11 @@ case "$UI_LANG" in
 esac
 
 INBOX="$HUB/personal/daily-inbox/$TODAY.md"
-IDEA_DIGEST=$("$HUB/bin/kb-idea" brief --limit 3 2>/dev/null || true)
-AGENDA_JSON=$("$HUB/bin/kb-agenda" --from "$TODAY" --days 8 --json 2>/dev/null \
+IDEA_DIGEST=$("$(kb_helper kb-idea)" brief --limit 3 2>/dev/null || true)
+AGENDA_JSON=$("$(kb_helper kb-agenda)" --from "$TODAY" --days 8 --json 2>/dev/null \
   || print -- '{"available":false,"overdue":[],"today":[],"upcoming":[],"errors":["agenda_reader_failed"]}')
-MAIL_BLOCK=$("$HUB/bin/kb-mail-block" --period morning 2>/dev/null || print -- "$MAIL_UNAVAILABLE")
-PREFLIGHT_JSON=$("$HUB/bin/kb-brief-preflight" 2>/dev/null \
+MAIL_BLOCK=$("$(kb_helper kb-mail-block)" --period morning 2>/dev/null || print -- "$MAIL_UNAVAILABLE")
+PREFLIGHT_JSON=$("$(kb_helper kb-brief-preflight)" 2>/dev/null \
   || print -- '{"generated_at":null,"projects":[],"warnings":[],"changed_since_yesterday":[],"do_not_surface":[]}')
 
 ADDRESS="${USER_NAME:+ $USER_NAME}"
@@ -169,7 +171,9 @@ $AGENDA_JSON
    Use exactly one localized state lead:
    - checked-empty: "$MAIL_EMPTY"
    - present: "$MAIL_PRESENT"
-   - unavailable: "$MAIL_UNAVAILABLE"
+   - unavailable: "$MAIL_UNAVAILABLE" Then, if the block below has a "Reason:"
+     line, state that reason in one short sentence in the user's language,
+     including "day N in a row" when present.
 
 $MAIL_BLOCK
 

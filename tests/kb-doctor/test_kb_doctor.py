@@ -337,3 +337,17 @@ def test_strict_exit_codes(tmp_path):
     )
     p1 = run_doctor(hub_p1, "--strict")
     assert p1.returncode == 1
+
+
+def test_fresh_hub_without_projects_is_green(tmp_path):
+    # A fresh install has no registered projects yet: doctor must be green, not P0.
+    # (a) well-formed registry table with zero rows
+    hub = make_hub(tmp_path / "empty-table", [])
+    result = run_doctor(hub, "--strict")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "P0=0" in result.stdout, result.stdout
+    # (b) registry.md absent entirely
+    (hub / "registry.md").unlink()
+    result = run_doctor(hub, "--strict")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "P0=0" in result.stdout, result.stdout

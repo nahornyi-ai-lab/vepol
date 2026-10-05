@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """kb-multibot-list — show the current state of all multibot agents.
 
 Output (default): a human-readable table.

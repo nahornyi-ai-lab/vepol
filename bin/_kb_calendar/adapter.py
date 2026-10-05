@@ -26,6 +26,21 @@ from .errors import (
 )
 
 
+def _unavailable_text(exc) -> str:
+    """Message for CalendarUnavailable. Calendar errors have no code vocabulary,
+    so when Codex's own error text names quota or an unsupported model the text
+    gets that fixed code as a prefix ("quota: ..."); everything else is kept
+    unchanged. Only the Codex lane of the host chain is read, and a missing
+    shared-rule module just leaves the text as is."""
+    text = str(exc)
+    try:
+        from _kb_failure_reason import failure_reason
+        code = failure_reason(text.split("; codex: ", 1)[-1])[0]
+    except Exception:  # noqa: BLE001
+        return text
+    return f"{code}: {text}" if code in ("quota", "model") else text
+
+
 def idempotency_key(fid: str) -> str:
     """Deterministic, Google-Calendar-id-safe key (base32hex charset a-v0-9)."""
     return "vepolfup" + hashlib.sha1(fid.encode("utf-8")).hexdigest()[:20]
@@ -158,7 +173,7 @@ class ProductionBackend:
         key = idempotency_key(proposal["id"])
         prompt = (
             "Create exactly one Google Calendar event on the primary calendar "
-            "using mcp__claude_ai_Google_Calendar__create_event. "
+            "using your Google Calendar tool (create_event). "
             "Use these fields and DO NOT invent attendees:\n"
             f"- id (client-assigned, for idempotency): {key}\n"
             f"- summary: [Vepol] {proposal.get('summary','')}\n"
@@ -195,7 +210,7 @@ class ProductionBackend:
     def list_events(self, start: str, end: str) -> list[dict]:
         prompt = (
             "List Google Calendar events on the primary calendar between "
-            f"{start} and {end} using mcp__claude_ai_Google_Calendar__list_events. "
+            f"{start} and {end} using your Google Calendar tool (list_events). "
             "Reply with ONLY a single JSON object: "
             '{"ok": true, "items": [{"title": "...", "start": "<iso>", '
             '"end": "<iso>"}], "stats": {"n_items": <n>, "fetched_at": "<iso>"}}. '
@@ -204,7 +219,7 @@ class ProductionBackend:
         try:
             envelope = self._host().call(prompt, timeout_s=60)
         except Exception as e:
-            raise CalendarUnavailable(str(e))
+            raise CalendarUnavailable(_unavailable_text(e))
         return list(envelope.get("items") or [])
 
 

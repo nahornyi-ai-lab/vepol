@@ -19,6 +19,7 @@ import signal
 import subprocess
 
 from _kb_codex import CodexUnavailable, codex_bin
+from _kb_failure_reason import failure_reason
 from .errors import MailUnavailable
 
 
@@ -147,9 +148,10 @@ class CodexHostRunner:
             # A non-zero exit means the read did not complete — never try to
             # salvage a "success" envelope from a failed run.
             if proc.returncode != 0:
-                tail = (stderr or stdout or "").strip().splitlines()
+                # The cause line (quota/model/auth/...), not whatever was printed last.
+                _code, line = failure_reason(stderr or stdout or "")
                 raise MailUnavailable(
-                    f"codex exited {proc.returncode}: {(tail[-1] if tail else '')[:120]}"
+                    f"codex exited {proc.returncode}: {line[:120]}"
                 )
             out = stdout
         env = _extract_envelope(out)

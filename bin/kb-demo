@@ -77,6 +77,17 @@ if [[ ! -x "$TARGET_BIN" ]]; then
   fi
 fi
 
+# Keep the demo synthetic. The demo hub has no bin/, so kb-brief resolves its
+# helpers (agenda, mail, ideas, preflight, sender) from this repo's bin/ — which
+# means they could otherwise reach the user's real calendar connector or, through
+# TELEGRAM_* variables exported in the shell, the user's real Telegram chat.
+#   KB_CALENDAR_DISABLE=1  — the calendar reader answers "disabled", never connects
+#   KB_BRIEF_DRY=1         — kb-brief prints the brief and exits before delivery
+export KB_CALENDAR_DISABLE=1
+if [[ "$SUBCMD" == "brief" ]]; then
+  export KB_BRIEF_DRY="${KB_BRIEF_DRY:-1}"
+fi
+
 # Run the kb-* command with the demo hub.
 # Different scripts read different env-var names — set both to be safe:
 #   KB_HUB         — used by kb-brief, kb-retro, kb-task, kb-backlog, kb-doctor
