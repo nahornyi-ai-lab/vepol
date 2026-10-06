@@ -18,8 +18,9 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -39,6 +40,50 @@ def _today() -> str:
         return datetime.now().date().isoformat()
 
 
+# One plain sentence per fixed reason code of the unavailable envelope. The code
+# comes from the host's own error text (kb-mail-brief:_reason_code), never from
+# mail content; unknown codes fall back to the generic sentence.
+_REASON_SENTENCES = {
+    "quota": "Reason: the Codex account hit its usage limit; mail will be read "
+             "again after the limit resets.",
+    "model": "Reason: the configured Codex model is not supported by the "
+             "account; the owner must change the model setting.",
+    "auth": "Reason: the mail host is not signed in; the owner must sign in "
+            "again.",
+    "network": "Reason: the network was unreachable while reading mail.",
+    "timeout": "Reason: reading mail timed out.",
+    "disabled": "Reason: mail reading is switched off in settings.",
+}
+_REASON_OTHER = "Reason: the mail read failed and the cause was not identified."
+_MAX_STREAK = 30
+
+
+def _unavailable_streak(period: str, day: str, hub: pathlib.Path) -> int:
+    """Days in a row (today included, capped) whose same-period envelope was
+    valid and available:false. A missing or invalid envelope ends the streak."""
+    try:
+        d = date.fromisoformat(day)
+    except ValueError:
+        return 1
+    n = 1
+    while n < _MAX_STREAK:
+        d -= timedelta(days=1)
+        prev = read_same_day_envelope(period, d.isoformat(), hub)
+        if prev is None or prev.get("available"):
+            break
+        n += 1
+    return n
+
+
+def _reason_sentence(env: dict, period: str, day: str, hub: pathlib.Path) -> str:
+    m = re.fullmatch(r"gmail_unavailable:([a-z0-9_\-]+)", (env.get("errors") or [""])[0])
+    sentence = _REASON_SENTENCES.get(m.group(1) if m else "", _REASON_OTHER)
+    n = _unavailable_streak(period, day, hub)
+    if n >= 2:
+        sentence += f" This is day {n} in a row."
+    return sentence
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="kb-mail-block")
     ap.add_argument("--period", required=True, choices=("morning", "evening"))
@@ -56,6 +101,8 @@ def main() -> int:
             reason = f" ({env['errors'][0]})"
         print(f"MAIL ({args.period}): no fresh mail brief for today{reason}. "
               f"Proceed without mail.")
+        if env is not None:  # a valid available:false envelope: say why
+            print(_reason_sentence(env, args.period, day, hub))
         return 0
 
     items = env.get("items") or []

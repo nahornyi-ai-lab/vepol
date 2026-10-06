@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# upgrade.sh — pull the latest Vepol and re-apply, preserving all user data.
+# upgrade.sh — move to the latest Vepol release and re-apply, preserving all user data.
 #
-# Vepol's hub uses symlinks into this repo, so "upgrade" = update the repo, then
-# re-run the idempotent installer (--apply). User data in ~/knowledge is never
-# touched; only managed files (symlinks, ~/.claude/.vepol/CLAUDE.managed.md,
-# skills, templates) are refreshed.
+# Vepol's hub uses symlinks into this repo, so "upgrade" = check out the newest
+# release tag (vX.Y.Z, never the tip of main), then re-run the idempotent
+# installer (--apply). User data in ~/knowledge is never touched; only managed
+# files (symlinks, ~/.claude/.vepol/CLAUDE.managed.md, skills, templates) refresh.
 #
 # Flags:
-#   --check   show current vs. available version and exit (no changes)
+#   --check   show the current release vs. the newest tag and exit (no changes)
 #   passes VEPOL_ENABLE_* / VEPOL_APPLY_C01 through to install.sh --apply
 #
 # Project: https://github.com/nahornyi-ai-lab/vepol
@@ -42,27 +42,29 @@ if ! git -C "$VEPOL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-git -C "$VEPOL_DIR" fetch --quiet origin 2>/dev/null || warn "git fetch failed (offline?) — continuing with local state"
-LOCAL="$(git -C "$VEPOL_DIR" rev-parse @ 2>/dev/null || echo '?')"
-REMOTE="$(git -C "$VEPOL_DIR" rev-parse '@{u}' 2>/dev/null || echo '?')"
+git -C "$VEPOL_DIR" fetch --quiet --tags origin 2>/dev/null || warn "git fetch failed (offline?) — continuing with local state"
+# Releases are tags vX.Y.Z on the public repo. Upgrades follow the newest release
+# tag, not the tip of main; pre-release tags (containing "-") are skipped.
+LATEST="$(git -C "$VEPOL_DIR" tag --list 'v[0-9]*' --sort=-v:refname 2>/dev/null | grep -v -- '-' | head -n 1 || true)"
+CURRENT="$(git -C "$VEPOL_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo none)"
 
 if [[ "$CHECK" -eq 1 ]]; then
-  echo "  local:  $LOCAL"
-  echo "  remote: $REMOTE"
-  if [[ "$REMOTE" == "?" ]]; then warn "no upstream / offline — cannot check for updates"
-  elif [[ "$LOCAL" == "$REMOTE" ]]; then ok "up to date"
-  else warn "an update is available — run ./upgrade.sh"; fi
+  echo "  current: $CURRENT"
+  echo "  latest:  ${LATEST:-?}"
+  if [[ -z "$LATEST" ]]; then warn "no release tags found (offline?) — cannot check for updates"
+  elif [[ "$CURRENT" == "$LATEST" ]]; then ok "up to date"
+  else warn "an update is available: $LATEST — run ./upgrade.sh"; fi
   exit 0
 fi
 
-if [[ "$LOCAL" == "$REMOTE" || "$REMOTE" == "?" ]]; then
+if [[ -z "$LATEST" || "$CURRENT" == "$LATEST" ]]; then
   ok "already up to date (or offline) — re-applying installer to repair any drift"
 else
-  say "pulling latest…"
-  if git -C "$VEPOL_DIR" pull --ff-only --quiet; then
+  say "switching to release ${LATEST}..."
+  if git -C "$VEPOL_DIR" checkout --quiet --detach "$LATEST"; then
     ok "updated to $(cat "$VEPOL_DIR/VERSION" 2>/dev/null || echo '?')"
   else
-    warn "fast-forward pull failed (local changes or diverged history)."
+    warn "checkout of $LATEST failed (local changes or diverged history)."
     warn "resolve manually in $VEPOL_DIR, then re-run ./upgrade.sh."
     exit 1
   fi

@@ -57,13 +57,32 @@ NB=$(KB_HUB="$HUB" "$SRC_BIN/kb-mail-block" --period morning 2>/dev/null)
 echo ok > "$FAKE/mode"
 KB_HUB="$HUB" KB_MAIL_FAKE_DIR="$FAKE" "$SRC_BIN/kb-mail-brief" --period morning --write >/dev/null 2>&1
 
+# unavailable with a reason code on two consecutive days → plain-words reason
+# sentence plus the streak (scheduler honest failure, spec §B)
+SHUB="$TMP/streak-hub"; mkdir -p "$SHUB/personal"
+KB_MAIL_SRC_BIN="$SRC_BIN" SHUB="$SHUB" python3 - <<'PY'
+import os, pathlib, sys
+sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
+from _kb_mail.envelope import unavailable_envelope, write_envelope, brief_path
+hub = pathlib.Path(os.environ["SHUB"])
+for day in ("2026-07-01", "2026-07-02"):
+    env = unavailable_envelope(period="morning", day=day, generated_at=day + "T06:15:00+02:00",
+                               window={"from": day + "T00:00:00+02:00", "to": day + "T06:15:00+02:00"},
+                               reason="quota")
+    write_envelope(env, brief_path("morning", day, hub))
+PY
+SB=$(KB_HUB="$SHUB" "$SRC_BIN/kb-mail-block" --period morning --day 2026-07-02 2>/dev/null)
+[[ "$SB" == *"usage limit"* && "$SB" == *"day 2 in a row"* ]] \
+  && ok "block: unavailable quota → reason sentence + 'day 2 in a row'" || fail "block: reason sentence/streak missing"
+
 # ── AC4: kb-brief injects the wrapped morning block into its prompt ──────────
 P=$(KB_HUB="$HUB" KB_BRIEF_PROMPT_ONLY=1 "$SRC_BIN/kb-brief" 2>/dev/null)
 if [[ -z "$P" ]]; then
   fail "AC4: kb-brief prompt-only produced no output"
 else
   [[ "$P" == *"<untrusted-source-"* ]] && ok "AC4: morning mail block in brief prompt" || fail "AC4: no mail block in brief prompt"
-  [[ "$P" == *"UNTRUSTED external data"* ]] && ok "AC4: brief marks mail as untrusted" || fail "AC4: missing untrusted instruction"
+  grep -qi "untrusted external data" <<<"$P" \
+    && ok "AC4: brief marks mail as untrusted" || fail "AC4: missing untrusted instruction"
   leakfree "$P" && ok "AC4: no raw address/body/markup in brief prompt" || fail "AC4: raw content leaked into brief prompt"
 fi
 

@@ -126,6 +126,21 @@ def parse_registry(path: pathlib.Path) -> list[RegistryEntry]:
     return entries
 
 
+def count_registry_candidate_rows(path: pathlib.Path) -> int:
+    """Count table rows parse_registry would try to parse (same line filters).
+
+    Lets collect() tell "no projects registered yet" (file missing, or header
+    only: 0 candidates) from "rows present but unparseable" (> 0 candidates).
+    """
+    count = 0
+    for raw in read_text(path).splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or "---" in line or "slug" in line.lower():
+            continue
+        count += 1
+    return count
+
+
 def parse_projects_md(path: pathlib.Path) -> set[str]:
     """Parse human-facing projects.md roster — return set of declared slugs.
 
@@ -394,8 +409,12 @@ def collect(project_filter: str | None) -> list[Finding]:
     entries = parse_registry(registry_path)
     findings: list[Finding] = []
     if not entries:
-        findings.append(finding("registry-empty", "hub", registry_path, "P0", "registry.md has no parseable project rows", f"path={registry_path}"))
-        return findings
+        unparsed_rows = count_registry_candidate_rows(registry_path)
+        if unparsed_rows > 0:
+            findings.append(finding("registry-empty", "hub", registry_path, "P0", "registry.md has no parseable project rows", f"path={registry_path} unparsed_rows={unparsed_rows}"))
+            return findings
+        # Fresh install: nothing registered yet is a normal state, not a defect.
+        findings.append(finding("registry-no-projects", "hub", registry_path, "info", "no projects registered yet — create one with new-wiki", f"path={registry_path}"))
     for entry in entries:
         findings.extend(check_project(entry, project_filter))
     if project_filter is None:

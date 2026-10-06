@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 
 from _kb_claude_runner import run_command as run_unbounded_command
 from _kb_codex import CodexUnavailable, codex_bin
+from _kb_failure_reason import failure_reason
 
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
@@ -76,7 +77,6 @@ CODEX_AUTH_PATTERNS = (
     "server returned 403",
     "401 unauthorized",
     "403 forbidden",
-    "you've hit your usage limit",  # Codex phrasing for account-level caps
 )
 
 CLAUDE_NETWORK_PATTERNS = (
@@ -98,6 +98,7 @@ CODEX_NETWORK_PATTERNS = (
 
 RATE_LIMIT_PATTERNS = (
     "you've hit your limit",      # Claude session/token cap
+    "you've hit your usage limit",  # Codex phrasing for account-level caps
     "session limit",
     "rate limit",
     "quota exceeded",
@@ -115,7 +116,8 @@ class RunResult:
     session_id: str | None = None
     category: str | None = None            # None when successful
     cooldown_until: dt.datetime | None = None
-    snippet: str | None = None             # first line of stderr, ≤240 chars
+    snippet: str | None = None             # cause line of stderr (_kb_failure_reason), ≤200 chars
+    reason_code: str | None = None         # quota|model|auth|network|timeout|other; None when successful
 
     @property
     def ok(self) -> bool:
@@ -231,10 +233,35 @@ def stable_claude_session_id(key: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"kb-orchestrator-run.claude.{key}"))
 
 
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
 def parse_reset_timestamp(text: str) -> dt.datetime | None:
     epoch_match = re.search(r"resets?_at[^0-9]{0,8}(\d{10})", text, flags=re.IGNORECASE)
     if epoch_match:
         return dt.datetime.fromtimestamp(int(epoch_match.group(1)), tz=dt.timezone.utc)
+
+    # Codex account cap: "try again at Sep 26th, 2026 11:23 AM" (ordinal suffix and
+    # AM/PM optional, 24h clock allowed). Codex prints the machine's local time.
+    codex_match = re.search(
+        r"try again at\s+([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}),?\s+"
+        r"(\d{1,2}):(\d{2})\s*([ap])?\.?m?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if codex_match and codex_match.group(1)[:3].lower() in _MONTHS:
+        month = _MONTHS.index(codex_match.group(1)[:3].lower()) + 1
+        hour = int(codex_match.group(4))
+        meridiem = (codex_match.group(6) or "").lower()
+        if meridiem and 1 <= hour <= 12:
+            hour = hour % 12 + (12 if meridiem == "p" else 0)
+        try:
+            local = dt.datetime(int(codex_match.group(3)), month, int(codex_match.group(2)),
+                                hour, int(codex_match.group(5)))
+        except ValueError:
+            local = None
+        if local is not None:
+            return local.astimezone(dt.timezone.utc)  # naive -> machine local time
 
     retry_match = re.search(
         r"(?:retry(?:[- ]after)?|resets?\s+in)\s+(\d+)\s*(seconds?|minutes?|hours?)",
@@ -249,6 +276,24 @@ def parse_reset_timestamp(text: str) -> dt.datetime | None:
             delta = dt.timedelta(minutes=amount)
         elif unit.startswith("hour"):
             delta = dt.timedelta(hours=amount)
+        return utc_now() + delta
+
+    # Gemini retry hints: "Please retry in 32.5s", "retryDelay": "32s", "retry in 1 minute".
+    gemini_match = re.search(
+        r"(?:retry\s+in|retry_?delay[\"']?\s*[:=]\s*[\"']?)\s*(\d+(?:\.\d+)?)\s*"
+        r"(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if gemini_match:
+        amount_f = float(gemini_match.group(1))
+        unit = gemini_match.group(2).lower()
+        if unit.startswith("h"):
+            delta = dt.timedelta(hours=amount_f)
+        elif unit.startswith("m"):
+            delta = dt.timedelta(minutes=amount_f)
+        else:
+            delta = dt.timedelta(seconds=amount_f)
         return utc_now() + delta
 
     clock_match = re.search(
@@ -463,6 +508,7 @@ def run_claude(
         )
 
     category = classify_stderr("claude", stderr, durable.returncode)
+    reason_code, reason_line = failure_reason(stderr)
     return RunResult(
         provider="claude",
         returncode=durable.returncode,
@@ -471,7 +517,8 @@ def run_claude(
         session_id=session.get("claude_session_id"),
         category=category,
         cooldown_until=compute_cooldown(category, stderr),
-        snippet=first_line(stderr) if stderr.strip() else None,
+        snippet=reason_line or None,
+        reason_code=reason_code,
     )
 
 
@@ -554,6 +601,19 @@ def run_codex(
             session["codex_session_id"] = session_match.group(1)
 
         if proc.returncode == 0:
+            if not (output or proc.stdout).strip():
+                # Spec scheduler-honest-failure §C: Codex was asked for an answer
+                # file (-o); exit 0 with no answer is not a success.
+                return RunResult(
+                    provider="codex",
+                    returncode=0,
+                    output="",
+                    stderr=stderr,
+                    session_id=session.get("codex_session_id"),
+                    category="other",
+                    snippet="empty output",
+                    reason_code="other",
+                )
             return RunResult(
                 provider="codex",
                 returncode=0,
@@ -563,6 +623,7 @@ def run_codex(
             )
 
         category = classify_stderr("codex", stderr, proc.returncode)
+        reason_code, reason_line = failure_reason(stderr)
         return RunResult(
             provider="codex",
             returncode=proc.returncode,
@@ -571,7 +632,8 @@ def run_codex(
             session_id=session.get("codex_session_id"),
             category=category,
             cooldown_until=compute_cooldown(category, stderr),
-            snippet=first_line(stderr) if stderr.strip() else None,
+            snippet=reason_line or None,
+            reason_code=reason_code,
         )
     finally:
         try:
@@ -639,6 +701,7 @@ def record_success(state: dict, provider: str, session_id: str | None) -> None:
     record["last_success_at"] = iso_z(utc_now())
     record.pop("last_category", None)
     record.pop("last_stderr_snippet", None)
+    record.pop("reason_code", None)
     if session_id:
         record["last_session_id"] = session_id
 
@@ -647,6 +710,7 @@ def record_failure(state: dict, result: RunResult) -> None:
     record = state.setdefault("providers", {}).setdefault(result.provider, {})
     record["last_category"] = result.category
     record["last_stderr_snippet"] = result.snippet or ""
+    record["reason_code"] = result.reason_code or "other"
     record["last_seen_at"] = iso_z(utc_now())
     if result.cooldown_until is not None:
         record["blocked_until"] = iso_z(result.cooldown_until)
@@ -727,11 +791,14 @@ def main() -> int:
         else:
             continue
 
+        if not result.ok and result.reason_code is None:
+            result.reason_code = failure_reason(result.snippet or "")[0]
         attempts.append({
             "provider": provider,
             "category": "ok" if result.ok else (result.category or "other"),
             "returncode": result.returncode,
             "snippet": result.snippet,
+            "reason_code": result.reason_code,
         })
 
         if result.ok:

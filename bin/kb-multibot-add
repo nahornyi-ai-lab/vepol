@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """kb-multibot-add — register a Telegram bot for an existing project.
 
 You: create the project (with `knowledge/.orchestration.yaml`), create the
