@@ -61,14 +61,12 @@ EN=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:0
   zsh "$BRIEF" 2>/dev/null)
 
 RU_HEADINGS=(
-  "☀️ Сегодня" "🆕 Изменилось со вчера" "🧭 Проекты" "📅 Календарь"
-  "📬 Почта" "💡 Идеи" "⚠️ Риски, свежесть и эскалации" "🔥 Действия"
-  "❓ Решения от тебя" "🧘 Условие дня"
+  "🫀 Тело" "🗓 План дня" "🔥 Главное" "❓ Нужно твоё решение"
+  "📬 Почта" "💡 Идеи" "🆕 Изменилось:" "⚠️ Риски:" "Тихо:"
 )
 EN_HEADINGS=(
-  "☀️ Today" "🆕 Changed since yesterday" "🧭 Projects" "📅 Calendar"
-  "📬 Mail" "💡 Ideas" "⚠️ Risks, freshness, and escalations" "🔥 Actions"
-  "❓ Decisions from you" "🧘 Day condition"
+  "🫀 Body" "🗓 Day plan" "🔥 Main" "❓ Your decision needed"
+  "📬 Mail" "💡 Ideas" "🆕 Changed:" "⚠️ Risks:" "Quiet:"
 )
 for heading in "${RU_HEADINGS[@]}"; do
   has "$RU" "$heading" && ok "AC1 RU prompt requires $heading" || fail "AC1 RU missing $heading"
@@ -81,10 +79,10 @@ if has "$RU" "каждым из пяти" || has "$RU" "каждый логич�
 else
   fail "AC1 no every-logical-input requirement"
 fi
-if has "$RU" "полное предложение" || has "$RU" "complete sentence"; then
-  ok "AC1 every heading requires a sentence"
+if has "$RU" "Тихо:" && has "$RU" "Данных сна и здоровья за сегодня нет"; then
+  ok "AC1 empty inputs fold into the quiet line; health has an honest no-data line"
 else
-  fail "AC1 no per-heading sentence rule"
+  fail "AC1 no quiet line or health no-data line"
 fi
 has "$RU" "Сегодня писем не было." && has "$RU" "Сегодня были такие письма:" \
   && has "$RU" "Почту сегодня проверить не удалось." \
