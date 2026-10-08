@@ -156,6 +156,25 @@ def _main() -> int:
     p_close.add_argument("--now")
     p_close.add_argument("--json", action="store_true", dest="json_out")
 
+    p_cancel = sub.add_parser("cancel", help="Move Backlog, Ready or Blocked task to Cancelled")
+    p_cancel.add_argument("path")
+    p_cancel.add_argument("--plan-item-id", required=True)
+    p_cancel.add_argument("--expected-hash", required=True, help="content_hash from `list --json` or `hash`")
+    p_cancel.add_argument("--actor", required=True)
+    p_cancel.add_argument("--reason")
+    p_cancel.add_argument("--now")
+    p_cancel.add_argument("--json", action="store_true", dest="json_out")
+
+    p_reopen = sub.add_parser("reopen", help="Move Done or Cancelled task back to Ready or Backlog")
+    p_reopen.add_argument("path")
+    p_reopen.add_argument("--plan-item-id", required=True)
+    p_reopen.add_argument("--expected-hash", required=True, help="content_hash from `list --json` or `hash`")
+    p_reopen.add_argument("--actor", required=True)
+    p_reopen.add_argument("--to", required=True, choices=["Ready", "Backlog"], dest="to_status")
+    p_reopen.add_argument("--reason", required=True)
+    p_reopen.add_argument("--now")
+    p_reopen.add_argument("--json", action="store_true", dest="json_out")
+
     args = parser.parse_args()
     global _JSON_OUT
     _JSON_OUT = bool(getattr(args, "json_out", False))
@@ -192,7 +211,7 @@ def _main() -> int:
             print(migrated, end="")
         return 0
 
-    if args.cmd in {"hash", "list", "append", "claim", "ready", "heartbeat", "progress", "sweep", "request-review", "close"}:
+    if args.cmd in {"hash", "list", "append", "claim", "ready", "heartbeat", "progress", "sweep", "request-review", "close", "cancel", "reopen"}:
         from _kb_board.hashing import content_hash
         from _kb_board.model import TaskBlock
         from _kb_board.mutation import (
@@ -246,6 +265,7 @@ def _main() -> int:
                     "title": task.title,
                     "claim_owner": task.fields.get("claim_owner"),
                     "claim_id": task.fields.get("claim_id"),
+                    "content_hash": content_hash(task),
                 })
             if args.json_out:
                 _emit(rows, args.json_out)
@@ -395,6 +415,22 @@ def _main() -> int:
                 claim_id=args.claim_id,
                 expected_content_hash=content_hash(task),
                 outcome=args.outcome,
+                now=args.now,
+            )
+            _emit(result, args.json_out)
+            return 0
+
+        if args.cmd in {"cancel", "reopen"}:
+            # The caller supplies the hash it showed, so no unlocked find_task:
+            # mutate_file runs the publish gate and the lookup under the lock.
+            result = mutate_file(
+                path=path,
+                op=args.cmd,
+                plan_item_id=args.plan_item_id,
+                actor=args.actor,
+                expected_content_hash=args.expected_hash,
+                target_status=getattr(args, "to_status", None),
+                reason=args.reason,
                 now=args.now,
             )
             _emit(result, args.json_out)
