@@ -56,8 +56,15 @@ class Conversation:
     transport: str = "oneshot"
     provider_session_id: str | None = None
     transport_note: str = ""
-    # Display only: the Claude session behind a terminal card, for its title and preview.
-    claude_transcript_id: str | None = None
+    # The tmux session of a terminal conversation; None = the canonical kb-<target>-<runtime>.
+    terminal_name: str | None = None
+    # The board task this session works on ({"project", "plan_item_id"}) and its last seen status.
+    task: dict | None = None
+    task_status: str | None = None
+    # True once the card was moved to Done for the task's Done/Cancelled outcome (moved once only).
+    task_done_moved: bool = False
+    # Display only: the agent's own session behind a terminal card, for its title and preview.
+    agent_transcript_id: str | None = None
 
 
 class RunStore:
@@ -89,10 +96,14 @@ class RunStore:
             return current
 
     # -------------------------------------------------------------- write
-    def create_conversation(self, target: str, runtime: str, title: str = "", transport: str = "oneshot") -> Conversation:
+    def create_conversation(self, target: str, runtime: str, title: str = "", transport: str = "oneshot",
+                            task: dict | None = None) -> Conversation:
+        conv_id = uuid.uuid4().hex[:12]
         conv = Conversation(
-            id=uuid.uuid4().hex[:12], target=target, runtime=runtime,
-            seq=self._next_seq(), title=title, transport=transport,
+            id=conv_id, target=target, runtime=runtime,
+            seq=self._next_seq(), title=title, transport=transport, task=task,
+            # Its own tmux session, so several terminals of one agent can run in one project.
+            terminal_name=f"kb-{target}-{conv_id}-{runtime}" if transport == "terminal" else None,
         )
         self._save(conv)
         return conv
@@ -180,12 +191,25 @@ class RunStore:
             self._save(conv)
             return conv
 
-    def set_claude_transcript(self, conv_id: str, session_id: str) -> Conversation:
+    def set_agent_transcript(self, conv_id: str, session_id: str) -> Conversation:
         with self._lock:
             conv = self.get_conversation(conv_id)
             if conv is None:
                 raise KeyError(conv_id)
-            conv.claude_transcript_id = session_id
+            conv.agent_transcript_id = session_id
+            self._save(conv)
+            return conv
+
+    def set_task_state(self, conv_id: str, status: str, done_moved: bool, complete: bool = False) -> Conversation:
+        """Record the linked task's status; `complete` moves the card to Done (the task sync's one move)."""
+        with self._lock:
+            conv = self.get_conversation(conv_id)
+            if conv is None:
+                raise KeyError(conv_id)
+            conv.task_status, conv.task_done_moved = status, done_moved
+            if complete:
+                conv.board_stage = "completed"
+                conv.board_updated_at = _now()
             self._save(conv)
             return conv
 
@@ -216,7 +240,12 @@ class RunStore:
             transport=blob.get("transport", "oneshot"),
             provider_session_id=blob.get("provider_session_id"),
             transport_note=blob.get("transport_note", ""),
-            claude_transcript_id=blob.get("claude_transcript_id"),
+            terminal_name=blob.get("terminal_name"),
+            task=blob.get("task") if isinstance(blob.get("task"), dict) else None,
+            task_status=blob.get("task_status"),
+            task_done_moved=bool(blob.get("task_done_moved", False)),
+            # Saved before every agent had a title reader: the Claude session id carries over.
+            agent_transcript_id=blob.get("agent_transcript_id") or blob.get("claude_transcript_id"),
         )
 
     def get_run(self, conv_id: str, run_id: str) -> Run | None:
