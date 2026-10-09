@@ -19,6 +19,13 @@ sys.path.insert(0, str(app_root))
 os.environ["TMUX_TMPDIR"] = tempfile.mkdtemp(prefix="vt-", dir="/tmp")
 os.environ.pop("TMUX", None)
 os.environ.pop("TMUX_PANE", None)
+# Task sync every 2 s, so a kb-board change reaches the card within one board refresh.
+os.environ.setdefault("VEPOL_TASK_SYNC_SECONDS", "2")
+# Empty agent stores: card titles never come from the machine's own Claude/Codex/... sessions.
+for _agent in ("claude", "codex", "grok", "agy", "hermes", "opencode"):
+    _store = fixture_root / "agent-homes" / _agent
+    _store.mkdir(parents=True, exist_ok=True)
+    os.environ[f"VEPOL_AGENT_HOME_{_agent.upper()}"] = str(_store)
 
 import uvicorn
 from vepol_face import runtimes as runtimes_mod
@@ -47,7 +54,8 @@ terminal_session.TerminalSession._shell_argv = lambda self: ["/bin/zsh", "-f"]
 WORKSPACE = os.environ.get("VEPOL_FIXTURE_WORKSPACE")
 if WORKSPACE:
     # A copy of a sample workspace (demo/workspace): its knowledge/ is the hub, projects/ its relative links.
-    shutil.copytree(WORKSPACE, fixture_root / "workspace", symlinks=True)
+    # Plain copies get today's mtime, so "updated today" does not depend on when the checkout was made.
+    shutil.copytree(WORKSPACE, fixture_root / "workspace", symlinks=True, copy_function=shutil.copy)
     hub = fixture_root / "workspace" / "knowledge"
 else:
     hub = fixture_root / "hub"

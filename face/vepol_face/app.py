@@ -17,6 +17,7 @@ import struct
 import subprocess
 import termios
 import threading
+import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,7 +25,6 @@ from fastapi.staticfiles import StaticFiles
 
 from . import automations as automations_mod
 from . import broker as broker_mod
-from . import claude_titles
 from . import knowledge_files as knowledge_mod
 from . import memory as memory_mod
 from . import runtimes as runtimes_mod
@@ -36,7 +36,7 @@ from .auth import Auth
 from .config import Config
 from .evidence import diff_kb
 from .runs import BOARD_STAGES, Conversation, RunStore
-from .sessions import RUNTIME_SUFFIX, UnsafeSessionName, attach_command, session_name
+from .sessions import RUNTIME_SUFFIX, UnsafeSessionName, attach_command, terminal_name
 from .session_manager import SessionManager
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -57,6 +57,7 @@ def _conversation_summary(conv: Conversation) -> dict:
         "preview": preview[:200],
         "last_activity_at": max((at for at in timestamps if at), default=conv.created_at),
         "activity": "running" if running else (conv.runs[-1].status if conv.runs else "idle"),
+        "task": conv.task, "task_status": conv.task_status, "terminal_name": conv.terminal_name,
     }
 
 
@@ -136,7 +137,7 @@ def create_app(
     app.state.bus = EventBus()
     app.state.sessions = SessionManager(app.state.store, app.state.bus, hub_path, cfg.desktop)
 
-    def summary(conv):
+    def summary(conv, convs=None, cwds=None):
         row = _conversation_summary(conv)
         details = app.state.sessions.describe(conv)
         row.update(transport=details["transport"], needs_owner=bool(details["pending"]),
@@ -147,29 +148,64 @@ def create_app(
             # Process evidence replaces the run-derived state for terminal conversations.
             row.update(agent=details["agent"], pid=details["pid"], agent_reason=details.get("agent_reason", ""))
             row["activity"] = details["agent"]
-            if conv.runtime == "claude":
-                claude_card(conv, row, details)
+            if conv.runtime in RUNTIME_SUFFIX:
+                agent_card(conv, row, details, convs, cwds)
         return row
 
-    def claude_card(conv, row, details):
-        """Claude's own name and last message for a terminal card; display only, never raises."""
+    def agent_card(conv, row, details, convs=None, cwds=None):
+        """The agent's own name and last message for a terminal card; display only, never raises."""
         try:
-            sid = conv.claude_transcript_id
-            if details.get("agent") == "alive":
-                found = claude_titles.session_for_pid(details.get("pid"))
-                if found and found != sid:
-                    # The newest agent in the pane wins, so the card follows an in-shell restart.
-                    app.state.store.set_claude_transcript(conv.id, found)
-                    sid = found
-            info = claude_titles.read(sid)
+            from . import agent_titles  # a broken titles reader must never take the board down
+            if convs is None:
+                convs = app.state.store.list_conversations()
+            if cwds is None:
+                cwds = {t.slug: t.cwd for t in targets_mod.discover_targets(hub=hub_path)}
+            # Another card's agent session is never this card's, even in the same folder.
+            claimed = {c.agent_transcript_id for c in convs if c.id != conv.id and c.agent_transcript_id}
+            pid = details.get("pid") if details.get("agent") == "alive" else None
+            info = agent_titles.card(conv.runtime, pid, cwds.get(conv.target, ""), conv.agent_transcript_id, claimed)
+            if info and info.get("id") and info["id"] != conv.agent_transcript_id:
+                # The newest agent in the pane wins, so the card follows an in-shell restart.
+                app.state.store.set_agent_transcript(conv.id, info["id"])
+                conv.agent_transcript_id = info["id"]
         except Exception:  # noqa: BLE001 - the board must render whatever happens here
             return
         if not info:
             return
-        if info["title"]:
+        if info.get("title"):
             row["title"] = info["title"]
-        if info["preview"]:
+        if info.get("preview"):
             row["preview"] = info["preview"]
+
+    task_sync = {"at": None, "lock": threading.Lock()}
+    task_sync_seconds = float(os.environ.get("VEPOL_TASK_SYNC_SECONDS") or 30)
+
+    def sync_tasks(force: bool = False) -> None:
+        """Task status onto linked cards; a task that ends Done/Cancelled moves its card to Done once. Never raises."""
+        with task_sync["lock"]:
+            now = time.monotonic()
+            if not force and task_sync["at"] is not None and now - task_sync["at"] < task_sync_seconds:
+                return
+            task_sync["at"] = now
+            try:
+                linked = [c for c in app.state.store.list_conversations() if c.task]
+                if not linked:
+                    return
+                boards = tasks_mod.task_statuses(hub_path, {str(c.task.get("project")) for c in linked})
+                for conv in linked:
+                    rows = boards.get(str(conv.task.get("project")))
+                    status = (rows or {}).get(conv.task.get("plan_item_id")) or "unknown"
+                    ended = status in ("Done", "Cancelled")
+                    moved = conv.task_done_moved
+                    if ended and not moved:
+                        app.state.store.set_task_state(conv.id, status, True, complete=True)
+                    elif status != "unknown" and not ended and moved:
+                        # The task was reopened: its next Done/Cancelled moves the card again.
+                        app.state.store.set_task_state(conv.id, status, False)
+                    elif status != conv.task_status:
+                        app.state.store.set_task_state(conv.id, status, moved)
+            except Exception:  # noqa: BLE001 - an unreadable board leaves the cards as they are
+                return
 
     def desktop_status():
         convs = app.state.store.list_conversations()
@@ -305,13 +341,16 @@ def create_app(
     async def change_task(op: str, request: Request) -> dict:
         body = await _json_body(request, cfg.max_body_bytes)
         try:
-            return await asyncio.to_thread(tasks_mod.change_task, hub_path, op, body)
+            reply = await asyncio.to_thread(tasks_mod.change_task, hub_path, op, body)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"unknown project or no backlog.md: {body.get('project')!r}")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except tasks_mod.TaskChangeRefused as exc:
             raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        # A linked session card follows the close (or its undo) at once, not at the next sync.
+        await asyncio.to_thread(sync_tasks, True)
+        return reply
 
     @app.post("/api/tasks/cancel", dependencies=auth_dep)
     async def api_task_cancel(request: Request) -> dict:
@@ -348,10 +387,13 @@ def create_app(
 
     @app.get("/api/conversations", dependencies=auth_dep)
     def api_conversations() -> list[dict]:
-        return [
-            summary(c)
-            for c in app.state.store.list_conversations()
-        ]
+        sync_tasks()
+        convs = app.state.store.list_conversations()
+        cwds = {t.slug: t.cwd for t in targets_mod.discover_targets(hub=hub_path)}
+        # Oldest card first, so of two terminals of one agent in one folder the one started first claims the
+        # first session written there; the list itself stays newest first.
+        rows = {c.id: summary(c, convs, cwds) for c in sorted(convs, key=lambda c: c.seq)}
+        return [rows[c.id] for c in convs]
 
     @app.post("/api/conversations", dependencies=auth_dep, status_code=201)
     async def api_create_conversation(request: Request) -> dict:
@@ -373,16 +415,31 @@ def create_app(
         board_stage = body.get("board_stage")
         if board_stage is not None and (not isinstance(board_stage, str) or board_stage not in BOARD_STAGES):
             raise HTTPException(status_code=400, detail="invalid board stage")
-        if mode == "terminal":
+        task = body.get("task")
+        if task is not None:
+            if not (isinstance(task, dict) and all(isinstance(task.get(k), str) and task[k].strip()
+                                                   for k in ("project", "plan_item_id"))):
+                raise HTTPException(status_code=400, detail="task needs project and plan_item_id")
+            task = {"project": task["project"], "plan_item_id": task["plan_item_id"]}
             for existing in app.state.store.list_conversations():
-                if existing.target == target and existing.runtime == runtime and existing.transport == "terminal":
-                    # One terminal per (target, runtime): an existing terminal keeps its title and
-                    # board stage, so its place on the board is not lost; the page shows a note.
-                    return {"id": existing.id, "target": target, "runtime": runtime, "transport": mode,
-                            "existing": True}
-        conv = app.state.store.create_conversation(target=target, runtime=runtime, title=title, transport=mode)
+                if existing.task == task and existing.board_stage != "completed":
+                    # Starting a task again opens its open session; a plain create always makes a new one.
+                    return {"id": existing.id, "target": existing.target, "runtime": existing.runtime,
+                            "transport": existing.transport, "existing": True}
+        conv = app.state.store.create_conversation(target=target, runtime=runtime, title=title, transport=mode,
+                                                   task=task)
         if board_stage is not None:
             conv = app.state.store.update_board_stage(conv.id, board_stage)
+        if task is not None:
+            try:
+                status = (tasks_mod.task_statuses(hub_path, {task["project"]}).get(task["project"]) or {}).get(
+                    task["plan_item_id"]) or "unknown"
+            except Exception:  # noqa: BLE001 - an unreadable board leaves the status to the next sync
+                status = "unknown"
+            if status in ("Done", "Cancelled"):
+                # A session started on an already-ended task is live work: the sync must not file it as Done.
+                conv = app.state.store.set_task_state(conv.id, status, True)
+            task_sync["at"] = None  # the new card shows its task's status on the next list
         return {"id": conv.id, "target": conv.target, "runtime": conv.runtime, "transport": mode,
                 "existing": False}
 
@@ -395,6 +452,7 @@ def create_app(
             "id": conv.id, "target": conv.target, "runtime": conv.runtime,
             "title": conv.title,
             "board_stage": conv.board_stage, "board_updated_at": conv.board_updated_at,
+            "task": conv.task, "task_status": conv.task_status, "terminal_name": conv.terminal_name,
             **app.state.sessions.describe(conv),
             "messages": [
                 {"role": m.role, "text": m.text, "at": m.at, "meta": m.meta}
@@ -528,13 +586,12 @@ def create_app(
                 status_code=400,
                 detail=f"conversation runtime {conv.runtime!r} has no interactive session form",
             )
-        runtime = conv.runtime
         if app.state.sessions.mode(conv) == "session":
             return {"available": False, "mode": "session", "command": "",
                     "reason": "The session runs inside the app. Taking over the same process in a terminal is not available yet."}
         try:
             # Same derivation as Start, liveness and the bridge: one conversation, one session name.
-            name = session_name(conv.target, runtime)
+            name = terminal_name(conv)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"available": True, "session": name, "command": attach_command(name), "mode": "terminal"}
@@ -618,7 +675,7 @@ def create_app(
             await websocket.close(code=4404)
             return
         try:
-            name = session_name(conv.target, conv.runtime)
+            name = terminal_name(conv)
         except UnsafeSessionName:
             await websocket.accept()
             await websocket.close(code=4404)

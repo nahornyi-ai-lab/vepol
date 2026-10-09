@@ -45,10 +45,10 @@ class SessionManager:
         if self.mode(conv) == "terminal":
             # Liveness from process evidence, with or without a client object,
             # so a relaunched app reports the truth before anything is opened.
-            from .sessions import UnsafeSessionName, session_name
+            from .sessions import UnsafeSessionName, terminal_name
             from .terminal_session import liveness
             try:
-                live = liveness(session_name(conv.target, conv.runtime), clean_env())
+                live = liveness(terminal_name(conv), clean_env())
             except UnsafeSessionName as exc:
                 live = {"agent": "unknown", "pid": None, "reason": str(exc)}
             agent = {"agent": live["agent"], "pid": live["pid"], "agent_reason": live["reason"]}
@@ -93,10 +93,11 @@ class SessionManager:
                 self.store.update_transport(conv.id, transport=mode, provider_session_id=value, note="")
 
             if mode == "terminal":
+                from .sessions import terminal_name
                 from .terminal_session import TerminalSession
                 client = TerminalSession(cwd=target.cwd, project=conv.target, runtime=conv.runtime,
                                          on_event=event, env=env, session_id=session_id,
-                                         prompt_dir=self.store.root / "prompts")
+                                         prompt_dir=self.store.root / "prompts", name=terminal_name(conv))
             elif conv.runtime == "claude":
                 from .claude_session import ClaudeSession
                 client = ClaudeSession(target.cwd, session_id, event, identified, env)

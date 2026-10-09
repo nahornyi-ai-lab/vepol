@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Callable
 
-from .sessions import attach_command, build_send_prompt_plan, session_name
+from .sessions import attach_command, build_send_prompt_plan, session_name, validate_session_name
 
 TMUX_CANDIDATES = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
 # tmux's own wording when there is nothing to attach to. Anything else is "unknown".
@@ -108,10 +108,12 @@ class TerminalSession:
         self, cwd: str, project: str, runtime: str,
         on_event: Callable[[dict], None], env: dict | None = None,
         session_id: str | None = None, prompt_dir: str | pathlib.Path | None = None,
+        name: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.runtime = runtime
-        self.name = session_name(project, runtime)
+        # The conversation's own tmux name when given; else the canonical one.
+        self.name = validate_session_name(name) if name else session_name(project, runtime)
         self.command = attach_command(self.name)
         self.session_id = session_id
         self._on_event = on_event

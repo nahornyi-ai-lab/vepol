@@ -597,7 +597,7 @@
   </div>
 
   <div class="col center">
-    <div class="conversation-heading"><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><button id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
+    <div class="conversation-heading"><span id="conversation-title"></span><span class="hint" id="transport-label"></span><span class="hint agent-state" id="agent-state"></span><span class="hint task-status" id="conversation-task" hidden></span><button id="terminal-start" hidden>Start</button><span class="project-path" id="conversation-path" hidden></span></div>
     <div id="session-note" class="banner warn" hidden></div>
     <div id="task-line" class="banner" hidden><span id="task-text"></span><button id="task-type">Type into terminal</button></div>
     <div id="terminal" hidden></div>
@@ -863,7 +863,7 @@
     $("tree-error").hidden = true;
     const head = $("conversation-title").dataset;
     const headRow = list.find((c) => c.id === head.conv);
-    if (headRow) paintHeaderTitle(headRow.id, headRow.title, head.target, head.runtime);
+    if (headRow) { paintHeaderTitle(headRow.id, headRow.title, head.target, head.runtime); paintHeaderTask(headRow); }
     // A session that left the list takes its tab with it.
     const known = new Set(list.map((c) => c.id));
     if (tabs.ids.some((id) => !known.has(id))) {
@@ -934,6 +934,7 @@
           return `<article class="session-card" draggable="true" data-conversation-id="${esc(c.id)}">
             <button class="session-open" data-open-conversation="${esc(c.id)}">${esc(c.title || "New session")}</button>
             <div class="session-meta">${esc(c.target)} · ${agentMark(c.runtime)} · ${esc(MODES[c.transport] || c.transport || "")}</div>
+            ${c.task ? `<div class="session-meta session-task">${esc(taskStatusText(c))}</div>` : ""}
             ${(() => { const p = projectPath(c.target); return p ? `<div class="project-path session-path" title="${esc(p.cwd)}">${esc(p.text)}</div>` : ""; })()}
             ${c.continuation_available === false ? '<div class="hint">History kept · cannot be continued</div>' : ''}
             <p class="session-preview">${esc(c.preview || "No messages in this session yet.")}</p>
@@ -1270,7 +1271,7 @@
     none.hidden = !missing.length;
     none.textContent = `No backlog.md: ${missing.join(", ")}`;
     table.querySelectorAll("[data-start-task]").forEach((button, i) => {
-      button.onclick = () => startTaskSession(rows[i], button);
+      button.onclick = () => openPicker(null, rows[i].project, rows[i]);
     });
     table.querySelectorAll("[data-close-task]").forEach((button) => {
       button.onclick = () => openCloseQuestion(rows[Number(button.dataset.closeTask)]);
@@ -1353,8 +1354,17 @@
 
   const newTransport = () => state.desktop ? $("transport-select").value : "oneshot";
 
+  // "Task <id> · <status>" for a session started from a task.
+  const taskStatusText = (c) => `Task ${c.task.plan_item_id} · ${c.task_status || "unknown"}`;
+  // The header follows the board rows, so a status the server syncs shows without reopening the session.
+  function paintHeaderTask(c) {
+    $("conversation-task").hidden = !c.task;
+    $("conversation-task").textContent = c.task ? taskStatusText(c) : "";
+  }
+
   // Shared by "+ New session", the column "+" and "Start session": create, start a terminal agent on the owner's click, open.
-  async function createAndOpen(body, noteExisting = false) {
+  // Plain creates always make a new session; only a task that already has an open session reopens it.
+  async function createAndOpen(body) {
     const conv = await api("/api/conversations", { method: "POST", body: JSON.stringify(body) });
     let startError = "";
     if (conv.transport === "terminal") {
@@ -1366,8 +1376,10 @@
     await refreshSidebars().catch(() => {});
     await openConv(conv.id);
     const note = startError ? `Could not start the agent: ${startError}`
-      : noteExisting && conv.existing ? `A terminal for ${conv.target} · ${conv.runtime} already exists — opened it.` : "";
+      : body.task && conv.existing ? "This task already has a session — opened it." : "";
+    // Kept for this session until another one opens, so a later refresh of the header does not wipe it.
     if (note && state.conv === conv.id) {
+      openNote = { id: conv.id, text: note };
       $("session-note").hidden = false;
       $("session-note").textContent = note;
     }
@@ -1379,7 +1391,7 @@
     const body = { target: state.target, runtime: state.runtime, transport: newTransport() };
     if (stage) body.board_stage = stage;
     try {
-      await createAndOpen(body, true);
+      await createAndOpen(body);
     } catch (err) {
       if (state.view === "board") boardError(`Could not create session: ${err.message}`);
       else showDegraded({reason: err.message});
@@ -1388,14 +1400,17 @@
 
   // ------------------------------------------------ new-session project picker
   // One-project mode (a sidebar click on a project with nothing running): only the agent buttons, a click starts it there.
-  const picker = { stage: null, busy: false, project: null };
+  // With a task (Tasks → "Start session") the one-project mode starts that task with the chosen agent.
+  const picker = { stage: null, busy: false, project: null, task: null };
 
   function paintPicker() {
     const q = $("picker-search").value.trim().toLocaleLowerCase();
     const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
     const one = picker.project;
-    $("picker-title").textContent = one ? `New session in ${label(one)}` : "New session";
-    $("picker-sub").textContent = one ? "Pick the agent to start here." : "Pick a project to work in. Recently used projects are on top.";
+    const task = one && picker.task;
+    $("picker-title").textContent = task ? `Start task in ${label(one)}` : one ? `New session in ${label(one)}` : "New session";
+    $("picker-sub").textContent = task ? `Pick the agent for task ${task.id ? `${task.id}: ` : ""}${task.title}.`
+      : one ? "Pick the agent to start here." : "Pick a project to work in. Recently used projects are on top.";
     $("picker-search").hidden = !!one;
     $("picker-list").hidden = !!one;
     $("picker-foot").hidden = !!one;
@@ -1425,7 +1440,8 @@
       b.onclick = () => {
         state.runtime = b.dataset.pickRuntime;
         renderRuntimes(lastRuntimes);
-        if (one) pickProject(one); else paintPicker();
+        if (task) { $("picker").close(); startTaskSession(task); }
+        else if (one) pickProject(one); else paintPicker();
       };
     });
   }
@@ -1435,9 +1451,10 @@
     $("picker-feedback").hidden = !message;
   }
 
-  async function openPicker(stage = null, project = null) {
+  async function openPicker(stage = null, project = null, task = null) {
     picker.stage = stage;
     picker.project = project;
+    picker.task = project ? task : null;
     pickerError("");
     $("picker-search").value = "";
     paintPicker();
@@ -1492,17 +1509,20 @@
     return openPicker(stage);
   }
 
-  async function startTaskSession(task, button) {
-    button.disabled = true;
+  // Called from the picker's agent chip; state.runtime is the chip just clicked.
+  async function startTaskSession(task) {
     $("tasks-feedback").hidden = true;
     hideTaskNotice();
     try {
       const text = task.id
         ? `Task ${task.id} from knowledge/backlog.md: "${task.title}".`
         : `Task from knowledge/backlog.md: "${task.title}".`;
-      const conv = await createAndOpen({ target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title });
+      const body = { target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title };
+      if (task.id) body.task = { project: task.project, plan_item_id: task.id };
+      const conv = await createAndOpen(body);
       // Never sent by itself: a terminal session offers "Type into terminal"; other sessions pre-type the input box.
-      if (state.conv !== conv.id) return;
+      // A reopened task session already has its opening instructions and may hold a draft.
+      if (state.conv !== conv.id || conv.existing) return;
       if (state.transport === "terminal") {
         taskLine = { id: conv.id, text };
         $("task-line").hidden = false;
@@ -1510,7 +1530,7 @@
       } else $("prompt").value = text;
     } catch (err) {
       feedback($("tasks-feedback"), `Could not start session: ${err.message}`);
-    } finally { button.disabled = false; }
+    }
   }
 
   // --------------------------------------------------- automations view
@@ -1964,6 +1984,7 @@
     4404: "This conversation has no terminal" };
   const HTTP_REFUSED = { 401: 4401, 403: 4403, 404: 4404 };
   let termRefused = null;
+  let openNote = null;  // {id, text}: what createAndOpen said about the session it opened
 
   function refuseTerminal(id, text) {
     termRefused = { id, text };
@@ -2099,6 +2120,7 @@
     state.continuation = conv.continuation_available !== false;
     $("transport-label").textContent = MODES[state.transport] || state.transport;
     const note = termRefused && termRefused.id === conv.id ? termRefused.text
+      : openNote && openNote.id === conv.id ? openNote.text
       : !state.continuation ? "The agent's original session was not found. History is kept; it cannot be continued." : conv.transport_note;
     $("session-note").hidden = !note;
     $("session-note").textContent = note || "";
@@ -2117,6 +2139,7 @@
     const line = taskLine && taskLine.id === conv.id && state.transport === "terminal" ? taskLine.text : "";
     $("task-line").hidden = !line;
     $("task-text").textContent = line;
+    paintHeaderTask(conv);
     renderAgentState(conv);
     renderPermissions(conv.pending || []);
     $("send").disabled = state.running || !state.continuation;
@@ -2514,6 +2537,7 @@
     if (version !== openVersion) return;
     state.conv = id;
     termRefused = null;
+    openNote = null;
     showChat();
     addTab(id);
     state.target = conv.target;

@@ -34,6 +34,13 @@ def session_name(agent_slug: str, runtime: str) -> str:
     return validate_session_name(f"kb-{agent_slug}-{runtime}")
 
 
+def terminal_name(conv) -> str:
+    """The tmux session of a conversation: its own stored name, else the canonical kb-<target>-<runtime>."""
+    if conv.terminal_name:
+        return validate_session_name(conv.terminal_name)
+    return session_name(conv.target, conv.runtime)
+
+
 def attach_command(name: str) -> str:
     """Human-copyable attach command. Name is validated first."""
     return f"tmux attach -t {validate_session_name(name)}"

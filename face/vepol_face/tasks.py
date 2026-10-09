@@ -68,6 +68,22 @@ def list_tasks(hub: pathlib.Path, target: str | None) -> dict:
     return {"projects": projects}
 
 
+def task_statuses(hub: pathlib.Path, projects: set[str]) -> dict[str, dict[str, str] | None]:
+    """{project: {plan_item_id: status}} through the same reader as the Tasks view; None = board unreadable."""
+    hub = pathlib.Path(hub)
+    kb_board = hub / "bin" / "kb-board"
+    targets = {t.slug: t for t in targets_mod.discover_targets(hub) if t.slug in projects}
+    out: dict[str, dict[str, str] | None] = {p: None for p in projects}
+    if not kb_board.is_file():
+        return out
+    for slug, t in targets.items():
+        board = _read_board(kb_board, slug, pathlib.Path(t.knowledge) / "backlog.md")
+        if board.get("state") == "ok":
+            out[slug] = {r["id"]: r["status"] for r in board["tasks"]
+                         if isinstance(r.get("id"), str) and isinstance(r.get("status"), str)}
+    return out
+
+
 class TaskChangeRefused(Exception):
     """kb-board refused or failed the change; status is the HTTP code for the page."""
 
