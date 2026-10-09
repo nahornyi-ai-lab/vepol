@@ -249,15 +249,18 @@ echo "curl-called" >> "$TMP/curl-called.txt"
 exit 91
 EOF
 chmod +x "$FAKEBIN/curl"
-OUT=$(PATH="$FAKEBIN:$PATH" KB_HUB="$HUB" KB_BRIEF_DRY=1 zsh "$BRIEF" 2>/dev/null)
+# Hermetic: fixture HOME and no caller health settings.
+mkdir -p "$TMP/home"
+OUT=$(env -u KB_HEALTH_METRICS -u KB_BRIEF_HEALTH_READY_FILE -u KB_BRIEF_HEALTH_WAIT_UNTIL \
+  HOME="$TMP/home" PATH="$FAKEBIN:$PATH" KB_HUB="$HUB" KB_BRIEF_DRY=1 zsh "$BRIEF" 2>/dev/null)
 RC=$?
 PROMPT=$(cat "$HUB/captured-prompt.txt" 2>/dev/null || true)
 [[ "$RC" == "0" ]] && ok "B1: kb-brief dry-run exits 0" || fail "B1: kb-brief dry-run rc=$RC"
 [[ ! -f "$TMP/curl-called.txt" ]] && ok "B1: dry-run does not call Telegram curl" || fail "B1: dry-run invoked curl"
 grep -q '"child_split_brain_stale_backlog"' <<<"$PROMPT" && ok "B1: prompt includes preflight JSON warning" || fail "B1: prompt missing preflight JSON warning"
 grep -q '"do_not_surface"' <<<"$PROMPT" && ok "B1: prompt includes do_not_surface hints" || fail "B1: prompt missing do_not_surface"
-grep -q "🆕 Изменилось со вчера" <<<"$PROMPT" && ok "B1: prompt requires changed-since-yesterday section" || fail "B1: missing changed section"
-grep -q "🔥 Действия" <<<"$PROMPT" && ok "B1: prompt requires actions section" || fail "B1: missing actions section"
+grep -q "🆕 Изменилось:" <<<"$PROMPT" && ok "B1: prompt requires changed-since-yesterday section" || fail "B1: missing changed section"
+grep -q "🔥 Главное" <<<"$PROMPT" && ok "B1: prompt requires actions section" || fail "B1: missing actions section"
 grep -q "Готово:" <<<"$PROMPT" && ok "B1: prompt requires localized completion label" || fail "B1: missing Готово label"
 grep -Eqi "1-3|1–3|one to three|не больше тр[её]х|at most three" <<<"$PROMPT" && ok "B1: prompt contains 1-3 action cap" || fail "B1: no 1-3 action cap"
 grep -qiE "backlog.*queue|backlog.*очеред|очеред.*backlog|not factual truth" <<<"$PROMPT" && ok "B1: prompt says backlog is queue, not truth" || fail "B1: no backlog precedence rule"

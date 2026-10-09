@@ -10,6 +10,16 @@ BRIEF="$SRC_BIN/kb-brief"
 MAIL_BLOCK="$SRC_BIN/kb-mail-block"
 HELPER="$SRC_BIN/_kb_brief_delivery.py"
 DAY=2026-07-13
+# Hermetic: never read the real home or the caller's health settings.
+export HOME="$TMP/home"; mkdir -p "$HOME"
+unset KB_HEALTH_METRICS KB_BRIEF_HEALTH_READY_FILE KB_BRIEF_HEALTH_WAIT_UNTIL KB_PROCESS_ID
+HEALTH_FIXTURE="$TMP/health"; mkdir -p "$HEALTH_FIXTURE/morning"
+cat > "$HEALTH_FIXTURE/morning/$(date +%Y-%m-%d).json" <<EOF
+{"schema":"health-morning/v1","date":"$(date +%Y-%m-%d)",
+ "freshness":{"status":"fresh","sleep_ready":true},
+ "last_night":{"duration_min":437,"score":83},"recovery":{"rhr":51},
+ "observations":["fixture observation"]}
+EOF
 
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
@@ -55,20 +65,18 @@ EOF
 
 echo "=== AC1/AC2: prompt-only RU/EN coverage ==="
 HUB=$(make_prompt_hub prompt)
-RU=$(KB_HUB="$HUB" KB_LANG=ru KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+RU=$(KB_HUB="$HUB" KB_HEALTH_METRICS="$HEALTH_FIXTURE" KB_LANG=ru KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   zsh "$BRIEF" 2>/dev/null)
-EN=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+EN=$(KB_HUB="$HUB" KB_HEALTH_METRICS="$HEALTH_FIXTURE" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   zsh "$BRIEF" 2>/dev/null)
 
 RU_HEADINGS=(
-  "☀️ Сегодня" "🆕 Изменилось со вчера" "🧭 Проекты" "📅 Календарь"
-  "📬 Почта" "💡 Идеи" "⚠️ Риски, свежесть и эскалации" "🔥 Действия"
-  "❓ Решения от тебя" "🧘 Условие дня"
+  "🫀 Тело" "🗓 План дня" "🔥 Главное" "❓ Нужно твоё решение"
+  "📬 Почта" "💡 Идеи" "🆕 Изменилось:" "⚠️ Риски:" "Тихо:"
 )
 EN_HEADINGS=(
-  "☀️ Today" "🆕 Changed since yesterday" "🧭 Projects" "📅 Calendar"
-  "📬 Mail" "💡 Ideas" "⚠️ Risks, freshness, and escalations" "🔥 Actions"
-  "❓ Decisions from you" "🧘 Day condition"
+  "🫀 Body" "🗓 Day plan" "🔥 Main" "❓ Your decision needed"
+  "📬 Mail" "💡 Ideas" "🆕 Changed:" "⚠️ Risks:" "Quiet:"
 )
 for heading in "${RU_HEADINGS[@]}"; do
   has "$RU" "$heading" && ok "AC1 RU prompt requires $heading" || fail "AC1 RU missing $heading"
@@ -81,10 +89,10 @@ if has "$RU" "каждым из пяти" || has "$RU" "каждый логич�
 else
   fail "AC1 no every-logical-input requirement"
 fi
-if has "$RU" "полное предложение" || has "$RU" "complete sentence"; then
-  ok "AC1 every heading requires a sentence"
+if has "$RU" "Тихо:" && has "$RU" "Данных сна и здоровья за сегодня нет"; then
+  ok "AC1 empty inputs fold into the quiet line; health has an honest no-data line"
 else
-  fail "AC1 no per-heading sentence rule"
+  fail "AC1 no quiet line or health no-data line"
 fi
 has "$RU" "Сегодня писем не было." && has "$RU" "Сегодня были такие письма:" \
   && has "$RU" "Почту сегодня проверить не удалось." \
@@ -107,6 +115,20 @@ if grep -Eq '<=[[:space:]]*\$?\{?BRIEF_CHAR_LIMIT|1500 Unicode|Surface genuinely
   fail "AC1/AC2 old content cap or urgency-only filter remains"
 else
   ok "AC1/AC2 no content cap or urgency-only filter"
+fi
+
+echo "=== Health: optional block follows KB_HEALTH_METRICS ==="
+has "$EN" '"available":true' && has "$EN" '"duration_min":437' && has "$EN" "🫀 Body" \
+  && has "$EN" "→ I suggest:" \
+  && ok "health fixture reaches the prompt with the body section" \
+  || fail "health fixture missing from the prompt"
+NO_HEALTH=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+  zsh "$BRIEF" 2>/dev/null)
+if has "$NO_HEALTH" "🫀" || has "$NO_HEALTH" "Health" || has "$NO_HEALTH" "health, " \
+    || has "$NO_HEALTH" "здоровье" || ! has "$NO_HEALTH" "🗓 Day plan"; then
+  fail "unset KB_HEALTH_METRICS still mentions health"
+else
+  ok "unset KB_HEALTH_METRICS: no health block and no body section"
 fi
 
 echo "=== AC2: 24/25 mail cap modifier ==="
@@ -627,6 +649,16 @@ EOF
      && $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$INT_SIDE") == ambiguous ]] \
     && ok "AC3 interrupted error notice resolves sending to ambiguous" \
     || fail "AC3 interrupted error notice was automatically retried"
+
+  echo "=== Health: scheduled run without wait settings does not wait ==="
+  SCHED_HUB=$(make_error_hub scheduled)
+  START=$(date +%s)
+  set +e; KB_PROCESS_ID=morning-brief KB_HEALTH_METRICS="$HEALTH_FIXTURE" \
+    run_error_case "$SCHED_HUB" success; set -e
+  ELAPSED=$(( $(date +%s) - START ))
+  [[ "$ELAPSED" -lt 10 && $(wc -l < "$SCHED_HUB/.calls" | tr -d ' ') == "1" ]] \
+    && ok "scheduled run with health but no wait settings finished in ${ELAPSED}s" \
+    || fail "scheduled run waited ${ELAPSED}s or did not reach the sender"
 
   echo "=== AC3: real secret-file syntax reaches the typed sender ==="
   for style in bare export-space export-tab; do
