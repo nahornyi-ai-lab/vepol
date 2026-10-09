@@ -249,7 +249,10 @@ echo "curl-called" >> "$TMP/curl-called.txt"
 exit 91
 EOF
 chmod +x "$FAKEBIN/curl"
-OUT=$(PATH="$FAKEBIN:$PATH" KB_HUB="$HUB" KB_BRIEF_DRY=1 zsh "$BRIEF" 2>/dev/null)
+# Hermetic: fixture HOME and no caller health settings.
+mkdir -p "$TMP/home"
+OUT=$(env -u KB_HEALTH_METRICS -u KB_BRIEF_HEALTH_READY_FILE -u KB_BRIEF_HEALTH_WAIT_UNTIL \
+  HOME="$TMP/home" PATH="$FAKEBIN:$PATH" KB_HUB="$HUB" KB_BRIEF_DRY=1 zsh "$BRIEF" 2>/dev/null)
 RC=$?
 PROMPT=$(cat "$HUB/captured-prompt.txt" 2>/dev/null || true)
 [[ "$RC" == "0" ]] && ok "B1: kb-brief dry-run exits 0" || fail "B1: kb-brief dry-run rc=$RC"

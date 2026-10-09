@@ -10,6 +10,16 @@ BRIEF="$SRC_BIN/kb-brief"
 MAIL_BLOCK="$SRC_BIN/kb-mail-block"
 HELPER="$SRC_BIN/_kb_brief_delivery.py"
 DAY=2026-07-13
+# Hermetic: never read the real home or the caller's health settings.
+export HOME="$TMP/home"; mkdir -p "$HOME"
+unset KB_HEALTH_METRICS KB_BRIEF_HEALTH_READY_FILE KB_BRIEF_HEALTH_WAIT_UNTIL KB_PROCESS_ID
+HEALTH_FIXTURE="$TMP/health"; mkdir -p "$HEALTH_FIXTURE/morning"
+cat > "$HEALTH_FIXTURE/morning/$(date +%Y-%m-%d).json" <<EOF
+{"schema":"health-morning/v1","date":"$(date +%Y-%m-%d)",
+ "freshness":{"status":"fresh","sleep_ready":true},
+ "last_night":{"duration_min":437,"score":83},"recovery":{"rhr":51},
+ "observations":["fixture observation"]}
+EOF
 
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
@@ -55,9 +65,9 @@ EOF
 
 echo "=== AC1/AC2: prompt-only RU/EN coverage ==="
 HUB=$(make_prompt_hub prompt)
-RU=$(KB_HUB="$HUB" KB_LANG=ru KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+RU=$(KB_HUB="$HUB" KB_HEALTH_METRICS="$HEALTH_FIXTURE" KB_LANG=ru KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   zsh "$BRIEF" 2>/dev/null)
-EN=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+EN=$(KB_HUB="$HUB" KB_HEALTH_METRICS="$HEALTH_FIXTURE" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   zsh "$BRIEF" 2>/dev/null)
 
 RU_HEADINGS=(
@@ -105,6 +115,20 @@ if grep -Eq '<=[[:space:]]*\$?\{?BRIEF_CHAR_LIMIT|1500 Unicode|Surface genuinely
   fail "AC1/AC2 old content cap or urgency-only filter remains"
 else
   ok "AC1/AC2 no content cap or urgency-only filter"
+fi
+
+echo "=== Health: optional block follows KB_HEALTH_METRICS ==="
+has "$EN" '"available":true' && has "$EN" '"duration_min":437' && has "$EN" "🫀 Body" \
+  && has "$EN" "→ I suggest:" \
+  && ok "health fixture reaches the prompt with the body section" \
+  || fail "health fixture missing from the prompt"
+NO_HEALTH=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
+  zsh "$BRIEF" 2>/dev/null)
+if has "$NO_HEALTH" "🫀" || has "$NO_HEALTH" "Health" || has "$NO_HEALTH" "health, " \
+    || has "$NO_HEALTH" "здоровье" || ! has "$NO_HEALTH" "🗓 Day plan"; then
+  fail "unset KB_HEALTH_METRICS still mentions health"
+else
+  ok "unset KB_HEALTH_METRICS: no health block and no body section"
 fi
 
 echo "=== AC2: 24/25 mail cap modifier ==="
@@ -625,6 +649,16 @@ EOF
      && $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$INT_SIDE") == ambiguous ]] \
     && ok "AC3 interrupted error notice resolves sending to ambiguous" \
     || fail "AC3 interrupted error notice was automatically retried"
+
+  echo "=== Health: scheduled run without wait settings does not wait ==="
+  SCHED_HUB=$(make_error_hub scheduled)
+  START=$(date +%s)
+  set +e; KB_PROCESS_ID=morning-brief KB_HEALTH_METRICS="$HEALTH_FIXTURE" \
+    run_error_case "$SCHED_HUB" success; set -e
+  ELAPSED=$(( $(date +%s) - START ))
+  [[ "$ELAPSED" -lt 10 && $(wc -l < "$SCHED_HUB/.calls" | tr -d ' ') == "1" ]] \
+    && ok "scheduled run with health but no wait settings finished in ${ELAPSED}s" \
+    || fail "scheduled run waited ${ELAPSED}s or did not reach the sender"
 
   echo "=== AC3: real secret-file syntax reaches the typed sender ==="
   for style in bare export-space export-tab; do
