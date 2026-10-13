@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""kb-consolidate — nightly state.md consolidation from new log/daily entries.
+
+For every project wiki in <hub>/hierarchy.yaml (root excluded): take what was
+logged since the last pass (log.md entries + daily/ notes, tracked by a byte
+watermark), ask the model for point edits to state.md (replace / add / delete,
+each with a source mark), apply only edits that match the page exactly, refresh
+`## Last Updated`. If the model fails, write a deterministic block of the log
+headlines newer than the page instead, so the page still says what it misses.
+
+Usage:
+    kb-consolidate [--hub PATH] [--project SLUG] [--dry-run]
+
+Exit codes: 0 no project failed; 1 a project failed (reasons on stderr) or the
+hierarchy is unreadable; 2 usage error.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import difflib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+
+def _load_rollup():
+    path = os.path.join(HERE, "kb-child-rollup")
+    loader = importlib.machinery.SourceFileLoader("kb_child_rollup", path)
+    spec = importlib.util.spec_from_loader("kb_child_rollup", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+R = _load_rollup()
+
+FRESH_BEGIN = "<!-- kb-fresh-entries:begin -->"
+FRESH_END = "<!-- kb-fresh-entries:end -->"
+BLOCKS = [(R.BEGIN, R.END), (FRESH_BEGIN, FRESH_END)]
+HEAD_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})[^\]]*\]")
+OWN_RE = re.compile(r"^## \[[^\]]*\]\s*(rollup|consolidate)\s*\|")
+SOURCE_RE = re.compile(r"\((log|daily) (\d{4}-\d{2}-\d{2})\)")
+DAILY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
+LOG_CAP, DAILY_CAP, FRESH_MAX = 60000, 30000, 10
+MODEL = os.environ.get("KB_CONSOLIDATE_MODEL", "sonnet")
+CLAUDE_ARGS = ["--model", MODEL, "--restricted", "--strict-mcp-config",
+               "--tools", "", "--permission-mode", "dontAsk"]
+
+LABELS = {
+    "ru": {"heading": "## Новое после обновления этой страницы",
+           "intro": "_Собирается автоматически (kb-consolidate), когда ночное обновление не "
+                    "удалось; исчезает, когда страницу обновят._",
+           "last_updated": "## Last Updated"},
+    "en": {"heading": "## New since this page was last updated",
+           "intro": "_Written automatically (kb-consolidate) when the nightly refresh failed; "
+                    "disappears once the page is updated._",
+           "last_updated": "## Last Updated"},
+}
+
+PROMPT = """You maintain one project's `state.md` — the page that answers "where are we
+right now?". Contract: present tense, current truth only, overwrite-only; history,
+evidence and finished work belong in log.md, not here.
+
+Below are the current page and the entries logged since it was last consolidated.
+Decide which statements on the page the new entries make false, outdated or
+incomplete, and which new current facts the page lacks (Mem0-style: UPDATE /
+ADD / DELETE / NOOP). Be conservative: change only what the entries clearly
+support. Do not restyle, reorder or shorten text you are not correcting.
+
+Return ONLY one JSON object, no prose, no code fence:
+{{"summary": "<one line: what changed in current truth>",
+  "ops": [
+    {{"op": "replace", "old": "<exact text copied from the page>", "new": "<replacement>", "why": "<short>"}},
+    {{"op": "add", "after_heading": "<exact '## ' heading line from the page>", "text": "<markdown to append at the end of that section>", "why": "<short>"}},
+    {{"op": "delete", "old": "<exact text copied from the page>", "why": "<short>"}}
+  ]}}
+Rules:
+- "old" must be copied character for character from the page and occur once;
+  prefer a whole sentence or bullet, never a heading line.
+- Every "new" and "text" must cite its source as (log YYYY-MM-DD) or
+  (daily YYYY-MM-DD) using dates of the entries below.
+- No new '## ' headings. Do not touch the "Last Updated" section.
+- Write in the page's own language.
+- Nothing to change -> {{"summary": "no change to current truth", "ops": []}}.
+
+=== CURRENT state.md ===
+{state}
+
+=== NEW log.md ENTRIES (oldest first) ===
+{log}
+
+=== NEW daily/ SESSION NOTES ===
+{daily}
+"""
+
+
+# ── inputs ────────────────────────────────────────────────────────────────
+
+def log_entries(raw):
+    """[(start_byte, end_byte, line_no, date, text)] for `## [` entries."""
+    out, pos, cur = [], 0, None
+    for i, line in enumerate(raw.split(b"\n")):
+        s = line.decode("utf-8", "replace")
+        if s.startswith("## ["):
+            if cur:
+                out.append(cur + [pos])
+            m = HEAD_RE.match(s)
+            cur = [pos, i + 1, m.group(1) if m else None]
+        pos += len(line) + 1
+    if cur:
+        out.append(cur + [len(raw)])
+    return [(a, e, n, d, raw[a:e].decode("utf-8", "replace").rstrip()) for a, n, d, e in out]
+
+
+def new_input(kdir, wm, since):
+    """Return (log_entries_new, daily_chunks, new_wm). `wm` None -> use `since` date."""
+    lraw = open(os.path.join(kdir, "log.md"), "rb").read()
+    entries = log_entries(lraw)
+    off = (wm or {}).get("log", 0)
+    if wm is None or off > len(lraw):
+        fresh = [e for e in entries if e[3] and e[3] > since]
+    else:
+        fresh = [e for e in entries if e[0] >= off]
+    fresh = [e for e in fresh if not OWN_RE.match(e[4])]
+    daily, new_daily = [], dict((wm or {}).get("daily", {}))
+    ddir = os.path.join(kdir, "daily")
+    names = sorted(n for n in os.listdir(ddir) if DAILY_RE.match(n)) if os.path.isdir(ddir) else []
+    for n in names:
+        raw = open(os.path.join(ddir, n), "rb").read()
+        if wm is None:
+            start = 0 if n[:10] > since else len(raw)
+        else:
+            start = new_daily.get(n, 0)
+            start = 0 if start > len(raw) else start
+        if len(raw) > start:
+            daily.append((n[:10], raw[start:].decode("utf-8", "replace").strip()))
+        new_daily[n] = len(raw)
+    return fresh, daily, {"log": len(lraw), "daily": new_daily}
+
+
+def capped(chunks, cap):
+    """Keep the newest chunks within cap chars (input oldest first)."""
+    out, used = [], 0
+    for c in reversed(chunks):
+        if used + len(c) > cap:
+            break
+        out.append(c)
+        used += len(c)
+    return list(reversed(out))
+
+
+# ── page editing ──────────────────────────────────────────────────────────
+
+def block_spans(text):
+    spans = []
+    for b, e in BLOCKS:
+        i = text.find(b)
+        j = text.find(e)
+        if i >= 0 and j > i:
+            spans.append((i, j + len(e)))
+    return spans
+
+
+def strip_blocks(text):
+    for a, b in sorted(block_spans(text), reverse=True):
+        text = text[:a] + "(managed block omitted)" + text[b:]
+    return text
+
+
+def section_bounds(text, heading):
+    """(start_of_body, end) of the section under an exact '## ' heading, or None."""
+    lines = text.split("\n")
+    hits = [i for i, ln in enumerate(lines) if ln.rstrip() == heading.rstrip()]
+    if len(hits) != 1:
+        return None
+    i = hits[0]
+    j = next((k for k in range(i + 1, len(lines)) if lines[k].startswith("## ")), len(lines))
+    start = sum(len(ln) + 1 for ln in lines[:i + 1])
+    end = sum(len(ln) + 1 for ln in lines[:j])
+    return start, min(end, len(text))
+
+
+def apply_op(text, op, dates, L):
+    """Return (new_text, None) or (text, reason)."""
+    kind = op.get("op")
+    body = op.get("new") if kind == "replace" else op.get("text")
+    if kind in ("replace", "add"):
+        if not isinstance(body, str) or not body.strip():
+            return text, "empty text"
+        cites = SOURCE_RE.findall(body)
+        if not cites:
+            return text, "no source mark"
+        bad = [d for _, d in cites if d not in dates]
+        if bad:
+            return text, "source date not in input: " + ", ".join(bad)
+        if any(ln.startswith("## ") for ln in body.split("\n")):
+            return text, "adds a heading"
+    if kind in ("replace", "delete"):
+        old = op.get("old")
+        if not isinstance(old, str) or not old.strip():
+            return text, "empty old"
+        if text.count(old) != 1:
+            return text, "old text found {} times".format(text.count(old))
+        if any(ln.startswith("## ") for ln in old.split("\n")):
+            return text, "touches a heading"
+        i = text.index(old)
+        if any(a <= i < b or a < i + len(old) <= b for a, b in block_spans(text)):
+            return text, "inside a managed block"
+        lu = section_bounds(text, L["last_updated"])
+        if lu and lu[0] <= i < lu[1]:
+            return text, "touches Last Updated"
+        return text[:i] + (body if kind == "replace" else "") + text[i + len(old):], None
+    if kind == "add":
+        h = op.get("after_heading") or ""
+        if h.rstrip() in (L["last_updated"], R.LABELS["ru"]["heading"], R.LABELS["en"]["heading"],
+                          LABELS["ru"]["heading"], LABELS["en"]["heading"]):
+            return text, "protected section"
+        sb = section_bounds(text, h)
+        if sb is None:
+            return text, "heading not found once"
+        end = sb[1]
+        before = text[:end].rstrip("\n")
+        return before + "\n" + body.strip("\n") + "\n\n" + text[end:].lstrip("\n"), None
+    return text, "unknown op"
+
+
+def remove_fresh(text, L):
+    i, j = text.find(FRESH_BEGIN), text.find(FRESH_END)
+    if i < 0 or j < i:
+        return text
+    j += len(FRESH_END)
+    for lab in LABELS.values():
+        h = text.rfind(lab["heading"] + "\n", 0, i)
+        if h >= 0 and not text[h:i].strip().count("\n## "):
+            i = h
+            break
+    return text[:i].rstrip("\n") + "\n\n" + text[j:].lstrip("\n")
+
+
+OWN_LU_RE = re.compile(r"^\d{4}-\d{2}-\d{2} — kb-consolidate:")
+
+
+def set_last_updated(text, line, L):
+    """Put our line first in `## Last Updated`; drop only our own older lines,
+    keep every hand-written line (it may exist nowhere else)."""
+    sb = section_bounds(text, L["last_updated"])
+    if sb is None:
+        return text.rstrip("\n") + "\n\n" + L["last_updated"] + "\n\n" + line + "\n"
+    kept = "\n".join(ln for ln in text[sb[0]:sb[1]].split("\n")
+                     if not OWN_LU_RE.match(ln)).strip("\n")
+    body = line + ("\n\n" + kept if kept.strip() else "")
+    rest = text[sb[1]:]
+    return text[:sb[0]] + "\n" + body + "\n" + ("\n" + rest if rest else "")
+
+
+def fresh_block(text, entries, L):
+    heads = [e for e in entries][-FRESH_MAX:]
+    body = L["intro"] + "\n\n" + "\n".join(
+        "- {} (log.md:{})".format(e[4].split("\n", 1)[0][3:].strip()[:200], e[2]) for e in heads)
+    chunk = L["heading"] + "\n" + FRESH_BEGIN + "\n" + body + "\n" + FRESH_END
+    text = remove_fresh(text, L)
+    k = text.find(R.END)
+    if k >= 0:  # after the child-rollup block when there is one
+        k += len(R.END)
+        return text[:k] + "\n\n" + chunk + "\n\n" + text[k:].lstrip("\n")
+    heads_at = [m.start() for m in re.finditer(r"^## ", text, re.M)]
+    if len(heads_at) >= 2:
+        p = heads_at[1]
+        return text[:p].rstrip("\n") + "\n\n" + chunk + "\n\n" + text[p:]
+    return text.rstrip("\n") + "\n\n" + chunk + "\n"
+
+
+# ── model ─────────────────────────────────────────────────────────────────
+
+def ask_model(prompt, kdir):
+    """Return (dict, None) or (None, reason)."""
+    from _kb_claude_runner import run_claude
+    try:
+        res = run_claude(prompt, cwd=kdir, extra_args=CLAUDE_ARGS,
+                         metadata={"caller": "kb-consolidate"})
+    except Exception as exc:  # launcher failure
+        return None, "launch: {}".format(exc)
+    if res.returncode != 0:
+        err = [ln for ln in (res.stderr or "").splitlines() if ln.strip()]
+        return None, "rc={} {}".format(res.returncode, err[-1] if err else res.status)
+    out = res.stdout or ""
+    a, b = out.find("{"), out.rfind("}")
+    if a < 0 or b < a:
+        return None, "no JSON in model output"
+    try:
+        data = json.loads(out[a:b + 1])
+    except ValueError as exc:
+        return None, "bad JSON: {}".format(exc)
+    if not isinstance(data, dict) or not isinstance(data.get("ops"), list):
+        return None, "JSON without ops list"
+    return data, None
+
+
+# ── per project ───────────────────────────────────────────────────────────
+
+def process(slug, node, hub, wms, L, today, dry_run):
+    rec = {"result": "", "reason": "", "applied": 0, "rejected": 0}
+    kdir = os.path.expanduser(str(node.get("knowledge_path") or ""))
+    spath, lpath = os.path.join(kdir, "state.md"), os.path.join(kdir, "log.md")
+    if not (node.get("knowledge_path") and os.path.isfile(spath) and os.path.isfile(lpath)):
+        rec["result"] = "skipped:no-state"
+        return rec
+    st = os.stat(spath)
+    old = open(spath, "rb").read().decode("utf-8")
+    since = R.state_date(R._lines(old), spath)
+    entries, daily, new_wm = new_input(kdir, wms.get(slug), since)
+    if not entries and not daily:
+        rec["result"] = "unchanged"
+        wms[slug] = new_wm
+        return rec
+    dates = {e[3] for e in entries if e[3]} | {d for d, _ in daily}
+    prompt = PROMPT.format(
+        state=strip_blocks(old),
+        log="\n\n".join(capped([e[4] for e in entries], LOG_CAP)) or "(none)",
+        daily="\n\n".join(capped(["[daily {}]\n{}".format(d, t) for d, t in daily], DAILY_CAP))
+        or "(none)")
+    data, err = ask_model(prompt, kdir)
+    report = ["# kb-consolidate {} — {}".format(slug, today), "",
+              "Input: {} log entries, {} daily notes; since {}".format(len(entries), len(daily), since)]
+    new = old
+    if data is None:
+        rec.update(result="fallback", reason=err)
+        dated = [e for e in log_entries(open(lpath, "rb").read())
+                 if e[3] and e[3] > since and not OWN_RE.match(e[4])]
+        new = fresh_block(old, dated, L) if dated else old
+        report += ["", "Model failed: " + err]
+    else:
+        applied, rejected = [], []
+        for op in data["ops"]:
+            if not isinstance(op, dict):
+                rejected.append(({}, "not an object"))
+                continue
+            new, why = apply_op(new, op, dates, L)
+            (rejected.append((op, why)) if why else applied.append(op))
+        rec.update(applied=len(applied), rejected=len(rejected))
+        report += ["", "Summary: " + str(data.get("summary", "")), "", "## Applied"]
+        report += ["- {}: {}".format(o.get("op"), o.get("why", "")) for o in applied] or ["- none"]
+        report += ["", "## Rejected"]
+        report += ["- {} ({}): {}".format(o.get("op"), why, (o.get("old") or o.get("text") or "")[:160])
+                   for o, why in rejected] or ["- none"]
+        if data["ops"] and not applied:
+            rec.update(result="fallback", reason="all {} edits rejected".format(len(rejected)))
+            dated = [e for e in log_entries(open(lpath, "rb").read())
+                     if e[3] and e[3] > since and not OWN_RE.match(e[4])]
+            new = fresh_block(old, dated, L) if dated else old
+        else:
+            new = remove_fresh(new, L)
+            summary = str(data.get("summary") or "no change to current truth").strip().replace("\n", " ")
+            new = set_last_updated(new, "{} — kb-consolidate: {}".format(today, summary[:300]), L)
+            rec["result"] = "updated"
+    diff = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
+                                        fromfile="state.md", tofile="state.md (new)"))
+    report += ["", "## Diff", "", "```diff", diff.rstrip("\n"), "```", ""]
+    if dry_run:
+        sys.stdout.write("\n".join(report) + "\n")
+        rec["result"] = "would-" + rec["result"]
+        return rec
+    rdir = os.path.join(hub, ".orchestrator", "consolidate", slug)
+    os.makedirs(rdir, exist_ok=True)
+    rpath = os.path.join(rdir, "{}.md".format(today))
+    R.atomic_write(os.path.join(rdir, "{}-state-before.md".format(today)), old.encode("utf-8"))
+    R.atomic_write(rpath, "\n".join(report).encode("utf-8"))
+    if new != old:
+        st2 = os.stat(spath)
+        if (st2.st_mtime_ns, st2.st_size) != (st.st_mtime_ns, st.st_size):
+            rec.update(result="skipped:concurrent-edit", reason="state.md changed during the run")
+            return rec
+        R.atomic_write(spath, new.encode("utf-8"), mode=st.st_mode & 0o7777)
+    if rec["result"] == "updated":
+        R.append_log(lpath, '## [{}] consolidate | {} | "state.md: {} edits applied, {} rejected; report {}"'
+                     .format(today, slug, rec["applied"], rec["rejected"], rpath.replace(hub, "<hub>")))
+        new_wm["log"] = os.path.getsize(lpath)
+        wms[slug] = new_wm
+    return rec
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="kb-consolidate", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--hub")
+    ap.add_argument("--project", help="process only this slug")
+    ap.add_argument("--dry-run", action="store_true", help="ask the model, print, write nothing")
+    args = ap.parse_args(argv)
+    hub = os.path.expanduser(args.hub or os.environ.get("KB_HUB") or "~/knowledge")
+    hpath = os.path.join(hub, "hierarchy.yaml")
+    try:
+        hier = R._parse_yaml(hpath)
+    except FileNotFoundError:
+        hier = {}
+    except (OSError, UnicodeDecodeError) as exc:
+        print("kb-consolidate: cannot read {}: {}".format(hpath, exc), file=sys.stderr)
+        return 1
+    nodes = hier.get("nodes") if isinstance(hier.get("nodes"), dict) else {}
+    slugs = sorted(s for s, n in nodes.items() if s != hier.get("root") and isinstance(n, dict))
+    if args.project:
+        if args.project not in slugs:
+            print("kb-consolidate: unknown project {!r}".format(args.project), file=sys.stderr)
+            return 2
+        slugs = [args.project]
+    L = LABELS["ru"] if R.owner_language(hub) == "ru" else LABELS["en"]
+    today = datetime.date.today().isoformat()
+    wpath = os.path.join(hub, ".orchestrator", "consolidate", "watermarks.json")
+    try:
+        wms = json.load(open(wpath, encoding="utf-8"))
+    except (OSError, ValueError):
+        wms = {}
+    outcome = {}
+    for slug in slugs:
+        try:
+            rec = process(slug, nodes[slug], hub, wms, L, today, args.dry_run)
+        except Exception as exc:  # one project never stops the others
+            rec = {"result": "failed:error", "reason": "{}: {}".format(type(exc).__name__, exc)}
+        outcome[slug] = rec
+        print("{}: {}{}".format(slug, rec["result"], " ({})".format(rec["reason"]) if rec.get("reason") else ""))
+    if not args.dry_run:
+        os.makedirs(os.path.dirname(wpath), exist_ok=True)
+        R.atomic_write(wpath, json.dumps(wms, indent=1, sort_keys=True).encode("utf-8"))
+        R.atomic_write(os.path.join(hub, ".orchestrator", "consolidate-{}.json".format(today)),
+                       json.dumps(outcome, ensure_ascii=False, indent=2).encode("utf-8"))
+    failed = [s for s, r in outcome.items() if r["result"].startswith("failed")]
+    for s in failed:
+        print("kb-consolidate: {}: {}".format(s, outcome[s]["reason"]), file=sys.stderr)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

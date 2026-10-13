@@ -549,6 +549,38 @@ def select_sections(sections, inventory_mode):
     return ordered, anomalies
 
 
+def session_capture_line():
+    """One manifest line when this project's session summaries failed to save
+    (claude-memory-compiler pending/ and failed/ queues); None otherwise."""
+    root = Path(os.environ.get("KB_MEMORY_COMPILER_DIR")
+                or Path.home() / "claude-memory-compiler") / "scripts"
+    try:
+        log_file = str((K / "log.md").resolve())
+    except OSError:
+        return None
+    counts, last = {"pending": 0, "failed": 0}, ("", "")
+    for kind in counts:
+        d = root / kind
+        if not d.is_dir():
+            continue
+        for side in d.glob("*.json"):
+            try:
+                data = json.loads(side.read_text(encoding="utf-8"))
+                target = str(Path(data["env"]["CLAUDE_KB_LOG_FILE"]).resolve())
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if target != log_file:
+                continue
+            counts[kind] += 1
+            stamp = data.get("captured_at") or ""
+            if stamp >= last[0]:
+                last = (stamp, str(data.get("last_reason") or "unknown"))
+    if not (counts["pending"] or counts["failed"]):
+        return None
+    return ("- session_capture: {} pending, {} failed \u2014 last reason: {}"
+            .format(counts["pending"], counts["failed"], last[1][:200]))
+
+
 def render_manifest(sections, inventory_mode, clip_ran, index_path,
                     over_ceiling=None, anomalies=None):
     by_key = {s.key: s for s in sections}
@@ -572,6 +604,9 @@ def render_manifest(sections, inventory_mode, clip_ran, index_path,
         note = (" (" + sec.note + ")") if sec.note else ""
         lines.append("- " + key + ": " + status + suffix + note)
     lines.append("- index: on-demand " + str(index_path))
+    capture = session_capture_line()
+    if capture:
+        lines.append(capture)
     for kind in ("undeclared", "duplicate"):
         keys = (anomalies or {}).get(kind) or []
         if keys:
