@@ -26,7 +26,7 @@ You stay in control: the memory is plain Markdown on your Mac that you can read,
 
 ## Watch: a day with Vepol (1:42)
 
-https://github.com/user-attachments/assets/VIDEO_PLACEHOLDER
+https://github.com/user-attachments/assets/67d66222-6b72-45f4-b2d2-3746f6f7ad2b
 
 ## See it
 
