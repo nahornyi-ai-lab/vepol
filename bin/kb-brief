@@ -73,6 +73,7 @@ case "$UI_LANG" in
     S_RISKS="⚠️ Риски:"
     S_QUIET="Тихо:"
     HEALTH_NONE="Данных сна и здоровья за сегодня нет"
+    L_PREVIEW="🧪 Черновик брифа (ручной ночной запуск). Утренний бриф придёт как обычно."
     PROPOSE="→ Предлагаю:"
     MAIL_EMPTY="Сегодня писем не было."
     MAIL_PRESENT="Сегодня были такие письма:"
@@ -98,6 +99,7 @@ case "$UI_LANG" in
     S_RISKS="⚠️ Risks:"
     S_QUIET="Quiet:"
     HEALTH_NONE="No sleep and health data for today"
+    L_PREVIEW="🧪 Brief preview (manual night run). The morning brief will arrive as usual."
     PROPOSE="→ I suggest:"
     MAIL_EMPTY="There were no emails today."
     MAIL_PRESENT="These emails arrived today:"
@@ -429,6 +431,19 @@ BRIEFS_DIR="$HUB/briefs"
 BRIEF_FILE="$BRIEFS_DIR/$TODAY.md"
 SIDECAR="$HUB/.orchestrator/brief-delivery-$TODAY.json"
 PART_FILE="$HUB/.orchestrator/brief-delivery-$TODAY.part"
+# A manual run at night (no KB_PROCESS_ID, before KB_BRIEF_PREVIEW_BEFORE) is a
+# preview: it gets its own day file and sidecar, so the scheduled morning brief
+# is still generated and delivered (owner decision 2026-10-13 after a 00:22
+# manual run consumed the day's brief).
+PREVIEW=0
+if [[ -z "${KB_PROCESS_ID:-}" && "$NOW" < "${KB_BRIEF_PREVIEW_BEFORE:-06:00}" ]]; then
+  PREVIEW=1
+  PREVIEW_TAG="preview-$(date +%H%M)"
+  BRIEF_FILE="$BRIEFS_DIR/$TODAY-$PREVIEW_TAG.md"
+  SIDECAR="$HUB/.orchestrator/brief-delivery-$TODAY-$PREVIEW_TAG.json"
+  PART_FILE="$HUB/.orchestrator/brief-delivery-$TODAY-$PREVIEW_TAG.part"
+  echo "[$(date -Iseconds)] manual run at $NOW is a preview: $BRIEF_FILE; scheduled brief stays pending" >> "$LOG"
+fi
 REUSE=0
 
 if [[ -f "$BRIEF_FILE" && "$(head -n 1 "$BRIEF_FILE" 2>/dev/null)" == "---" ]]; then
@@ -498,6 +513,8 @@ $ERROR_TEXT"
   BRIEF=$(print -r -- "$BRIEF" | awk 'NF {p=1} p' \
     | awk '{lines[NR]=$0} END {for(i=NR;i>=1;i--) if(lines[i]!~/^[[:space:]]*$/){last=i;break} for(i=1;i<=last;i++) print lines[i]}')
   [[ -n "$BRIEF" ]] || { echo "empty generated brief" >&2; exit 1; }
+  [[ "$PREVIEW" == "1" ]] && BRIEF="$L_PREVIEW
+$BRIEF"
 
   mkdir -p "$BRIEFS_DIR"
   PRESERVED_TAIL=""
