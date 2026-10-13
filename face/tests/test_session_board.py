@@ -90,13 +90,12 @@ def test_terminal_bridge_moves_bytes_and_resizes_without_touching_the_agent(tmp_
     monkeypatch.delenv("TMUX_PANE", raising=False)
     tmux = terminal_session.tmux_binary()
     env = dict(os.environ)
-    name = "kb-hub-claude"
+    name = None  # the conversation's own tmux session, known once it is created
 
     def display(fmt):
         return subprocess.run([tmux, "display-message", "-p", "-t", name, fmt],
                               env=env, capture_output=True, text=True).stdout.strip()
 
-    subprocess.run([tmux, "new-session", "-d", "-s", name, "-x", "160", "-y", "48", "/bin/cat"], env=env, check=True)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -105,7 +104,6 @@ def test_terminal_bridge_moves_bytes_and_resizes_without_touching_the_agent(tmp_
     thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
     thread.start()
     try:
-        pid = int(display("#{pane_pid}"))
         base = f"http://127.0.0.1:{port}"
         token = app.state.auth.token
         with httpx.Client(base_url=base, headers={"X-Vepol-Token": token}, timeout=5) as client:
@@ -121,6 +119,10 @@ def test_terminal_bridge_moves_bytes_and_resizes_without_touching_the_agent(tmp_
             created = client.post("/api/conversations", json={"target": "hub", "runtime": "claude", "transport": "terminal"})
             assert created.status_code == 201
             conv_id = created.json()["id"]
+            name = client.get(f"/api/conversations/{conv_id}").json()["terminal_name"]
+            assert name == f"kb-hub-{conv_id}-claude"
+            subprocess.run([tmux, "new-session", "-d", "-s", name, "-x", "160", "-y", "48", "/bin/cat"], env=env, check=True)
+            pid = int(display("#{pane_pid}"))
 
             before = client.get(f"/api/conversations/{conv_id}").json()
             assert (before["agent"], before["pid"]) == ("alive", pid)

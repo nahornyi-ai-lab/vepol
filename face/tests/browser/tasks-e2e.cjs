@@ -146,19 +146,42 @@ async function tableRows(page, withProject = false) {
     evidence.cases.T3 = { rows: wantAll.length, errorRow: await errorRow.textContent(), none: noneText };
     evidence.steps.push(`T3 All projects: alpha+beta rows with Project, red gamma line, "${noneText}"`);
 
-    // 4. Start session: target alpha, the task title, the pre-typed text, and no run.
-    const startTask = async (task, expectedTitle = task.title) => {
+    // 4. Start session asks the agent, links the session to the task, reopens it for the same task, makes a new one for another.
+    const taskConv = async (id) => (await api('/api/conversations')).find(c => c.task && c.task.project === 'alpha' && c.task.plan_item_id === id);
+    const startTask = async (task) => {
+      await page.locator('[data-board-view="tasks"]').click();
+      await page.locator('#tasks-pane').waitFor({ state: 'visible' });
+      await page.locator('#tasks-project').selectOption('alpha');
       await page.locator(`#tasks-table tr[data-task-project="alpha"][data-task-id="${task.id}"] [data-start-task]`).click();
+      // The one-project picker: agent chips only, naming the task.
+      await page.locator('#picker').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('#picker-title').textContent(), 'Start task in alpha');
+      assert.equal(await page.locator('#picker-sub').textContent(), `Pick the agent for task ${task.id}: ${task.title}.`);
+      assert(await page.locator('#picker-list').isHidden(), 'no project list for a task');
+      const chip = page.locator('#picker-runtimes [data-pick-runtime]').first();
+      const runtime = await chip.getAttribute('data-pick-runtime');
+      const created = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
+      await chip.click();
+      await page.locator('#picker').waitFor({ state: 'hidden' });
+      const reply = await (await created).json();
+      // A task that already has a session says so; a plain open shows no note.
+      const note = reply.existing ? 'This task already has a session — opened it.' : '';
+      if (note) await waitUntil(async () => await page.locator('#session-note').isVisible() && await page.locator('#session-note').textContent() === note, 'existing-task note');
       const text = `Task ${task.id} from knowledge/backlog.md: "${task.title}".`;
       await waitUntil(async () => await page.locator('#task-line').isVisible() && await page.locator('#task-text').textContent() === text, `task line for ${task.id}`);
-      const conv = (await api('/api/conversations')).find(c => c.target === 'alpha');
-      assert(conv, 'an alpha conversation exists');
+      // The status arrives with the server's task sync (every 2 s in the fixture).
+      await waitUntil(async () => { const c = await taskConv(task.id); return c && c.task_status === task.status; }, `${task.id} status on its card`);
+      const conv = await taskConv(task.id);
       const detail = await api(`/api/conversations/${conv.id}`);
       assert.equal(detail.target, 'alpha');
-      assert.equal(detail.title, expectedTitle);
+      assert.equal(detail.runtime, runtime);
+      assert.deepEqual(detail.task, { project: 'alpha', plan_item_id: task.id });
+      assert.equal(detail.task_status, task.status);
+      assert.equal(detail.terminal_name, `kb-alpha-${conv.id}-${runtime}`);
+      assert.equal(detail.title, task.title);
       assert.deepEqual(detail.runs, []);
       assert.deepEqual(detail.messages.filter(m => m.role === 'user'), []);
-      assert.match(await page.locator('#conversation-title').textContent(), new RegExp(expectedTitle));
+      await waitUntil(async () => await page.locator('#conversation-task').textContent() === `Task ${task.id} · ${task.status}`, `header task line for ${task.id}`);
       // The owner's click started the agent in the fixture's own tmux: a /bin/cat stand-in, never a real CLI.
       assert.equal(detail.transport, 'terminal');
       assert.equal(detail.agent, 'alive', JSON.stringify(detail));
@@ -168,37 +191,62 @@ async function tableRows(page, withProject = false) {
       const cmd = psCommand();
       const ppid = spawnSync('ps', ['-o', 'ppid=', '-p', String(detail.pid)], { encoding: 'utf8' }).stdout.trim();
       const parent = spawnSync('ps', ['-o', 'command=', '-p', ppid], { encoding: 'utf8' }).stdout.trim();
-      assert.equal(cmd, '/bin/cat');
       assert.equal(parent, '/bin/zsh -f', 'the agent runs inside the pane shell');
-      evidence.cases.T4.push({ task: task.id, conversation: conv.id, target: detail.target, title: detail.title,
-        composer: text, runs: detail.runs.length, userMessages: 0, agent: detail.agent, pid: detail.pid, command: cmd, parent: parent.split(" /usr/bin/env")[0] });
-      return conv.id;
+      evidence.cases.T4.push({ task: task.id, runtime, conversation: conv.id, terminal: detail.terminal_name, title: detail.title,
+        taskLine: await page.locator('#conversation-task').textContent(), composer: text, runs: detail.runs.length,
+        agent: detail.agent, pid: detail.pid, command: cmd, parent: parent.split(" /usr/bin/env")[0], note });
+      assert.equal(reply.id, conv.id);
+      return { id: conv.id, existing: reply.existing, note };
     };
+    const sessionCard = (id) => page.locator(`#board-view [data-conversation-id="${id}"]`);
+    const cardStage = (id) => sessionCard(id).evaluate(el => el.closest('.board-column').dataset.stage);
     evidence.cases.T4 = [];
     const byId = Object.fromEntries(expected.alpha.map(t => [t.id, t]));
-    await page.locator('#tasks-project').selectOption('alpha');
-    await page.locator('#tasks-table tr[data-task-id="alpha-2"]').waitFor();
-    const first = await startTask(byId['alpha-2']);
-    // No input box under a terminal; Tasks in the sidebar returns; a second task reuses the one alpha terminal and keeps its title.
+    const first = (await startTask(byId['alpha-2'])).id;
     assert(await page.locator('#composer').isHidden(), 'no Send box under a terminal session');
-    await page.locator('[data-board-view="tasks"]').click();
-    await page.locator('#tasks-pane').waitFor({ state: 'visible' });
-    await page.locator('#tasks-table tr[data-task-id="alpha-1"]').waitFor();
-    assert.equal(await startTask(byId['alpha-1'], byId['alpha-2'].title), first);
+    // The card on the session board carries the task line.
+    await page.locator('[data-board-view="sessions"]').click();
+    await page.locator('#sessions-pane').waitFor({ state: 'visible' });
+    await sessionCard(first).waitFor();
+    await waitUntil(async () => await sessionCard(first).locator('.session-task').textContent() === 'Task alpha-2 · Ready', 'alpha-2 card task line');
+    await page.screenshot({ path: path.join(OUT, 'tasks-session-card.png'), fullPage: true });
+    // The same task again opens its session; a different task gets a new one.
+    const again = await startTask(byId['alpha-2']);
+    assert.equal(again.id, first);
+    assert.equal(again.existing, true);
+    const other = (await startTask(byId['alpha-1'])).id;
+    assert.notEqual(other, first);
+    assert.notEqual(evidence.cases.T4[0].terminal, evidence.cases.T4[2].terminal, 'two sessions, two terminals');
     await page.screenshot({ path: path.join(OUT, 'tasks-start-session.png'), fullPage: true });
-    evidence.steps.push('T4 Start session opens an alpha chat named after the task with the task line offered for typing (no Send box); no run, no message sent');
+    evidence.steps.push('T4 Start session asks the agent (chips), card and header show "Task alpha-2 · Ready"; the same task reopens its session with a note; alpha-1 gets a new session');
 
     // 5. The app never wrote a board.
     assert.deepEqual(boardHashes(), hashesBefore);
     evidence.cases.T5 = hashesBefore;
     evidence.steps.push('T5 sha256 of every fixture backlog.md unchanged');
 
-    // 6. Close: this repo's kb-board cancels alpha-2 with the owner's reason, Undo reopens it; a stale hash changes nothing.
+    // T4 continued: an agent finishes alpha-1 through the real kb-board (request-review, close) -> its card lands in Done.
     const KB = path.join(OUT, 'hub', 'bin', 'kb-board');
-    const repoKb = path.resolve(APP, '..', 'bin', 'kb-board');
-    if (!process.env.VEPOL_FIXTURE_KB_ROOT && fs.existsSync(repoKb)) assert.equal(fs.realpathSync(KB), fs.realpathSync(repoKb));
     const alphaBoard = path.join(OUT, 'hub', 'projects', 'alpha', 'backlog.md');
     const kb = (...args) => spawnSync(KB, args, { encoding: 'utf8' });
+    const alpha1 = JSON.parse(kb('list', alphaBoard, '--all', '--json').stdout).find(r => r.plan_item_id === 'alpha-1');
+    for (const args of [['request-review', alphaBoard, '--plan-item-id', 'alpha-1', '--claim-id', alpha1.claim_id, '--actor', alpha1.claim_owner],
+      ['close', alphaBoard, '--plan-item-id', 'alpha-1', '--claim-id', alpha1.claim_id, '--actor', alpha1.claim_owner, '--outcome', 'closed']]) {
+      const r = kb(...args);
+      assert.equal(r.status, 0, `${args[0]}: ${r.stdout}${r.stderr}`);
+    }
+    await page.locator('[data-board-view="sessions"]').click();
+    await page.locator('#sessions-pane').waitFor({ state: 'visible' });
+    await waitUntil(async () => await sessionCard(other).count() === 1 && await cardStage(other) === 'completed', 'alpha-1 card in Done', 15000);
+    assert.equal(await sessionCard(other).locator('.session-task').textContent(), 'Task alpha-1 · Done');
+    assert.notEqual(await cardStage(first), 'completed', 'the alpha-2 card stays');
+    await page.screenshot({ path: path.join(OUT, 'tasks-card-done.png'), fullPage: true });
+    evidence.cases.T4.push({ closed: 'alpha-1', card: other, stage: 'completed' });
+    evidence.steps.push('T4 kb-board request-review + close of alpha-1 moves its card to Done within one board refresh');
+
+    // 6. Close: this repo's kb-board cancels alpha-2 with the owner's reason, Undo reopens it; a stale hash changes nothing.
+    const repoKb = path.resolve(APP, '..', 'bin', 'kb-board');
+    if (!process.env.VEPOL_FIXTURE_KB_ROOT && fs.existsSync(repoKb)) assert.equal(fs.realpathSync(KB), fs.realpathSync(repoKb));
     const alpha2 = () => JSON.parse(kb('list', alphaBoard, '--all', '--json').stdout).find(r => r.plan_item_id === 'alpha-2');
     const taskRow = (id) => page.locator(`#tasks-table tr[data-task-project="alpha"][data-task-id="${id}"]`);
     const notice = async () => await page.locator('#tasks-notice').isVisible() ? await page.locator('#tasks-notice-text').textContent() : null;

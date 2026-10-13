@@ -15,7 +15,8 @@ _lock = threading.Lock()
 
 
 def claude_home() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("VEPOL_CLAUDE_HOME") or pathlib.Path.home() / ".claude")
+    home = os.environ.get("VEPOL_AGENT_HOME_CLAUDE") or os.environ.get("VEPOL_CLAUDE_HOME")
+    return pathlib.Path(home or pathlib.Path.home() / ".claude")
 
 
 def session_for_pid(pid: int | None) -> str | None:

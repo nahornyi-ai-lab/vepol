@@ -245,6 +245,7 @@ function processOf(pid) {
     await page.locator('#picker-list [data-pick="gamma"]').click();
     const g1 = await (await createdG).json();
     assert.equal(g1.target, 'gamma');
+    assert.equal(g1.runtime, 'codex');
     assert.equal(g1.existing, false);
     await page.locator('#board-view').waitFor({ state: 'hidden' });
     let g1Detail;
@@ -256,7 +257,8 @@ function processOf(pid) {
     assert.equal((await api('/api/conversations')).length, countBefore + 1);
     // TERM-09 (Orca-style): the agent exits → the shell holds the pane and works as a terminal; Start types the
     // agent in again; closing the terminal says so, and Start opens a new one.
-    const gSession = `kb-gamma-${g1.runtime}`;
+    const gSession = g1Detail.terminal_name;
+    assert.equal(gSession, `kb-gamma-${g1.id}-codex`);
     const startOf = () => page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${g1.id}/terminal/start`);
     const rows = async () => await page.locator('#terminal .xterm-rows').textContent();
     await waitUntil(async () => await page.locator('#agent-state').textContent() === `Agent running · PID ${g1Detail.pid}`, 'header shows the first PID');
@@ -303,24 +305,34 @@ function processOf(pid) {
     evidence.steps.push(`TERM-09 agent exit → "shell open", echo ran in the pane; Start in the same shell → PID ${restarted.pid} (was ${g1Detail.pid}); kill-session → "terminal has closed"; Start → new shell, PID ${reopened.pid}`);
     await page.locator('[data-board-view="sessions"]').click();
     await page.locator(`#board-columns [data-stage="research"] [data-conversation-id="${g1.id}"]`).waitFor();
-    // "+" again for gamma/codex (from another column): the existing card opens, its stage stays, a note says so.
+    // "+" again for gamma/codex (from another column): a second card in that column with its own tmux session.
     const again = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/conversations');
     await page.locator('#board-columns [data-new-in="working"]').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
     await page.locator('#picker-list [data-pick="gamma"]').click();
     const g2 = await (await again).json();
-    assert.equal(g2.id, g1.id);
-    assert.equal(g2.existing, true);
+    assert.notEqual(g2.id, g1.id);
+    assert.equal(g2.runtime, 'codex');
+    assert.equal(g2.existing, false);
     await page.locator('#board-view').waitFor({ state: 'hidden' });
-    const note = `A terminal for gamma · ${g1.runtime} already exists — opened it.`;
-    await waitUntil(async () => await page.locator('#session-note').isVisible() && await page.locator('#session-note').textContent() === note, 'existing-terminal note');
+    let g2Detail;
+    await waitUntil(async () => (g2Detail = await api(`/api/conversations/${g2.id}`)).agent === 'alive', 'second gamma agent alive');
+    assert.equal(g2Detail.board_stage, 'working');
+    assert.equal(g2Detail.terminal_name, `kb-gamma-${g2.id}-codex`);
+    assert.notEqual(g2Detail.terminal_name, gSession);
+    assert.notEqual(g2Detail.pid, reopened.pid);
+    const tmuxSessions = fixtureTmux(boot.tmux_socket, 'list-sessions', '-F', '#{session_name}').split('\n');
+    assert(tmuxSessions.includes(gSession) && tmuxSessions.includes(g2Detail.terminal_name), tmuxSessions.join(', '));
+    assert(await page.locator('#session-note').isHidden(), 'no "already exists" note');
     assert.equal((await api(`/api/conversations/${g1.id}`)).board_stage, 'research');
-    assert.equal((await api('/api/conversations')).length, countBefore + 1);
-    await page.screenshot({ path: path.join(OUT, 'column-plus-existing.png'), fullPage: true });
+    assert.equal((await api('/api/conversations')).length, countBefore + 2);
     await page.locator('[data-board-view="sessions"]').click();
     await page.locator(`#board-columns [data-stage="research"] [data-conversation-id="${g1.id}"]`).waitFor();
-    evidence.cases.O3 = { conversation: g1.id, stage: 'research', pid: g1Detail.pid, command: proc.cmd, parent: proc.parent.split(' /usr/bin/env')[0], note };
-    evidence.steps.push('O3 "+" in Research makes a gamma card in Research with a live /bin/cat under tmux; "+" again opens it, stage unchanged, note shown');
+    await page.locator(`#board-columns [data-stage="working"] [data-conversation-id="${g2.id}"]`).waitFor();
+    await page.screenshot({ path: path.join(OUT, 'column-plus-second.png'), fullPage: true });
+    evidence.cases.O3 = { conversations: [g1.id, g2.id], stages: ['research', 'working'], terminals: [gSession, g2Detail.terminal_name],
+      pid: g1Detail.pid, command: proc.cmd, parent: proc.parent.split(' /usr/bin/env')[0] };
+    evidence.steps.push(`O3 "+" in Research makes a gamma/codex card with a live /bin/cat under tmux ${gSession}; "+" in Working makes a second card in its own ${g2Detail.terminal_name}`);
 
     // TABS. Every tabsOpened session is a tab; a tab switches the terminal, "×" selects the neighbour, sections keep
     // the tabs, reload restores them. A terminal session has no Send box.
