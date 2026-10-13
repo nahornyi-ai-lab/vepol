@@ -26,6 +26,15 @@ this one.
 
 ## [Unreleased]
 
+### Changed
+- **Morning brief v3: readable in a minute, with optional sleep and health.**
+  `kb-brief` now writes a short phone-first brief (date · focus, day plan, main
+  actions; decisions, mail and ideas only when there are any; one-line
+  changed / risks / quiet tails). Point `KB_HEALTH_METRICS` at a folder of daily
+  `health-morning/v1` files to get a 🫀 Body section; without it the brief never
+  mentions health and never waits. See
+  [docs/health-in-the-brief.md](docs/health-in-the-brief.md).
+
 ## [1.1.1] — 2026-10-05
 
 A fix release for the first five minutes after install and for honest failure

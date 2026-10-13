@@ -19,6 +19,12 @@ SRC_BIN="${KB_BRIEF_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Isolate from the machine: never read the real Claude runner index (its
+# same-day success tombstones made planner checks fail after the evening retro).
+export KB_CLAUDE_RUN_ROOT="$TMP/claude-runs"
+# Resolve python3 before tests restrict PATH to /usr/bin:/bin, where the Xcode
+# stub exits 69 until the Xcode license is accepted.
+PY3="$(command -v python3)"
 TODAY=$(date +%Y-%m-%d)
 
 # --- fixture hub with fake collaborators --------------------------------------
@@ -369,7 +375,7 @@ O1=$(env PATH="/usr/bin:/bin" \
   KB_ORCHESTRATOR_STATE_DIR="$OD/state" \
   KB_ORCHESTRATOR_STATE_FILE="$OD/state/state.json" \
   KB_ORCHESTRATOR_LOG_FILE="$OD/state/orch.log" \
-  python3 "$SRC_BIN/kb-orchestrator-run" --cwd "$OD" "ping" 2>"$OD/stderr.txt"); RC=$?
+  "$PY3" "$SRC_BIN/kb-orchestrator-run" --cwd "$OD" "ping" 2>"$OD/stderr.txt"); RC=$?
 [[ $RC -eq 0 && "$O1" == *"CODEX_FALLBACK_ANSWER"* ]] \
   && ok "orch: missing claude binary → failover to codex" \
   || fail "orch: missing claude rc=$RC out=$(head -c 80 <<<"$O1")"
@@ -381,7 +387,7 @@ O2=$(env PATH="/usr/bin:/bin" \
   KB_ORCHESTRATOR_STATE_DIR="$OD/state2" \
   KB_ORCHESTRATOR_STATE_FILE="$OD/state2/state.json" \
   KB_ORCHESTRATOR_LOG_FILE="$OD/state2/orch.log" \
-  python3 "$SRC_BIN/kb-orchestrator-run" --cwd "$OD" "ping" 2>"$OD/stderr2.txt"); RC=$?
+  "$PY3" "$SRC_BIN/kb-orchestrator-run" --cwd "$OD" "ping" 2>"$OD/stderr2.txt"); RC=$?
 [[ $RC -eq 75 ]] && ok "orch: both providers missing → rc=75 exhausted" \
                  || fail "orch: both-missing rc=$RC"
 grep -q "Traceback" "$OD/stderr2.txt" && fail "orch: crash traceback when both missing" \
