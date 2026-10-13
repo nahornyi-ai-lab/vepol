@@ -633,6 +633,35 @@ def cli_list_non_json_no_repr_line() -> None:
             raise ContractFailure(f"list --json rows missing plan_item_id: {payload[0]!r}")
 
 
+def cli_cancel_then_reopen() -> None:
+    """Close-from-app path: cancel a Ready task by its listed hash, then undo it."""
+    with tempfile.TemporaryDirectory() as d:
+        path = _copy_fixture(pathlib.Path(d), "valid_board.md")
+        listed = _run_cli("list", str(path), "--json")
+        if listed.returncode != 0:
+            raise ContractFailure(f"kb-board list --json failed: {listed.stderr or listed.stdout}")
+        row = next(r for r in json.loads(listed.stdout) if r["plan_item_id"] == "pi-ready")
+        cancel = _run_cli("cancel", str(path), "--plan-item-id", "pi-ready",
+                          "--expected-hash", row["content_hash"], "--actor", "owner",
+                          "--reason", "test", "--json")
+        if cancel.returncode != 0:
+            raise ContractFailure(f"kb-board cancel failed: {cancel.stderr or cancel.stdout}")
+        task = _task(_parse(path.read_text(encoding="utf-8")), "pi-ready")
+        assert _status(task) == "Cancelled"
+        assert (_field(task, "cancel_reason") or "").startswith("cancelled by owner at ")
+        assert (_field(task, "cancel_reason") or "").endswith(": test")
+        checked = _run_cli("check", str(path))
+        if checked.returncode != 0:
+            raise ContractFailure(f"kb-board check failed after cancel: {checked.stdout}")
+        reopen = _run_cli("reopen", str(path), "--plan-item-id", "pi-ready",
+                          "--expected-hash", json.loads(cancel.stdout)["content_hash"],
+                          "--actor", "owner", "--to", "Ready", "--reason", "undo close", "--json")
+        if reopen.returncode != 0:
+            raise ContractFailure(f"kb-board reopen failed: {reopen.stderr or reopen.stdout}")
+        assert _status(_task(_parse(path.read_text(encoding="utf-8")), "pi-ready")) == "Ready"
+        _check(path.read_text(encoding="utf-8"))
+
+
 def cli_multi_writer_append_stress() -> None:
     with tempfile.TemporaryDirectory() as d:
         path = _copy_fixture(pathlib.Path(d), "valid_board.md")
@@ -1041,6 +1070,7 @@ TESTS: list[Callable[[], None]] = [
     cutover_no_old_writer_gap,
     cli_progress_updates_metadata,
     cli_list_non_json_no_repr_line,
+    cli_cancel_then_reopen,
     cli_multi_writer_append_stress,
     guard_append_refuses_unrecognized_heading_board,
     guard_append_refuses_valid_tasks_plus_prose,

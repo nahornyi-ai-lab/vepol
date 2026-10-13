@@ -193,6 +193,64 @@ async function tableRows(page, withProject = false) {
     evidence.cases.T5 = hashesBefore;
     evidence.steps.push('T5 sha256 of every fixture backlog.md unchanged');
 
+    // 6. Close: this repo's kb-board cancels alpha-2 with the owner's reason, Undo reopens it; a stale hash changes nothing.
+    const KB = path.join(OUT, 'hub', 'bin', 'kb-board');
+    const repoKb = path.resolve(APP, '..', 'bin', 'kb-board');
+    if (!process.env.VEPOL_FIXTURE_KB_ROOT && fs.existsSync(repoKb)) assert.equal(fs.realpathSync(KB), fs.realpathSync(repoKb));
+    const alphaBoard = path.join(OUT, 'hub', 'projects', 'alpha', 'backlog.md');
+    const kb = (...args) => spawnSync(KB, args, { encoding: 'utf8' });
+    const alpha2 = () => JSON.parse(kb('list', alphaBoard, '--all', '--json').stdout).find(r => r.plan_item_id === 'alpha-2');
+    const taskRow = (id) => page.locator(`#tasks-table tr[data-task-project="alpha"][data-task-id="${id}"]`);
+    const notice = async () => await page.locator('#tasks-notice').isVisible() ? await page.locator('#tasks-notice-text').textContent() : null;
+    await page.locator('[data-board-view="tasks"]').click();
+    await page.locator('#tasks-pane').waitFor({ state: 'visible' });
+    await page.locator('#tasks-project').selectOption('alpha');
+    await taskRow('alpha-2').locator('[data-close-task]').click();
+    assert.equal(await page.locator('#tasks-table tr.confirm-row span').textContent(), `Close “${byId['alpha-2'].title}” as not needed?`);
+    await page.locator('#task-close-reason').fill('test');
+    await page.screenshot({ path: path.join(OUT, 'tasks-close-confirm.png'), fullPage: true });
+    await page.locator('#task-close-confirm').click();
+    const closed = `Closed alpha-2 “${byId['alpha-2'].title}”`;
+    await waitUntil(async () => await notice() === closed && await page.locator('#tasks-undo').isVisible(), 'closed banner with Undo');
+    await waitUntil(async () => await taskRow('alpha-2').count() === 0, 'alpha-2 leaves Active');
+    await page.locator('[data-task-chip="closed"]').click();
+    assert((await tableRows(page)).some(r => r.id === 'alpha-2' && r.status === 'Cancelled'), 'alpha-2 is Cancelled under Closed');
+    assert.equal(alpha2().status, 'Cancelled');
+    const cancelReason = fs.readFileSync(alphaBoard, 'utf8').split('\n').find(l => l.trim().startsWith('cancel_reason:'));
+    assert.match(cancelReason || '', /^\s*cancel_reason: cancelled by owner at \S+: test$/);
+    const check = kb('check', alphaBoard);
+    assert.equal(check.status, 0, check.stdout + check.stderr);
+    const afterClose = boardHashes();
+    for (const slug of ['beta', 'gamma']) assert.equal(afterClose[slug], hashesBefore[slug], `${slug} unchanged`);
+    await page.screenshot({ path: path.join(OUT, 'tasks-closed.png'), fullPage: true });
+    await page.locator('#tasks-undo').click();
+    await waitUntil(async () => !(await tableRows(page)).some(r => r.id === 'alpha-2'), 'alpha-2 leaves Closed');
+    await page.locator('[data-task-chip="active"]').click();
+    assert((await tableRows(page)).some(r => r.id === 'alpha-2' && r.status === 'Ready'), 'alpha-2 is Ready again');
+    assert.equal(alpha2().status, 'Ready');
+    evidence.cases.T6 = { kbBoard: fs.realpathSync(KB), banner: closed, cancelReason: cancelReason.trim(), check: check.stdout.trim(), undo: alpha2().status };
+
+    // The task changes after the list was loaded: Close is refused, the table reloads, the board stays as it was.
+    await taskRow('alpha-2').locator('[data-close-task]').click();
+    await page.locator('#task-close-reason').waitFor();
+    const edit = kb('progress', alphaBoard, '--plan-item-id', 'alpha-2', '--field', 'priority=P1', '--actor', 'fixture');
+    assert.equal(edit.status, 0, edit.stderr);
+    const beforeStale = boardHashes();
+    await page.locator('#task-close-confirm').click();
+    const stale = 'The task changed since the list was loaded — refreshed.';
+    await waitUntil(async () => await notice() === stale, 'stale-hash banner');
+    assert.equal(await page.locator('#tasks-notice').getAttribute('class'), 'banner bad');
+    assert(await page.locator('#tasks-undo').isHidden(), 'no Undo on a refusal');
+    assert.equal(await page.locator('#tasks-table tr.confirm-row').count(), 0);
+    assert.equal(await taskRow('alpha-2').locator('td').first().textContent(), 'Ready');
+    assert.deepEqual(boardHashes(), beforeStale);
+    assert.equal(alpha2().status, 'Ready');
+    assert.deepEqual(evidence.httpErrors, [{ url: '/api/tasks/cancel', status: 409 }]);
+    evidence.httpErrors = [];
+    await page.screenshot({ path: path.join(OUT, 'tasks-close-stale.png'), fullPage: true });
+    evidence.cases.T6.stale = { banner: stale, boards: 'unchanged' };
+    evidence.steps.push(`T6 Close alpha-2 with reason "test": Cancelled under Closed, cancel_reason on the board, check ok, beta/gamma unchanged; Undo -> Ready; stale hash -> "${stale}", nothing changed`);
+
     // TASK-07: without kb-board the view says so in red and clears the table; the session board is unaffected.
     await page.locator('[data-board-view="tasks"]').click();
     await page.locator('#tasks-pane').waitFor({ state: 'visible' });

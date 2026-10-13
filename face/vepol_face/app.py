@@ -301,6 +301,26 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=404, detail=f"unknown target {target!r}")
 
+    # «Close» and its «Undo» in the Tasks view: kb-board makes the change, the app never edits backlog.md.
+    async def change_task(op: str, request: Request) -> dict:
+        body = await _json_body(request, cfg.max_body_bytes)
+        try:
+            return await asyncio.to_thread(tasks_mod.change_task, hub_path, op, body)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown project or no backlog.md: {body.get('project')!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except tasks_mod.TaskChangeRefused as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+    @app.post("/api/tasks/cancel", dependencies=auth_dep)
+    async def api_task_cancel(request: Request) -> dict:
+        return await change_task("cancel", request)
+
+    @app.post("/api/tasks/reopen", dependencies=auth_dep)
+    async def api_task_reopen(request: Request) -> dict:
+        return await change_task("reopen", request)
+
     @app.get("/api/memory", dependencies=auth_dep)
     def api_memory() -> dict:
         return memory_mod.cards(hub_path)

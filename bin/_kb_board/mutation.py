@@ -213,6 +213,18 @@ def _mutate_board(
             task.fields["blocked_reason"] = reason
         _set_updated(task, now)
 
+    elif op == "cancel":
+        target = "Cancelled"
+        # In Progress / Review stay with the agents: cancelling them needs the
+        # claim/provenance checks this op does not do.
+        if source not in {"Backlog", "Ready", "Blocked"} or not is_legal(source, target):
+            raise BoardMutationError("ETRANSITION", f"{source} -> {target} is not legal for cancel")
+        _move(board, task, target)
+        _clear_claim(task)
+        why = (reason or "").strip() or "no longer relevant"
+        task.fields["cancel_reason"] = f"cancelled by {actor} at {_iso(now)}: {why}"
+        _set_updated(task, now)
+
     elif op == "reopen":
         target = target_status or "Ready"
         if source not in {"Done", "Cancelled"} or target not in {"Ready", "Backlog"}:

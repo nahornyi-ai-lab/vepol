@@ -115,8 +115,10 @@ runs keep their history and still open in the app.
   folder · project · path on disk; clicking anywhere on a card opens it.
 - **Tasks** — every project's `knowledge/backlog.md`, read through `kb-board`,
   as a table with status chips and search. «Start session» opens that project's
-  terminal with the task text typed into the composer; nothing is sent. The view
-  never writes a board.
+  terminal with the task text typed into the composer; nothing is sent. «Close»
+  on a Backlog, Ready or Blocked task asks once (with an optional reason) and
+  moves it to Cancelled through `kb-board cancel`; the banner's «Undo» puts it
+  back with `kb-board reopen`. The app never edits a board itself.
 - **Automations** — every process in `personal/processes.yaml` with its
   schedule, dependency, state and reason, last and next run, 14-day history and
   output tails, plus Hermes cron jobs and, when it is loaded or installed in

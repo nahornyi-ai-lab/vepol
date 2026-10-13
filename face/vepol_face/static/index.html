@@ -250,6 +250,13 @@
   #tasks-count { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
   .table-wrap { overflow: auto; min-height: 0; min-width: 0; }
   #tasks-pane .table-wrap { flex: 0 1 auto; }
+  #tasks-notice { display: flex; align-items: center; gap: 10px; }
+  #tasks-notice span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #tasks-notice button { padding: 4px 10px; font-size: 12px; flex: none; }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .confirm-box { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .confirm-box span { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+  .confirm-box input { flex: 0 1 240px; min-width: 0; width: auto; margin: 0; }
   .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .data-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
   .data-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.45; }
@@ -545,10 +552,11 @@
         <span id="tasks-count" role="status" aria-live="polite"></span>
       </div>
       <div id="tasks-feedback" class="banner bad" role="alert" hidden></div>
+      <div id="tasks-notice" class="banner" hidden><span id="tasks-notice-text"></span><button class="ghost" id="tasks-undo">Undo</button></div>
       <div class="table-wrap" id="tasks-table"></div>
       <div id="tasks-empty" class="empty" hidden></div>
       <div id="tasks-none" class="grey-line" hidden></div>
-      <div class="board-footnote">Read only. Status, claims and new tasks stay with kb-board and the agents.</div>
+      <div class="board-footnote">«Close» moves a Backlog, Ready or Blocked task to Cancelled through kb-board. Claims, other status changes and new tasks stay with the agents.</div>
     </div>
     <div class="board-pane" id="automations-pane" hidden>
       <div id="auto-feedback" class="banner bad" role="alert" hidden></div>
@@ -1121,7 +1129,7 @@
   const VIEWS = {
     memory: ["Memory", "What Vepol remembers for each project, read from its knowledge folder."],
     sessions: ["Sessions", "All your work in one place. Move cards between stages and jump back into any conversation."],
-    tasks: ["Tasks", "Every project's backlog, read from knowledge/backlog.md. Start a session from any task."],
+    tasks: ["Tasks", "Every project's backlog, read from knowledge/backlog.md. Start a session from any task, or close one that is no longer needed."],
     automations: ["Automations", "Every scheduled process and how it is doing today, read from the scheduler's own files."],
   };
 
@@ -1178,7 +1186,10 @@
   };
   const TASK_DOT = { "In Progress": "st-active", Review: "st-active", Blocked: "st-bad", Ready: "st-ok",
     Backlog: "st-idle", Done: "st-ok", Cancelled: "st-idle" };
-  const tasks = { data: null, chip: "active", version: 0 };
+  // Only these can be closed from the app; In Progress and Review stay with the agents.
+  const CLOSABLE = ["Backlog", "Ready", "Blocked"];
+  // confirm: the one open «Close» question; notice: the banner after a close (with Undo) or a refused change.
+  const tasks = { data: null, chip: "active", version: 0, confirm: null, notice: null };
 
   function paintTaskProjects() {
     const select = $("tasks-project");
@@ -1231,17 +1242,28 @@
     const missing = projects.filter((p) => p.state === "none").map((p) => p.project);
     $("tasks-count").textContent = rows.length === every.length ? `Total: ${every.length}` : `Showing ${rows.length} of ${every.length}`;
     const cols = data.all ? 6 : 5;
+    const isOpen = (t) => !!tasks.confirm && tasks.confirm.project === t.project && tasks.confirm.id === t.id;
+    const closable = (t) => !!(t.id && t.content_hash && CLOSABLE.includes(t.status));
+    // The question stays open across refreshes while its task is still shown and closable.
+    if (tasks.confirm && !tasks.confirm.busy && !rows.some((t) => isOpen(t) && closable(t))) tasks.confirm = null;
+    const reasonEl = $("task-close-reason");
+    const caret = reasonEl && document.activeElement === reasonEl ? [reasonEl.selectionStart, reasonEl.selectionEnd] : null;
     table.innerHTML = errors.length || rows.length ? `<table class="data-table">
       <thead><tr><th>Status</th><th>Task</th><th>ID</th><th>Owner</th>${data.all ? "<th>Project</th>" : ""}<th></th></tr></thead>
       <tbody>${errors.map((p) => `<tr class="error-row"><td colspan="${cols}">${esc(p.project)}: backlog unreadable — ${esc(p.reason)}</td></tr>`).join("")}
-      ${rows.map((t) => `<tr data-task-project="${esc(t.project)}" data-task-id="${esc(t.id || "")}">
+      ${rows.map((t, i) => `<tr data-task-project="${esc(t.project)}" data-task-id="${esc(t.id || "")}">
         <td class="nowrap"><span class="status-word"><span class="dot ${TASK_DOT[t.status] || "st-idle"}"></span>${esc(t.status)}</span></td>
         <td>${esc(t.title)}</td>
         <td class="nowrap mono">${esc(t.id || "—")}</td>
         <td class="nowrap">${agentMark(t.owner)}</td>
         ${data.all ? `<td class="nowrap">${esc(t.project)}</td>` : ""}
-        <td><button class="ghost" data-start-task>Start session</button></td>
-      </tr>`).join("")}</tbody></table>` : "";
+        <td><div class="row-actions"><button class="ghost" data-start-task>Start session</button>${closable(t) && !isOpen(t) ? `<button class="ghost" data-close-task="${i}">Close</button>` : ""}</div></td>
+      </tr>${isOpen(t) ? `<tr class="confirm-row"><td colspan="${cols}"><div class="confirm-box">
+        <span>Close “${esc(t.title)}” as not needed?</span>
+        <input type="text" class="filter" id="task-close-reason" aria-label="Reason" placeholder="no longer relevant" value="${esc(tasks.confirm.reason)}"${tasks.confirm.busy ? " disabled" : ""} />
+        <button id="task-close-confirm"${tasks.confirm.busy ? " disabled" : ""}>Close task</button>
+        <button class="ghost" id="task-close-keep"${tasks.confirm.busy ? " disabled" : ""}>Keep</button>
+      </div></td></tr>` : ""}`).join("")}</tbody></table>` : "";
     const okProjects = projects.filter((p) => p.state === "ok");
     empty.hidden = rows.length > 0 || !okProjects.length;
     empty.textContent = !data.all && every.length === 0 ? "No tasks in this backlog yet" : "Nothing found";
@@ -1250,6 +1272,83 @@
     table.querySelectorAll("[data-start-task]").forEach((button, i) => {
       button.onclick = () => startTaskSession(rows[i], button);
     });
+    table.querySelectorAll("[data-close-task]").forEach((button) => {
+      button.onclick = () => openCloseQuestion(rows[Number(button.dataset.closeTask)]);
+    });
+    const reason = $("task-close-reason");
+    if (reason) {
+      reason.oninput = () => { if (tasks.confirm) tasks.confirm.reason = reason.value; };
+      $("task-close-confirm").onclick = closeTask;
+      $("task-close-keep").onclick = keepTask;
+      if (caret) { reason.focus(); reason.setSelectionRange(caret[0], caret[1]); }
+    }
+  }
+
+  function showTaskNotice(text, undo = null) {
+    tasks.notice = { undo };
+    $("tasks-notice").className = undo ? "banner" : "banner bad";
+    $("tasks-notice").setAttribute("role", undo ? "status" : "alert");
+    $("tasks-notice-text").textContent = text;
+    $("tasks-undo").hidden = !undo;
+    $("tasks-notice").hidden = false;
+  }
+
+  function hideTaskNotice() {
+    tasks.notice = null;
+    $("tasks-notice").hidden = true;
+  }
+
+  // One question at a time; the hash is the one the owner saw when he clicked «Close».
+  function openCloseQuestion(task) {
+    hideTaskNotice();
+    tasks.confirm = { project: task.project, id: task.id, title: task.title, hash: task.content_hash, reason: "", busy: false };
+    paintTasks();
+    const reason = $("task-close-reason");
+    if (reason) reason.focus();
+  }
+
+  function keepTask() {
+    if (!tasks.confirm || tasks.confirm.busy) return;
+    tasks.confirm = null;
+    paintTasks();
+  }
+
+  // kb-board refused or failed: the table is reloaded first, then the red banner says why.
+  async function taskChangeFailed(err) {
+    await loadTasks();
+    showTaskNotice(err.message);
+  }
+
+  async function closeTask() {
+    const c = tasks.confirm;
+    if (!c || c.busy) return;
+    c.busy = true;
+    paintTasks();
+    try {
+      const reply = await api("/api/tasks/cancel", { method: "POST", body: JSON.stringify(
+        { project: c.project, plan_item_id: c.id, content_hash: c.hash, reason: c.reason.trim() }) });
+      tasks.confirm = null;
+      await loadTasks();
+      // Undo returns the task to where it was; the protocol reopens a Blocked task only to Ready.
+      showTaskNotice(`Closed ${c.id} “${c.title}”`, { project: c.project, id: c.id, hash: reply.content_hash,
+        to: reply.from_status === "Backlog" ? "Backlog" : "Ready" });
+    } catch (err) {
+      tasks.confirm = null;
+      await taskChangeFailed(err);
+    }
+  }
+
+  async function undoClose() {
+    const undo = tasks.notice && tasks.notice.undo;
+    if (!undo) return;
+    hideTaskNotice();
+    try {
+      await api("/api/tasks/reopen", { method: "POST", body: JSON.stringify(
+        { project: undo.project, plan_item_id: undo.id, content_hash: undo.hash, to: undo.to }) });
+      await loadTasks();
+    } catch (err) {
+      await taskChangeFailed(err);
+    }
   }
 
   const newTransport = () => state.desktop ? $("transport-select").value : "oneshot";
@@ -1396,6 +1495,7 @@
   async function startTaskSession(task, button) {
     button.disabled = true;
     $("tasks-feedback").hidden = true;
+    hideTaskNotice();
     try {
       const text = task.id
         ? `Task ${task.id} from knowledge/backlog.md: "${task.title}".`
@@ -2559,6 +2659,12 @@
   $("tasks-project").addEventListener("change", () => loadTasks());
   $("tasks-search").addEventListener("input", paintTasks);
   $("tasks-refresh").onclick = () => loadTasks(true);
+  $("tasks-undo").onclick = undoClose;
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !tasks.confirm || !viewVisible("tasks") || document.querySelector("dialog[open]")) return;
+    e.preventDefault();
+    keepTask();
+  });
   document.querySelectorAll("[data-task-chip]").forEach((b) => {
     b.onclick = () => {
       tasks.chip = b.dataset.taskChip;
