@@ -101,9 +101,11 @@ async function waitUntil(fn, label, timeout = 10000) {
     await waitUntil(async () => /· fresh-app ·/.test(await page.locator('#conversation-title').textContent()), 'fresh-app session opened', 20000);
     const link = path.join(hub, 'projects', 'fresh-app');
     assert.equal(fs.realpathSync(link), fs.realpathSync(path.join(fresh, 'knowledge')));
-    for (const f of ['AGENTS.md', 'CLAUDE.md', 'knowledge/backlog.md', 'knowledge/state.md', 'knowledge/log.md']) {
+    for (const f of ['AGENTS.md', 'knowledge/backlog.md', 'knowledge/state.md', 'knowledge/log.md']) {
       assert(fs.existsSync(path.join(fresh, f)), `new-wiki created ${f}`);
     }
+    // CLAUDE.md is retired: Claude Code reads AGENTS.md itself, and a CLAUDE.md would switch that off.
+    assert(!fs.existsSync(path.join(fresh, 'CLAUDE.md')), 'new-wiki created no CLAUDE.md');
     const freshConv = await api(`/api/conversations/${(await convOf('fresh-app')).id}`);
     assert.equal(freshConv.transport, 'terminal');
     assert.equal(freshConv.agent, 'alive', JSON.stringify(freshConv));
@@ -154,7 +156,7 @@ async function waitUntil(fn, label, timeout = 10000) {
     assert.equal((await convOf('beta')).board_stage, 'research');
     evidence.steps.push('P6 column «+» Research → picker → beta session in Research');
 
-    // 7. Another agent CLI: hermes in delta runs in its own tmux session kb-delta-hermes.
+    // 7. Another agent CLI: hermes in delta runs in its own tmux session kb-delta-<id>-hermes.
     await page.locator('[data-board-view="sessions"]').click();
     await page.locator('#board-newconv').click();
     await page.locator('#picker').waitFor({ state: 'visible' });
@@ -165,10 +167,10 @@ async function waitUntil(fn, label, timeout = 10000) {
     const hermes = await api(`/api/conversations/${(await convOf('delta')).id}`);
     assert.equal(hermes.runtime, 'hermes');
     assert.equal(hermes.transport, 'terminal');
-    assert.equal((await api(`/api/conversations/${hermes.id}/attach`)).session, 'kb-delta-hermes');
+    assert.equal((await api(`/api/conversations/${hermes.id}/attach`)).session, `kb-delta-${hermes.id}-hermes`);
     await waitUntil(async () => (await api(`/api/conversations/${hermes.id}`)).agent === 'alive', 'hermes stand-in alive');
     await page.screenshot({ path: path.join(OUT, 'hermes-session.png') });
-    evidence.steps.push(`P7 agent chips ${agents.join(', ')}; hermes picked → delta terminal kb-delta-hermes is running`);
+    evidence.steps.push(`P7 agent chips ${agents.join(', ')}; hermes picked → delta terminal kb-delta-${hermes.id}-hermes is running`);
 
     assert.deepEqual(evidence.pageErrors, [], 'No browser exceptions');
     assert.deepEqual(evidence.httpErrors, [], 'No HTTP errors');

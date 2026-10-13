@@ -440,7 +440,7 @@ def test_api_accepts_minted_token(client):
 
 def test_every_listed_agent_cli_opens_as_a_terminal_session(client, monkeypatch):
     """Critical: without it only Claude and Codex can be started in the app."""
-    from vepol_face.sessions import RUNTIME_SUFFIX, session_name
+    from vepol_face.sessions import RUNTIME_SUFFIX
     from vepol_face.terminal_session import TerminalSession
 
     c, app = client
@@ -449,7 +449,8 @@ def test_every_listed_agent_cli_opens_as_a_terminal_session(client, monkeypatch)
     for runtime in RUNTIME_SUFFIX:
         r = c.post("/api/conversations", json={"target": "hub", "runtime": runtime, "transport": "terminal"}, headers=h)
         assert r.status_code == 201, (runtime, r.text)
-        assert c.get(f"/api/conversations/{r.json()['id']}/attach", headers=h).json()["session"] == session_name("hub", runtime)
+        conv_id = r.json()["id"]
+        assert c.get(f"/api/conversations/{conv_id}/attach", headers=h).json()["session"] == f"kb-hub-{conv_id}-{runtime}"
     # Structured sessions still need Claude or Codex.
     assert c.post("/api/conversations", json={"target": "hub", "runtime": "agy", "transport": "session"},
                   headers=h).status_code == 400
