@@ -103,6 +103,23 @@ DEFAULT_PROCESSES_YAML = """\
 # when: "HH:MM" | after:<process_id> | on-demand (never scheduled).
 # An invalid file fails closed: kb-tick runs nothing and logs why.
 
+# Nightly state.md refresh: a model proposes point edits from what each project
+# logged since the last pass; only edits that match the page exactly and cite a
+# log/daily date are applied. Reports: <hub>/.orchestrator/consolidate/<slug>/.
+- id: consolidate
+  enabled: true
+  when: "06:30"
+  run: kb-consolidate
+  outputs: [file]
+
+# Daily child->parent rollup: every parent wiki in hierarchy.yaml gets a managed
+# block with its children's snapshot and latest log headlines (no model).
+- id: child-rollup
+  enabled: true
+  when: "07:00"
+  run: kb-child-rollup
+  outputs: [file]
+
 # Mail briefing is ENABLED by default but reads NOTHING until you connect Gmail:
 # with no connector it degrades to available:false and exits 0, so daily/retro
 # still run. Connecting your Gmail is the consent step that activates it.

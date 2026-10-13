@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""kb-child-rollup — daily child->parent knowledge rollup.
+
+Every parent wiki (a node in <hub>/hierarchy.yaml with non-empty `children`,
+the hub root excluded) gets one managed block in its state.md between
+
+    <!-- kb-child-rollup:begin -->
+    <!-- kb-child-rollup:end -->
+
+holding, per child, the child's own snapshot paragraph and its last five log
+headlines, copied verbatim with a file:line source. No model, no paraphrase:
+identical inputs render identical bytes. Everything outside the markers stays
+byte-identical. When the block changes, the parent log.md gets one `rollup`
+line naming the children whose section moved.
+
+Usage:
+    kb-child-rollup [--hub PATH] [--parent SLUG] [--dry-run]
+
+Exit codes: 0 no parent failed (a missing hierarchy.yaml means no parents);
+1 a parent failed (reasons on stderr) or the hierarchy is unreadable;
+2 usage error (bad flag, unknown --parent).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import difflib
+import json
+import os
+import re
+import sys
+import tempfile
+
+BEGIN = "<!-- kb-child-rollup:begin -->"
+END = "<!-- kb-child-rollup:end -->"
+
+LABELS = {
+    "ru": {
+        "heading": "## Из дочерних проектов",
+        "intro": (
+            "_Собирается автоматически из вик дочерних проектов (kb-child-rollup); не править руками —\n"
+            "при следующем запуске блок перезаписывается. Факты здесь новее остального текста\n"
+            "страницы. Дети по состоянию на {date}._"
+        ),
+        "unavailable": "### {slug} — вика недоступна ({path})",
+        "not_in_hierarchy": "нет в hierarchy.yaml",
+        "source": "(источник: state.md:{n})",
+        "no_snapshot": "(в state.md нет абзаца-снимка)",
+        "recent": "Последние записи:",
+        "recent_none": "Последние записи: —",
+        "log_line": "Дочерние вики обновлены: {items}",
+    },
+    "en": {
+        "heading": "## From child projects",
+        "intro": (
+            "_Collected automatically from the child project wikis (kb-child-rollup); do not edit by hand —\n"
+            "the next run overwrites this block. Facts here are newer than the rest of\n"
+            "the page. Children as of {date}._"
+        ),
+        "unavailable": "### {slug} — wiki unavailable ({path})",
+        "not_in_hierarchy": "not in hierarchy.yaml",
+        "source": "(source: state.md:{n})",
+        "no_snapshot": "(no snapshot paragraph in state.md)",
+        "recent": "Recent entries:",
+        "recent_none": "Recent entries: —",
+        "log_line": "Child wikis updated: {items}",
+    },
+}
+
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+LAST_UPDATED_RE = re.compile(r"^##\s+(Last Updated|Последнее обновление)\b", re.IGNORECASE)
+LOG_HEAD_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})")
+SENTENCE_END = ".!?…"
+SNAPSHOT_MAX = 600
+HEADLINE_MAX = 200
+HEADLINES = 5
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Hierarchy loader — copy of kb-orchestrator-cycle `_parse_yaml` (no PyYAML).
+# ──────────────────────────────────────────────────────────────────────────
+
+def _parse_yaml(path):
+    """Minimal YAML parser sufficient for hierarchy.yaml format.
+
+    Supports: top-level scalars, mappings, single-line list literals
+    `[a, b, c]`, nested 2-space mappings.
+    """
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    out = {}
+    stack = [(0, out)]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        while stack and stack[-1][0] > indent:
+            stack.pop()
+        parent = stack[-1][1]
+        if ":" not in stripped:
+            continue
+        key, _, val = stripped.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if val == "":
+            new = {}
+            parent[key] = new
+            stack.append((indent + 2, new))
+        elif val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            parent[key] = [s.strip() for s in inner.split(",") if s.strip()] if inner else []
+        else:
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            elif val == "null":
+                val = None
+            elif val == "true":
+                val = True
+            elif val == "false":
+                val = False
+            elif val.isdigit():
+                val = int(val)
+            parent[key] = val
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Language
+# ──────────────────────────────────────────────────────────────────────────
+
+def owner_language(hub):
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        from _kb_profile import get_language
+    except ImportError:
+        get_language = None
+    if get_language is not None:
+        return get_language(hub)
+    path = os.path.join(hub, "personal", "profile.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("language:"):
+                    val = s.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"").lower()
+                    return val or "en"
+    except OSError:
+        pass
+    return "en"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Child readers
+# ──────────────────────────────────────────────────────────────────────────
+
+def _read_text(path):
+    with open(path, "rb") as f:
+        return f.read().decode("utf-8")
+
+
+def _lines(text):
+    return [ln.rstrip("\r") for ln in text.split("\n")]
+
+
+def state_date(lines, path):
+    """First YYYY-MM-DD under `## Last Updated` / `## Последнее обновление`,
+    else the file's mtime date."""
+    for i, ln in enumerate(lines):
+        if LAST_UPDATED_RE.match(ln):
+            m = DATE_RE.search(ln[ln.find(" ") + 1:])
+            if m:
+                return m.group(0)
+            for nxt in lines[i + 1:]:
+                if nxt.startswith("## "):
+                    break
+                m = DATE_RE.search(nxt)
+                if m:
+                    return m.group(0)
+            break
+    return datetime.date.fromtimestamp(os.stat(path).st_mtime).isoformat()
+
+
+def snapshot(lines):
+    """First paragraph after the first `## ` heading: consecutive non-empty
+    lines, `>` and `<!--` lines skipped, joined with spaces, cut at the last
+    sentence end within SNAPSHOT_MAX chars. Returns (text, first_line_no) or
+    (None, None)."""
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("## "):
+            start = i + 1
+            break
+    if start is None:
+        return None, None
+    parts = []
+    first = None
+    for i in range(start, len(lines)):
+        s = lines[i].strip()
+        if s.startswith(">") or s.startswith("<!--"):
+            continue
+        if not s:
+            if parts:
+                break
+            continue
+        if s.startswith("#"):
+            if parts:
+                break
+            continue
+        if first is None:
+            first = i + 1
+        parts.append(s)
+    if not parts:
+        return None, None
+    text = " ".join(parts)
+    if len(text) > SNAPSHOT_MAX:
+        cut = -1
+        for j in range(SNAPSHOT_MAX - 1, -1, -1):
+            if text[j] in SENTENCE_END and (j + 1 == len(text) or text[j + 1].isspace()):
+                cut = j + 1
+                break
+        text = text[:cut] if cut > 0 else text[:SNAPSHOT_MAX - 1].rstrip() + "…"
+    return text, first
+
+
+def headlines(lines):
+    """Last HEADLINES `## [` lines, newest first: [(text, line_no)], plus the
+    date of the last headline (or None)."""
+    found = [(ln, i + 1) for i, ln in enumerate(lines) if ln.startswith("## [")]
+    last_date = None
+    for ln, _ in reversed(found):
+        m = LOG_HEAD_RE.match(ln)
+        if m:
+            last_date = m.group(1)
+            break
+    out = []
+    for ln, n in reversed(found[-HEADLINES:]):
+        text = ln[3:].strip()
+        if len(text) > HEADLINE_MAX:
+            text = text[:HEADLINE_MAX - 1].rstrip() + "…"
+        out.append((text, n))
+    return out, last_date
+
+
+def child_section(slug, node, L):
+    """Return (section_text, child_date_or_None)."""
+    if not isinstance(node, dict) or not node.get("knowledge_path"):
+        return L["unavailable"].format(slug=slug, path=L["not_in_hierarchy"]), None
+    kpath = str(node["knowledge_path"])
+    kdir = os.path.expanduser(kpath)
+    spath = os.path.join(kdir, "state.md")
+    try:
+        slines = _lines(_read_text(spath))
+        sdate = state_date(slines, spath)
+    except (OSError, UnicodeDecodeError):
+        return L["unavailable"].format(slug=slug, path=kpath), None
+    heads, ldate = [], None
+    try:
+        heads, ldate = headlines(_lines(_read_text(os.path.join(kdir, "log.md"))))
+    except (OSError, UnicodeDecodeError):
+        pass
+    snap, snap_line = snapshot(slines)
+    out = ["### {} — `{}` (state {}, log {})".format(slug, kpath, sdate, ldate or "—")]
+    if snap is not None:
+        out.append("{} {}".format(snap, L["source"].format(n=snap_line)))
+    else:
+        out.append(L["no_snapshot"])
+    if heads:
+        out.append(L["recent"])
+        for text, n in heads:
+            out.append("- {} (log.md:{})".format(text, n))
+    else:
+        out.append(L["recent_none"])
+    child_date = max(d for d in (sdate, ldate) if d)
+    return "\n".join(out), child_date
+
+
+def render_block(children, nodes, L):
+    """Return (block_text_without_markers, {slug: section}, {slug: date})."""
+    sections, dates, order = {}, {}, []
+    for slug in children:
+        sec, d = child_section(slug, nodes.get(slug), L)
+        sections[slug] = sec
+        dates[slug] = d
+        order.append(slug)
+    known = [d for d in dates.values() if d]
+    intro = L["intro"].format(date=max(known) if known else "—")
+    body = intro + "\n\n" + "\n\n".join(sections[s] for s in order)
+    return body, sections, dates
+
+
+def split_sections(block):
+    """Per-child `### <slug>` sections of an existing block body."""
+    out = {}
+    cur, buf = None, []
+    for ln in _lines(block):
+        if ln.startswith("### "):
+            if cur is not None:
+                out[cur] = "\n".join(buf).strip()
+            cur = ln[4:].split(" ", 1)[0].strip()
+            buf = [ln]
+        elif cur is not None:
+            buf.append(ln)
+    if cur is not None:
+        out[cur] = "\n".join(buf).strip()
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Parent update
+# ──────────────────────────────────────────────────────────────────────────
+
+def compose(old, body, L):
+    """Return (new_text, old_block_body or None) or raise ValueError
+    ('markers-corrupted')."""
+    nl = "\r\n" if "\r\n" in old else "\n"
+
+    def eol(s):
+        return s.replace("\n", nl) if nl != "\n" else s
+
+    nb, ne = old.count(BEGIN), old.count(END)
+    if nb == 1 and ne == 1:
+        b = old.index(BEGIN)
+        e = old.index(END)
+        if b < e:
+            old_inner = old[b + len(BEGIN):e]
+            new = old[:b + len(BEGIN)] + eol("\n" + body + "\n") + old[e:]
+            return new, old_inner
+    if nb or ne:
+        raise ValueError("markers-corrupted")
+    chunk = L["heading"] + "\n" + BEGIN + "\n" + body + "\n" + END + "\n"
+    heads = [m.start() for m in re.finditer(r"^## ", old, re.M)]
+    if len(heads) >= 2:
+        pos = heads[1]
+        before = old[:pos]
+        prefix = "" if before.endswith("\n\n") or before.endswith("\r\n\r\n") else "\n"
+        return before + eol(prefix + chunk + "\n") + old[pos:], None
+    if not old:
+        return eol(chunk), None
+    if old.endswith("\n"):
+        return old + eol("\n" + chunk), None
+    return old + eol("\n\n" + chunk.rstrip("\n")), None
+
+
+def atomic_write(path, data, mode=None):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_log(path, line):
+    tail = b""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 2))
+            tail = f.read()
+    except OSError:
+        tail = b""
+    if not tail or tail.endswith(b"\n\n"):
+        prefix = ""
+    elif tail.endswith(b"\n"):
+        prefix = "\n"
+    else:
+        prefix = "\n\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(prefix + line + "\n")
+
+
+def process_parent(slug, nodes, L, today, dry_run):
+    """Return dict(result, children_dates, reason)."""
+    node = nodes.get(slug) or {}
+    children = list(node.get("children") or [])
+    rec = {"result": "", "children_dates": {}, "reason": ""}
+    kpath = node.get("knowledge_path")
+    if not kpath:
+        rec.update(result="skipped:no-state", reason="no knowledge_path in hierarchy.yaml")
+        return rec
+    kdir = os.path.expanduser(str(kpath))
+    spath = os.path.join(kdir, "state.md")
+    try:
+        st = os.stat(spath)
+        raw = open(spath, "rb").read()
+        old = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        rec.update(result="skipped:no-state", reason="{}: {}".format(spath, exc))
+        return rec
+
+    body, sections, dates = render_block(children, nodes, L)
+    rec["children_dates"] = dates
+    try:
+        new, old_inner = compose(old, body, L)
+    except ValueError:
+        rec.update(result="failed:markers-corrupted",
+                   reason="{}: expected one begin and one end marker, begin first".format(spath))
+        return rec
+    if new == old:
+        rec["result"] = "unchanged"
+        return rec
+
+    old_sections = split_sections(old_inner) if old_inner is not None else {}
+    changed = [c for c in children if old_sections.get(c) != sections[c]]
+    changed += [c for c in old_sections if c not in sections]
+    if not changed:
+        changed = list(children)
+    items = ", ".join("{} ({})".format(c, dates.get(c) or "—") for c in changed)
+    log_line = '## [{}] rollup | {} | "{}"'.format(today, slug, L["log_line"].format(items=items))
+    rec["reason"] = "changed: " + ", ".join(changed)
+
+    if dry_run:
+        rec["result"] = "would-update"
+        diff = difflib.unified_diff(
+            old.splitlines(True), new.splitlines(True),
+            fromfile=spath, tofile=spath + " (new)")
+        sys.stdout.write("".join(diff))
+        if not new.endswith("\n"):
+            sys.stdout.write("\n")
+        print("+ {}: {}".format(os.path.join(kdir, "log.md"), log_line))
+        return rec
+
+    try:
+        st2 = os.stat(spath)
+    except OSError as exc:
+        rec.update(result="skipped:concurrent-edit", reason=str(exc))
+        return rec
+    if (st2.st_mtime_ns, st2.st_size) != (st.st_mtime_ns, st.st_size):
+        rec.update(result="skipped:concurrent-edit", reason="state.md changed during the run")
+        return rec
+    try:
+        atomic_write(spath, new.encode("utf-8"), mode=st.st_mode & 0o7777)
+        append_log(os.path.join(kdir, "log.md"), log_line)
+    except OSError as exc:
+        rec.update(result="failed:write-error", reason="{}: {}".format(spath, exc))
+        return rec
+    rec["result"] = "updated"
+    return rec
+
+
+def write_outcome(hub, today, outcome):
+    d = os.path.join(hub, ".orchestrator")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "child-rollup-{}.json".format(today))
+    merged = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            prev = json.load(f)
+        if isinstance(prev, dict):
+            merged.update(prev)
+    except (OSError, ValueError):
+        pass
+    merged.update(outcome)
+    data = json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    atomic_write(path, data.encode("utf-8"))
+    return path
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="kb-child-rollup",
+        description="Copy each child wiki's snapshot and last log headlines into its "
+                    "parent's state.md managed block (deterministic, no model).")
+    ap.add_argument("--hub", help="hub directory (default: $KB_HUB or ~/knowledge)")
+    ap.add_argument("--parent", help="process only this parent slug")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print what would change; write nothing")
+    args = ap.parse_args(argv)
+
+    hub = os.path.expanduser(args.hub or os.environ.get("KB_HUB") or "~/knowledge")
+    hpath = os.path.join(hub, "hierarchy.yaml")
+    try:
+        hier = _parse_yaml(hpath)
+    except FileNotFoundError:
+        hier = {}  # no hierarchy yet (fresh install): zero parents, exit 0
+    except (OSError, UnicodeDecodeError) as exc:
+        print("kb-child-rollup: cannot read {}: {}".format(hpath, exc), file=sys.stderr)
+        return 1
+    nodes = hier.get("nodes") if isinstance(hier.get("nodes"), dict) else {}
+    root = hier.get("root")
+    parents = sorted(s for s, n in nodes.items()
+                     if s != root and isinstance(n, dict) and n.get("children"))
+    # Slug order, but a parent that is itself a child of another parent runs
+    # first, so its fresh `rollup` log line is already visible to its own parent
+    # in the same run (a quiet next run then stays `unchanged`).
+    height, pset = {}, set(parents)
+
+    def _height(s, seen=()):
+        if s not in height:
+            kids = [c for c in nodes[s].get("children") or [] if c in pset and c not in seen]
+            height[s] = 1 + max([_height(c, seen + (s,)) for c in kids] or [0])
+        return height[s]
+
+    parents.sort(key=lambda s: (_height(s), s))
+    if args.parent:
+        if args.parent not in parents:
+            print("kb-child-rollup: {!r} is not a parent node in {}".format(args.parent, hpath),
+                  file=sys.stderr)
+            return 2
+        parents = [args.parent]
+
+    L = LABELS["ru"] if owner_language(hub) == "ru" else LABELS["en"]
+    today = datetime.date.today().isoformat()
+    outcome = {}
+    for slug in parents:
+        rec = process_parent(slug, nodes, L, today, args.dry_run)
+        outcome[slug] = rec
+        line = "{}: {}".format(slug, rec["result"])
+        if rec["reason"]:
+            line += " ({})".format(rec["reason"])
+        print(line)
+
+    if not args.dry_run:
+        write_outcome(hub, today, outcome)
+    failed = [(s, r) for s, r in outcome.items() if r["result"].startswith("failed:")]
+    for s, r in failed:
+        print("kb-child-rollup: {}: {} — {}".format(s, r["result"], r["reason"]), file=sys.stderr)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

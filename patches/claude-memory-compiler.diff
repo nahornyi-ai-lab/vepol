@@ -45,135 +45,9 @@ index 3c27a89..540f4f6 100644
  
      # Spawn flush.py as a background process
      flush_script = SCRIPTS_DIR / "flush.py"
-diff --git a/scripts/flush.py b/scripts/flush.py
-index 3cb25c4..374980b 100644
---- a/scripts/flush.py
-+++ b/scripts/flush.py
-@@ -22,6 +22,7 @@ import sys
- import time
- from datetime import datetime, timezone
- from pathlib import Path
-+from _redact import redact  # C-06: token-shape redaction before any write
- 
- ROOT = Path(__file__).resolve().parent.parent
- DAILY_DIR = ROOT / "daily"
-@@ -54,7 +55,66 @@ def save_flush_state(state: dict) -> None:
- 
- 
- def append_to_daily_log(content: str, section: str = "Session") -> None:
--    """Append content to today's daily log."""
-+    """Append content to today's daily log.
-+
-+    PATCHED for per-project integration:
-+    - If CLAUDE_KB_DAILY_DIR is set, writes to that dir instead of module-default DAILY_DIR.
-+    - If CLAUDE_KB_LOG_FILE is set, also appends a one-line cross-reference to user's curated log.md.
-+    """
-+    target_daily_env = os.environ.get("CLAUDE_KB_DAILY_DIR")
-+    target_log_env = os.environ.get("CLAUDE_KB_LOG_FILE")
-+    target_project_slug = os.environ.get("CLAUDE_KB_PROJECT_SLUG")
-+
-+    if target_daily_env:
-+        now = datetime.now(timezone.utc).astimezone()
-+        date_str = now.strftime("%Y-%m-%d")
-+        time_str = now.strftime("%H:%M")
-+
-+        daily_dir = Path(target_daily_env)
-+        daily_dir.mkdir(parents=True, exist_ok=True)
-+        log_path = daily_dir / f"{date_str}.md"
-+        if not log_path.exists():
-+            log_path.write_text(
-+                f"# Daily Log: {date_str}\n\n## Sessions\n\n",
-+                encoding="utf-8",
-+            )
-+        # C-06: redact token-shapes immediately before write.
-+        entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")
-+        with open(log_path, "a", encoding="utf-8") as f:
-+            f.write(entry)
-+
-+        if target_log_env:
-+            import re as _re
-+            log_file = Path(target_log_env)
-+            first = ""
-+            for line in content.strip().splitlines():
-+                stripped = line.strip()
-+                if not stripped or stripped.startswith("#"):
-+                    continue
-+                # Strip "**Context:**" and similar bold labels, then remaining asterisks
-+                stripped = _re.sub(r'\*+\s*Context\s*:\s*\*+\s*', '', stripped, flags=_re.IGNORECASE)
-+                stripped = stripped.strip("*").strip()
-+                if stripped:
-+                    first = stripped
-+                    break
-+            if len(first) > 100:
-+                first = first[:100] + "..."
-+            if not first:
-+                first = "(session captured)"
-+            slug_part = f"{target_project_slug} | " if target_project_slug else ""
-+            entry_line = (
-+                f"\n## [{date_str} {time_str}] session | {slug_part}{first}\n"
-+                f"Details: [[daily/{date_str}]]\n"
-+            )
-+            entry_line = redact(entry_line)  # C-06: defense-in-depth on cross-ref
-+            try:
-+                with open(log_file, "a", encoding="utf-8") as f:
-+                    f.write(entry_line)
-+            except Exception as e:
-+                logging.error("Failed to cross-ref to log.md: %s", e)
-+        return
-+
-+    # Original upstream behavior (unchanged)
-     today = datetime.now(timezone.utc).astimezone()
-     log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
- 
-@@ -66,7 +126,7 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
-         )
- 
-     time_str = today.strftime("%H:%M")
--    entry = f"### {section} ({time_str})\n\n{content}\n\n"
-+    entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")  # C-06
- 
-     with open(log_path, "a", encoding="utf-8") as f:
-         f.write(entry)
-@@ -144,6 +204,10 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
- 
- def maybe_trigger_compilation() -> None:
-     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-+    # PATCH: per-project integration disables compile via env var
-+    if os.environ.get("CLAUDE_KB_NO_COMPILE"):
-+        return
-+
-     import subprocess as _sp
- 
-     now = datetime.now(timezone.utc).astimezone()
-@@ -225,15 +289,20 @@ def main():
-     # Run the LLM extraction
-     response = asyncio.run(run_flush(context))
- 
--    # Append to daily log
-+    # Append to daily log.
-+    # PATCH: in per-project mode (CLAUDE_KB_DAILY_DIR set), skip FLUSH_OK/FLUSH_ERROR
-+    # to avoid noise in user's curated log.md cross-reference.
-+    per_project_mode = bool(os.environ.get("CLAUDE_KB_DAILY_DIR"))
-     if "FLUSH_OK" in response:
-         logging.info("Result: FLUSH_OK")
--        append_to_daily_log(
--            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
--        )
-+        if not per_project_mode:
-+            append_to_daily_log(
-+                "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
-+            )
-     elif "FLUSH_ERROR" in response:
-         logging.error("Result: %s", response)
--        append_to_daily_log(response, "Memory Flush")
-+        if not per_project_mode:
-+            append_to_daily_log(response, "Memory Flush")
-     else:
-         logging.info("Result: saved to daily log (%d chars)", len(response))
-         append_to_daily_log(response, "Session")
 diff --git a/scripts/_redact.py b/scripts/_redact.py
 new file mode 100644
-index 0000000..b11aaec
+index 0000000..7d4eeaf
 --- /dev/null
 +++ b/scripts/_redact.py
 @@ -0,0 +1,61 @@
@@ -238,9 +112,273 @@ index 0000000..b11aaec
 +        else:
 +            out = pat.sub(f"[REDACTED-{tag}]", out)
 +    return out
+diff --git a/scripts/flush.py b/scripts/flush.py
+index 3cb25c4..2ef27ed 100644
+--- a/scripts/flush.py
++++ b/scripts/flush.py
+@@ -22,6 +22,7 @@ import sys
+ import time
+ from datetime import datetime, timezone
+ from pathlib import Path
++from _redact import redact  # C-06: token-shape redaction before any write
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+ DAILY_DIR = ROOT / "daily"
+@@ -53,8 +54,69 @@ def save_flush_state(state: dict) -> None:
+     STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+ 
+ 
+-def append_to_daily_log(content: str, section: str = "Session") -> None:
+-    """Append content to today's daily log."""
++def append_to_daily_log(content: str, section: str = "Session", env: dict | None = None,
++                        when: datetime | None = None) -> None:
++    """Append content to today's daily log.
++
++    PATCHED for per-project integration:
++    - If CLAUDE_KB_DAILY_DIR is set, writes to that dir instead of module-default DAILY_DIR.
++    - If CLAUDE_KB_LOG_FILE is set, also appends a one-line cross-reference to user's curated log.md.
++    """
++    env = os.environ if env is None else env
++    target_daily_env = env.get("CLAUDE_KB_DAILY_DIR")
++    target_log_env = env.get("CLAUDE_KB_LOG_FILE")
++    target_project_slug = env.get("CLAUDE_KB_PROJECT_SLUG")
++
++    if target_daily_env:
++        now = when or datetime.now(timezone.utc).astimezone()
++        date_str = now.strftime("%Y-%m-%d")
++        time_str = now.strftime("%H:%M")
++
++        daily_dir = Path(target_daily_env)
++        daily_dir.mkdir(parents=True, exist_ok=True)
++        log_path = daily_dir / f"{date_str}.md"
++        if not log_path.exists():
++            log_path.write_text(
++                f"# Daily Log: {date_str}\n\n## Sessions\n\n",
++                encoding="utf-8",
++            )
++        # C-06: redact token-shapes immediately before write.
++        entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")
++        with open(log_path, "a", encoding="utf-8") as f:
++            f.write(entry)
++
++        if target_log_env:
++            import re as _re
++            log_file = Path(target_log_env)
++            first = ""
++            for line in content.strip().splitlines():
++                stripped = line.strip()
++                if not stripped or stripped.startswith("#"):
++                    continue
++                # Strip "**Context:**" and similar bold labels, then remaining asterisks
++                stripped = _re.sub(r'\*+\s*Context\s*:\s*\*+\s*', '', stripped, flags=_re.IGNORECASE)
++                stripped = stripped.strip("*").strip()
++                if stripped:
++                    first = stripped
++                    break
++            if len(first) > 100:
++                first = first[:100] + "..."
++            if not first:
++                first = "(session captured)"
++            slug_part = f"{target_project_slug} | " if target_project_slug else ""
++            entry_line = (
++                f"\n## [{date_str} {time_str}] session | {slug_part}{first}\n"
++                f"Details: [[daily/{date_str}]]\n"
++            )
++            entry_line = redact(entry_line)  # C-06: defense-in-depth on cross-ref
++            try:
++                with open(log_file, "a", encoding="utf-8") as f:
++                    f.write(entry_line)
++            except Exception as e:
++                logging.error("Failed to cross-ref to log.md: %s", e)
++        return
++
++    # Original upstream behavior (unchanged)
+     today = datetime.now(timezone.utc).astimezone()
+     log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+ 
+@@ -66,7 +128,7 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
+         )
+ 
+     time_str = today.strftime("%H:%M")
+-    entry = f"### {section} ({time_str})\n\n{content}\n\n"
++    entry = redact(f"### {section} ({time_str})\n\n{content}\n\n")  # C-06
+ 
+     with open(log_path, "a", encoding="utf-8") as f:
+         f.write(entry)
+@@ -115,16 +177,18 @@ respond with exactly: FLUSH_OK
+ {context}"""
+ 
+     response = ""
++    stderr_lines: list[str] = []
++    options = ClaudeAgentOptions(
++        cwd=str(ROOT),
++        allowed_tools=[],
++        max_turns=2,
++        stderr=lambda line: stderr_lines.append(line),
++    )
++    if os.environ.get("KB_FLUSH_CLAUDE_BIN"):
++        options.cli_path = os.environ["KB_FLUSH_CLAUDE_BIN"]
+ 
+     try:
+-        async for message in query(
+-            prompt=prompt,
+-            options=ClaudeAgentOptions(
+-                cwd=str(ROOT),
+-                allowed_tools=[],
+-                max_turns=2,
+-            ),
+-        ):
++        async for message in query(prompt=prompt, options=options):
+             if isinstance(message, AssistantMessage):
+                 for block in message.content:
+                     if isinstance(block, TextBlock):
+@@ -134,7 +198,8 @@ respond with exactly: FLUSH_OK
+     except Exception as e:
+         import traceback
+         logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
+-        response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
++        reason = next((ln.strip() for ln in reversed(stderr_lines) if ln.strip()), "")
++        response = f"FLUSH_ERROR: {redact(reason or f'{type(e).__name__}: {e}')}"
+ 
+     return response
+ 
+@@ -144,6 +209,10 @@ COMPILE_AFTER_HOUR = 18  # 6 PM local time
+ 
+ def maybe_trigger_compilation() -> None:
+     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
++    # PATCH: per-project integration disables compile via env var
++    if os.environ.get("CLAUDE_KB_NO_COMPILE"):
++        return
++
+     import subprocess as _sp
+ 
+     now = datetime.now(timezone.utc).astimezone()
+@@ -189,6 +258,76 @@ def maybe_trigger_compilation() -> None:
+         logging.error("Failed to spawn compile.py: %s", e)
+ 
+ 
++PENDING_DIR = SCRIPTS_DIR / "pending"
++FAILED_DIR = SCRIPTS_DIR / "failed"
++PENDING_ENV_KEYS = ("CLAUDE_KB_DAILY_DIR", "CLAUDE_KB_LOG_FILE", "CLAUDE_KB_PROJECT_SLUG")
++RETRY_PER_RUN = 3
++MAX_ATTEMPTS = 5
++
++
++def keep_failed(context_file: Path, session_id: str, reason: str) -> bool:
++    """Move a failed context into pending/ with a sidecar; False if not possible."""
++    try:
++        PENDING_DIR.mkdir(exist_ok=True)
++        target = PENDING_DIR / context_file.name
++        sidecar = {
++            "session_id": session_id,
++            "env": {k: os.environ[k] for k in PENDING_ENV_KEYS if os.environ.get(k)},
++            "attempts": 1,
++            "last_reason": reason,
++            "captured_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
++        }
++        target.with_suffix(".json").write_text(json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
++        context_file.replace(target)
++        return True
++    except OSError as e:
++        logging.error("Cannot keep failed context %s: %s", context_file, e)
++        return False
++
++
++def _move_pair(md: Path, dest: Path) -> None:
++    dest.mkdir(exist_ok=True)
++    for f in (md, md.with_suffix(".json")):
++        if f.exists():
++            f.replace(dest / f.name)
++
++
++def retry_pending() -> None:
++    """Retry up to RETRY_PER_RUN oldest pending summaries (the model works right now)."""
++    if not PENDING_DIR.is_dir():
++        return
++    items = sorted(PENDING_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime)[:RETRY_PER_RUN]
++    for md in items:
++        side_path = md.with_suffix(".json")
++        try:
++            side = json.loads(side_path.read_text(encoding="utf-8"))
++            env = dict(side["env"])
++            when = datetime.fromisoformat(side["captured_at"])
++            context = md.read_text(encoding="utf-8").strip()
++        except (OSError, ValueError, KeyError, TypeError) as e:
++            logging.error("Bad pending item %s: %s", md.name, e)
++            try:
++                side_path.write_text(json.dumps({"last_reason": "bad sidecar"}), encoding="utf-8")
++            except OSError:
++                pass
++            _move_pair(md, FAILED_DIR)
++            continue
++        response = asyncio.run(run_flush(context))
++        if "FLUSH_ERROR" in response:
++            side["attempts"] = int(side.get("attempts", 1)) + 1
++            side["last_reason"] = response.removeprefix("FLUSH_ERROR: ")
++            side_path.write_text(json.dumps(side, ensure_ascii=False), encoding="utf-8")
++            logging.error("Retry failed for %s (attempt %d): %s", md.name, side["attempts"], side["last_reason"])
++            if side["attempts"] >= MAX_ATTEMPTS:
++                _move_pair(md, FAILED_DIR)
++            continue
++        if "FLUSH_OK" not in response:
++            append_to_daily_log(response, "Session, retried", env=env, when=when)
++        logging.info("Retried pending %s: %s", md.name, "FLUSH_OK" if "FLUSH_OK" in response else "saved")
++        md.unlink(missing_ok=True)
++        side_path.unlink(missing_ok=True)
++
++
+ def main():
+     if len(sys.argv) < 3:
+         logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
+@@ -225,15 +364,22 @@ def main():
+     # Run the LLM extraction
+     response = asyncio.run(run_flush(context))
+ 
+-    # Append to daily log
++    # Append to daily log.
++    # PATCH: in per-project mode (CLAUDE_KB_DAILY_DIR set), skip FLUSH_OK/FLUSH_ERROR
++    # to avoid noise in user's curated log.md cross-reference.
++    per_project_mode = bool(os.environ.get("CLAUDE_KB_DAILY_DIR"))
+     if "FLUSH_OK" in response:
+         logging.info("Result: FLUSH_OK")
+-        append_to_daily_log(
+-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+-        )
++        if not per_project_mode:
++            append_to_daily_log(
++                "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
++            )
+     elif "FLUSH_ERROR" in response:
+         logging.error("Result: %s", response)
+-        append_to_daily_log(response, "Memory Flush")
++        if not per_project_mode:
++            append_to_daily_log(response, "Memory Flush")
++        elif keep_failed(context_file, session_id, response.removeprefix("FLUSH_ERROR: ")):
++            logging.info("Kept failed context in pending/ for retry")
+     else:
+         logging.info("Result: saved to daily log (%d chars)", len(response))
+         append_to_daily_log(response, "Session")
+@@ -241,9 +387,16 @@ def main():
+     # Update dedup state
+     save_flush_state({"session_id": session_id, "timestamp": time.time()})
+ 
+-    # Clean up context file
++    # Clean up context file (a failed one was already moved to pending/)
+     context_file.unlink(missing_ok=True)
+ 
++    # The model works right now: retry summaries that failed earlier.
++    if per_project_mode and "FLUSH_ERROR" not in response:
++        try:
++            retry_pending()
++        except Exception as e:  # never break the hook path
++            logging.error("retry_pending failed: %s", e)
++
+     # End-of-day auto-compilation: if it's past the compile hour and today's
+     # log hasn't been compiled yet, trigger compile.py in the background.
+     maybe_trigger_compilation()
 diff --git a/scripts/test_redact.py b/scripts/test_redact.py
 new file mode 100644
-index 0000000..8962ae5
+index 0000000..47b9c04
 --- /dev/null
 +++ b/scripts/test_redact.py
 @@ -0,0 +1,90 @@
