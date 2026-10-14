@@ -1,14 +1,12 @@
-<p align="center">
-  <img src="face/desktop/icon/vepol-icon-1024.png" alt="Vepol" width="96">
-</p>
-
-<h1 align="center">Your agents forget. Vepol remembers.</h1>
-
-<p align="center">One memory for all your AI agents — on your Mac, in plain files you own.</p>
+<h1 align="center">Vepol — your second inner voice</h1>
 
 <p align="center">
-  <img src="docs/readme/hero.gif" alt="Vepol Desktop: the Memory screen, a project, starting an agent session, the agent working in the built-in terminal, and every task" width="800">
+  <img src="docs/visuals/vepol-cover.png" alt="Vepol, your second inner voice: a personal AI assistant that grows with you, with you in control and every step written down in plain Markdown" width="800">
+  <br><sub>The autonomy stages and the self-updating strategy on the cover show where Vepol is heading; <a href="#grows-with-you">Grows with you</a> says what runs today.</sub>
 </p>
+
+<p align="center"><b>Your personal AI assistant that grows with you.</b><br>
+A digital twin of your work: it knows your projects, plans your day, runs your routine and is built to take on more of it over time — while you stay in control of every step.</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg" alt="License: FSL-1.1-MIT"></a>
@@ -18,17 +16,40 @@
 
 ## What it is
 
-Every agent session starts blank. What you decided last week lives in an old chat, and when you switch from Claude Code to Codex you explain the project all over again.
+Most AI tools wait for you to ask. They forget what you did yesterday, they do not know what matters to you this week, and every new chat starts from zero.
 
-Vepol is an AI partner built on one shared memory. Each project gets a `knowledge/` folder — where things stand, what happened, what is next, what was decided — that every agent reads at the start of a session and writes back to as it works. Vepol Desktop shows you that memory and runs your agents in a real terminal right next to it. Scheduled routines, like the morning brief and the evening retro, work over the same files.
+Vepol works the other way round. It is a personal assistant that lives on your Mac and works alongside you. It keeps a living picture of your work — every project, where it stands, what you decided and why, what comes next — and uses it to plan your day and run your routine; taking on more of your work over time is where it is heading. Think of it as a digital twin of your work: with the optional session capture it learns how you work, and you decide how far it goes.
 
-You stay in control: the memory is plain Markdown on your Mac that you can read, edit and `grep`, and it stays yours whichever agent you use tomorrow. Vepol is source-available under FSL-1.1-MIT.
+It runs on the AI agents you already use — Claude Code, Codex and others — so you are never tied to one vendor. Everything it knows is plain Markdown on your Mac that you can read, edit and search. Vepol is source-available under FSL-1.1-MIT.
+
+## What it does for you
+
+- **Plans your day.** Each morning a short brief: your focus, the main actions, what changed and what needs your decision. ([more](docs/features.md#what-it-does-for-you))
+- **Runs your routine.** The morning brief, the evening retro and a daily learning digest on AI agents run on schedule, without a prompt, once you turn on scheduled routines at install; follow-up reminders can be switched on in `processes.yaml`. ([more](docs/features.md#background-processes-runtime))
+- **Remembers your work.** Each project keeps where it stands, what happened and why it was decided, so every agent you open starts from there, not from zero. ([how](#how-it-works))
+- **Catches your ideas.** `kb-idea` turns a passing thought into a card you can triage, park or promote to a task. ([more](docs/features.md#idea-intake))
+- **Remembers people.** One card per person you work with, with follow-up reminders you can switch on. ([more](docs/features.md#people))
+- **Learns how you work** *(with the optional session capture)*. Decisions, lessons and patterns from each session feed the next plan. ([more](docs/features.md#what-it-does-for-you))
+- **Shows you everything in one app.** Vepol Desktop: your memory, every project, your agents in a real terminal, every task and routine. ([more](docs/features.md#vepol-desktop))
+- **Looks after your health and goals** *(in progress)*. Today the brief can show sleep and health from a daily file you supply; device data and lighter plans after bad nights come next. ([more](docs/health-in-the-brief.md))
 
 ## Watch: a day with Vepol (1:42)
 
 https://github.com/user-attachments/assets/67d66222-6b72-45f4-b2d2-3746f6f7ad2b
 
+## Grows with you
+
+<img src="docs/visuals/vepol-autonomy-growth.png" alt="The direction for autonomy: from drafting assistant on day one to trusted proxy later, every action logged and you in control" width="800">
+
+Vepol is built to take on more of your work over time. Every kind of task starts supervised: Vepol drafts, you edit. Where your edits approach zero, that kind of task graduates to running on its own; where you keep correcting, it stays supervised. Every meaningful action leaves a dated line in plain text that you can read and edit.
+
+Where it is today: once you turn on scheduled routines at install, the daily routine (morning brief, evening retro, learning digest) runs on its own, and every run is logged; follow-up reminders join it when you switch them on. The picture shows the direction, not today's product: graduating other kinds of tasks one by one, the health brake from device data and the figures in it are not shipped yet.
+
 ## See it
+
+<p align="center">
+  <img src="docs/readme/hero.gif" alt="Vepol Desktop: the Memory screen, a project, starting an agent session, the agent working in the built-in terminal, and every task" width="800">
+</p>
 
 Screenshots from Vepol Desktop on an invented demo workspace.
 
@@ -61,6 +82,8 @@ Screenshots from Vepol Desktop on an invented demo workspace.
 **Tasks** — every project's tasks in one table; start an agent session from any of them.
 
 ## How it works
+
+**Your agents forget. Vepol remembers.** Under the hood, your assistant runs on one shared memory that every agent reads and writes.
 
 <img src="docs/readme/how-it-works.png" alt="Diagram: agents read and write one knowledge folder per project; Vepol Desktop shows it; scheduled routines run over it" width="800">
 
@@ -122,18 +145,6 @@ open desktop/build/VepolDesktop.app
 ```
 
 To look around before you point it at your own work, run `./demo.sh` from `face/` after the build: it opens the app on an invented company with three projects, in a fresh copy that never touches your `~/knowledge`.
-
-## What's inside
-
-- [**Vepol Desktop**](docs/features.md#vepol-desktop) — the native macOS app: Memory, project screens, agents in a real terminal, every task and routine.
-- [**Visible trail**](docs/features.md#visible-discipline) — every meaningful action leaves dated Markdown in the log, tasks and decisions that you can read, edit or `grep` later.
-- [**Task board**](docs/features.md#task-board) — `kb-board` turns `backlog.md` into a board agents claim, review and close; no database.
-- [**Scheduled routines**](docs/features.md#background-processes-runtime) — jobs that run on a schedule over the same files, all listed in one config file.
-- [**Morning brief and evening retro**](docs/features.md#what-it-does-for-you) — a short plan for the day and a look back at it.
-- [**Daily learning**](docs/features.md#background-processes-runtime) — up to three new arXiv papers a day as a short text digest; `kb-daily-research` gives a one-topic deep dive on demand.
-- [**Ideas**](docs/features.md#idea-intake) — `kb-idea` turns a passing thought into a card you can triage or promote to a task.
-- [**People**](docs/features.md#people) — one Markdown card per person, with follow-up reminders.
-- [**Runtime registry**](docs/features.md#runtime-registry) — which of your agent CLIs can actually work right now.
 
 ## Status
 
