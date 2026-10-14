@@ -15,11 +15,14 @@ import subprocess
 import types
 from datetime import date as Date, datetime, time, timedelta
 
+from .failure_reason import failure_reason
+
 HISTORY_DAYS = 14
 TICK_GRACE = timedelta(minutes=20)  # one 900 s tick + 5 min
 # after:P needs two ticks: one records P's success, the next sees it and launches.
 AFTER_GRACE = timedelta(minutes=35)
 REASON_MAX = 160
+TICK_MAX_ATTEMPTS = 4  # kb-tick's KB_TICK_MAX_ATTEMPTS default
 TAIL_BYTES = 64 * 1024
 TAIL_LINES = 200
 LOG_BYTES = 4 * 1024 * 1024
@@ -145,6 +148,11 @@ def _read_json(path: pathlib.Path):
 
 def _fired_key(pid: str) -> str:
     return LEGACY_FIRED_KEYS.get(pid, pid.replace("-", "_") + "_fired")
+
+
+def _tick_key(pid: str, field: str) -> str:
+    """kb-tick's per-occurrence plan fields: <pid>_missed, <pid>_attempts, <pid>_next_attempt_at."""
+    return pid.replace("-", "_") + "_" + field
 
 
 def _argv(run: str) -> list[str]:
@@ -385,7 +393,7 @@ def _hermes_rows(notes: list[dict]) -> list[dict]:
             "schedule_text": schedule.get("display") if isinstance(schedule, dict) else schedule,
             "enabled": job.get("enabled"), "job_state": job.get("state"),
             "state": state, "state_text": text,
-            "reason": error.splitlines()[0] if error else "",
+            "reason": failure_reason(error)[1] if error else "",
             "last_run_at": job.get("last_run_at"), "next_run_at": job.get("next_run_at"),
             "failure_streak": job.get("failure_streak"),
         })
@@ -517,7 +525,7 @@ class _Model:
             reason += f" ({data['failed_stage']})"
         error = str(data.get("error") or "").strip()
         if error:
-            reason += ": " + error.splitlines()[0]
+            reason += ": " + failure_reason(error)[1]
         return "failed_in_result", _clip(reason)
 
     # -- today
@@ -557,6 +565,16 @@ class _Model:
             state, reason = self._success_state(proc, day, win)
             end = self._window(win)[1] if win else None
             return self._state(state, reason, succeeded=True, success_end=end)
+        missed = self.plan.get(_tick_key(pid, "missed"))
+        if isinstance(missed, dict):
+            code = str(missed.get("reason_code") or "other")
+            why = str(missed.get("reason") or "no reason recorded")
+            return self._state("missed", _clip(f"[{code}] {why}"), text="Did not run today")
+        tries = self.plan.get(_tick_key(pid, "attempts"))
+        retry_at = _parse_ts(self.plan.get(_tick_key(pid, "next_attempt_at")), self.tz)
+        if type(tries) is int and tries >= 1 and retry_at and retry_at > self.now:
+            text = f"Retry scheduled at {retry_at:%H:%M} (attempt {tries + 1} of {TICK_MAX_ATTEMPTS})"
+            return self._state("waiting", self._reason(attempts[-1]) if attempts else "", text=text)
         if attempts:
             return self._state("failed", self._reason(attempts[-1]))
         if when.startswith("after:"):
@@ -609,8 +627,8 @@ class _Model:
             return "—"
         if when.startswith("after:"):
             text = f"after {when[len('after:'):]}"
-        elif t["succeeded"] or t["state"] == "running":
-            text = f"tomorrow ≈{when}"
+        elif t["succeeded"] or t["state"] == "running" or isinstance(self.plan.get(_tick_key(proc["id"], "missed")), dict):
+            text = f"tomorrow ≈{when}"  # kb-tick does not retry a missed occurrence today
         elif self.now < self._clock(when):
             text = f"today ≈{when}"
         else:
