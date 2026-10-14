@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import automations as automations_mod
 from . import broker as broker_mod
+from . import dayplan as dayplan_mod
 from . import knowledge_files as knowledge_mod
 from . import memory as memory_mod
 from . import runtimes as runtimes_mod
@@ -58,6 +59,7 @@ def _conversation_summary(conv: Conversation) -> dict:
         "last_activity_at": max((at for at in timestamps if at), default=conv.created_at),
         "activity": "running" if running else (conv.runs[-1].status if conv.runs else "idle"),
         "task": conv.task, "task_status": conv.task_status, "terminal_name": conv.terminal_name,
+        "day_plan": conv.day_plan,
     }
 
 
@@ -360,6 +362,14 @@ def create_app(
     async def api_task_reopen(request: Request) -> dict:
         return await change_task("reopen", request)
 
+    # The Today card: kb-dayplan's stored plan (or its absence, or the reason it could not be read).
+    @app.get("/api/dayplan", dependencies=auth_dep)
+    def api_dayplan(date: str | None = None) -> dict:
+        try:
+            return dayplan_mod.read_plan(hub_path, date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/memory", dependencies=auth_dep)
     def api_memory() -> dict:
         return memory_mod.cards(hub_path)
@@ -426,8 +436,23 @@ def create_app(
                     # Starting a task again opens its open session; a plain create always makes a new one.
                     return {"id": existing.id, "target": existing.target, "runtime": existing.runtime,
                             "transport": existing.transport, "existing": True}
+        day_plan = body.get("day_plan")
+        if day_plan is not None:
+            try:
+                day_plan = dayplan_mod.check_date(day_plan)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="day_plan must be a date like 2026-10-15")
+            if mode != "terminal":
+                # Only a terminal session can start without the calendar connector.
+                raise HTTPException(status_code=400, detail="day_plan needs a terminal session")
+            for existing in app.state.store.list_conversations():
+                if existing.day_plan == day_plan and existing.board_stage != "completed":
+                    # Planning the same day again opens its open session.
+                    return {"id": existing.id, "target": existing.target, "runtime": existing.runtime,
+                            "transport": existing.transport, "existing": True}
+            target, title = "hub", f"Plan my day · {dayplan_mod.short_date(day_plan)}"
         conv = app.state.store.create_conversation(target=target, runtime=runtime, title=title, transport=mode,
-                                                   task=task)
+                                                   task=task, day_plan=day_plan)
         if board_stage is not None:
             conv = app.state.store.update_board_stage(conv.id, board_stage)
         if task is not None:
@@ -453,6 +478,7 @@ def create_app(
             "title": conv.title,
             "board_stage": conv.board_stage, "board_updated_at": conv.board_updated_at,
             "task": conv.task, "task_status": conv.task_status, "terminal_name": conv.terminal_name,
+            "day_plan": conv.day_plan,
             **app.state.sessions.describe(conv),
             "messages": [
                 {"role": m.role, "text": m.text, "at": m.at, "meta": m.meta}

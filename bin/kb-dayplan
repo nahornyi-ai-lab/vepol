@@ -1,0 +1,746 @@
+#!/usr/bin/env python3
+"""kb-dayplan — the one saved plan for a day, and the only way to put it in the calendar.
+
+A day plan is a small JSON file the owner and an agent build together in a
+dialog. `kb-dayplan` is the only writer of that file, and the only command that
+writes the agreed blocks to Google Calendar — and only after an explicit,
+separate request.
+
+Commands:
+  kb-dayplan show    [--date D] [--json]
+  kb-dayplan set     [--date D] --goal G [--goal-source S] [--outcome O]...
+                     [--block "HH:MM-HH:MM|title|kind"]...
+                     [--fixed "HH:MM-HH:MM|title"]... --change "<what changed>"
+  kb-dayplan confirm [--date D] --version N --said "<owner's words>"
+  kb-dayplan calendar [--date D] --version N --said "<owner's words>"
+
+`set` replaces the whole plan content and writes version N+1 as a Draft. A
+block keeps its id (and calendar event id) when a block with the same title
+existed in the previous version. `confirm` records the owner's yes for the
+current version. `calendar` re-checks the day, writes only the agreed
+non-fixed blocks, reads the calendar back and reports exactly what is there.
+
+File:  <hub>/personal/day-plans/<date>.json  (mode 0600, schema day-plan/v1)
+Exit:  0 ok; 2 refused (bad input, wrong version, gate, no usable time zone);
+       3 calendar not (fully) written (clash, partial write, unreachable).
+
+Environment:
+  KB_HUB                 hub root (default ~/knowledge)
+  KB_CALENDAR_DISABLE=1  calendar writes and reads refuse
+  KB_CALENDAR_FAKE_DIR   tests: route the calendar through the fake backend
+  TZ                     IANA zone name (default: the /etc/localtime link)
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from _kb_calendar import adapter as cal_adapter  # noqa: E402
+from _kb_calendar.errors import CalendarError  # noqa: E402
+
+SCHEMA = "day-plan/v1"
+PROMPT_FILE = "day-plan-prompt.md"
+APPLIED = ("In calendar", "Partial", "Conflict")
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RANGE_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
+
+
+class Refused(Exception):
+    """A request kb-dayplan will not carry out (exit 2)."""
+
+
+# ── paths, zone, lock ───────────────────────────────────────────────────────
+def hub_path() -> Path:
+    return Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
+
+
+def plan_dir() -> Path:
+    return hub_path() / "personal" / "day-plans"
+
+
+def plan_path(date: str) -> Path:
+    return plan_dir() / f"{date}.json"
+
+
+def prompt_path() -> str:
+    return os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), PROMPT_FILE)
+
+
+def local_zone_name():
+    """IANA name of the system zone: TZ if valid, else the /etc/localtime link."""
+    tz = os.environ.get("TZ", "").strip().lstrip(":")
+    if tz:
+        try:
+            ZoneInfo(tz)
+            return tz
+        except Exception:  # noqa: BLE001 - TZ may be a POSIX string, not a name
+            pass
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return None
+    if "zoneinfo/" in target:
+        name = target.split("zoneinfo/", 1)[1]
+        try:
+            ZoneInfo(name)
+            return name
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def require_zone() -> str:
+    zone = local_zone_name()
+    if zone is None:
+        raise Refused(
+            "cannot determine the system time zone (TZ is not a valid IANA name "
+            "and /etc/localtime does not point into zoneinfo); nothing was written. "
+            "Set TZ, for example TZ=Europe/Berlin, and run the command again."
+        )
+    return zone
+
+
+def today_str() -> str:
+    zone = local_zone_name()
+    now = datetime.now(ZoneInfo(zone)) if zone else datetime.now()
+    return now.date().isoformat()
+
+
+def now_iso(zone: str) -> str:
+    return datetime.now(ZoneInfo(zone)).isoformat(timespec="seconds")
+
+
+@contextlib.contextmanager
+def plan_lock(date: str, wait: float = 5.0):
+    """Exclusive lock on the plan of one date. Gives up after ``wait`` seconds
+    so a stuck writer is reported instead of hanging every later command."""
+    d = plan_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(d / f"{date}.json.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise Refused(
+                        f"another kb-dayplan command is writing the plan of {date}; "
+                        "wait for it to finish and run this command again")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def load_plan(date: str):
+    p = plan_path(date)
+    if not p.exists():
+        return None
+    try:
+        plan = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise Refused(f"cannot read {p}: {e}")
+    if not isinstance(plan, dict):
+        raise Refused(f"{p} is not a day-plan object")
+    return plan
+
+
+def save_plan(date: str, plan: dict) -> None:
+    """Atomic write: temp file in the same folder, fsync, rename. Mode 0600."""
+    d = plan_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    final = plan_path(date)
+    tmp = d / f".{date}.json.tmp-{os.getpid()}"
+    data = json.dumps(plan, ensure_ascii=False, indent=2) + "\n"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(str(tmp), 0o600)
+        os.replace(str(tmp), str(final))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(str(tmp))
+        raise
+
+
+# ── small helpers ───────────────────────────────────────────────────────────
+def check_date(value) -> str:
+    date = value or today_str()
+    if not _DATE_RE.match(date):
+        raise Refused(f"--date must be YYYY-MM-DD, got {date!r}")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise Refused(f"--date is not a real date: {date!r}")
+    return date
+
+
+def hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def to_minutes(value: str) -> int:
+    h, m = value.split(":")
+    return int(h) * 60 + int(m)
+
+
+def parse_range(text: str, label: str):
+    m = _RANGE_RE.match(text.strip())
+    if not m:
+        raise Refused(f"{label}: time range must look like HH:MM-HH:MM, got {text!r}")
+    start = int(m.group(1)) * 60 + int(m.group(2))
+    end = int(m.group(3)) * 60 + int(m.group(4))
+    if end <= start:
+        raise Refused(f"{label}: end must be after start, got {text!r}")
+    return start, end
+
+
+def block_num(block_id: str) -> int:
+    m = re.match(r"^b(\d+)$", str(block_id))
+    return int(m.group(1)) if m else 0
+
+
+def highest_block_number(plan) -> int:
+    """Highest block number ever used in this plan file."""
+    if not plan:
+        return 0
+    seen = [block_num(b.get("id")) for b in plan.get("blocks") or []]
+    calendar = plan.get("calendar") or {}
+    seen += [block_num(d.get("block")) for d in calendar.get("details") or []]
+    seen.append(int(plan.get("block_seq") or 0))
+    return max(seen) if seen else 0
+
+
+def parse_blocks(args) -> list:
+    """Turn --block / --fixed arguments into block dicts (without ids)."""
+    blocks = []
+    for raw in args.block or []:
+        parts = raw.split("|", 2)
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            raise Refused(f'--block must look like "HH:MM-HH:MM|title|kind", got {raw!r}')
+        start, end = parse_range(parts[0], "--block")
+        kind = parts[2].strip()
+        if kind.lower() == "fixed":
+            raise Refused('--block kind "fixed" is reserved: use --fixed "HH:MM-HH:MM|title"')
+        blocks.append({"start": start, "end": end, "title": parts[1].strip(),
+                       "kind": kind, "fixed": False})
+    for raw in args.fixed or []:
+        parts = raw.split("|", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            raise Refused(f'--fixed must look like "HH:MM-HH:MM|title", got {raw!r}')
+        start, end = parse_range(parts[0], "--fixed")
+        blocks.append({"start": start, "end": end, "title": parts[1].strip(),
+                       "kind": "fixed", "fixed": True})
+    free = sorted((b for b in blocks if not b["fixed"]), key=lambda b: (b["start"], b["end"]))
+    fixed = [b for b in blocks if b["fixed"]]
+    # Agreed blocks may not overlap each other or a fixed block. Two fixed blocks
+    # may overlap: they are real calendar events, and meetings do double-book.
+    for a, b in zip(free, free[1:]):
+        if b["start"] < a["end"]:
+            raise Refused(
+                f"blocks overlap: {hhmm(a['start'])}-{hhmm(a['end'])} {a['title']!r} and "
+                f"{hhmm(b['start'])}-{hhmm(b['end'])} {b['title']!r}")
+    for a in free:
+        for f in fixed:
+            if a["start"] < f["end"] and f["start"] < a["end"]:
+                raise Refused(
+                    f"blocks overlap: {hhmm(a['start'])}-{hhmm(a['end'])} {a['title']!r} and "
+                    f"fixed {hhmm(f['start'])}-{hhmm(f['end'])} {f['title']!r}")
+    return sorted(blocks, key=lambda b: (b["start"], b["end"], b["fixed"]))
+
+
+def assign_ids(new_blocks: list, previous: list, seq: int):
+    """A block keeps the id and event_id of the previous version's block with the
+    same title (same fixedness); every other block gets the next free id."""
+    pool = {}
+    for old in previous:
+        pool.setdefault((old.get("title"), bool(old.get("fixed"))), []).append(old)
+    out = []
+    for b in new_blocks:
+        match = pool.get((b["title"], b["fixed"]))
+        old = match.pop(0) if match else None
+        if old is not None:
+            block_id, event_id = old["id"], old.get("event_id")
+        else:
+            seq += 1
+            block_id, event_id = f"b{seq}", None
+        out.append({"id": block_id, "start": hhmm(b["start"]), "end": hhmm(b["end"]),
+                    "title": b["title"], "kind": b["kind"], "fixed": b["fixed"],
+                    "event_id": None if b["fixed"] else event_id})
+    return out, seq
+
+
+def current_version(plan) -> int:
+    return int(plan.get("version") or 0) if plan else 0
+
+
+# ── show ────────────────────────────────────────────────────────────────────
+def cmd_show(args) -> int:
+    date = check_date(args.date)
+    plan = load_plan(date)
+    if args.json:
+        if plan is None:
+            out = {"exists": False, "date": date, "prompt": prompt_path()}
+        else:
+            out = dict(plan)
+            out["exists"] = True
+            out["prompt"] = prompt_path()
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    if plan is None:
+        print(f"No plan for {date} yet.")
+        return 0
+    print(f"Day plan {date} - version {plan.get('version')} - {plan.get('status')}")
+    print(f"Goal: {plan.get('goal', '')}"
+          + (f"  (source: {plan['goal_source']})" if plan.get("goal_source") else ""))
+    for o in plan.get("outcomes") or []:
+        print(f"  Outcome: {o}")
+    for b in plan.get("blocks") or []:
+        flag = "fixed" if b.get("fixed") else b.get("kind", "")
+        mark = " [in calendar]" if b.get("event_id") else ""
+        print(f"  {b.get('start')}-{b.get('end')}  {b.get('title')}  ({flag}){mark}")
+    if not plan.get("blocks"):
+        print("  (no blocks)")
+    conf = plan.get("confirmed")
+    if conf:
+        print(f"Confirmed: version {conf.get('version')} at {conf.get('at')}")
+    cal = plan.get("calendar")
+    if cal:
+        print(f"Calendar: version {cal.get('version')} - {cal.get('result')} at {cal.get('at')}")
+    hist = plan.get("history") or []
+    if hist:
+        print(f"Last change: v{hist[-1].get('version')} - {hist[-1].get('change')}")
+    return 0
+
+
+# ── set ─────────────────────────────────────────────────────────────────────
+def cmd_set(args) -> int:
+    date = check_date(args.date)
+    zone = require_zone()
+    if not args.goal.strip():
+        raise Refused("--goal must not be empty")
+    if not args.change.strip():
+        raise Refused("--change must not be empty")
+    new_blocks = parse_blocks(args)
+    with plan_lock(date):
+        old = load_plan(date)
+        version = current_version(old) + 1
+        blocks, seq = assign_ids(new_blocks, (old or {}).get("blocks") or [],
+                                 highest_block_number(old))
+        at = now_iso(zone)
+        plan = {
+            "schema": SCHEMA,
+            "date": date,
+            "version": version,
+            "status": "Draft",
+            "goal": args.goal.strip(),
+            "goal_source": (args.goal_source or "").strip(),
+            "outcomes": [o.strip() for o in args.outcome or [] if o.strip()],
+            "blocks": blocks,
+            "confirmed": (old or {}).get("confirmed"),
+            "calendar": (old or {}).get("calendar"),
+            "history": list((old or {}).get("history") or [])
+            + [{"version": version, "at": at, "change": args.change.strip()}],
+            "block_seq": seq,
+        }
+        save_plan(date, plan)
+    print(f"Saved day plan {date} version {version} (Draft): "
+          f"{len(blocks)} blocks. Not confirmed, not in the calendar.")
+    return 0
+
+
+# ── confirm ─────────────────────────────────────────────────────────────────
+def cmd_confirm(args) -> int:
+    date = check_date(args.date)
+    zone = require_zone()
+    said = (args.said or "").strip()
+    if not said:
+        raise Refused("--said must carry the owner's words")
+    with plan_lock(date):
+        plan = load_plan(date)
+        if plan is None:
+            raise Refused(f"no plan for {date}")
+        cur = current_version(plan)
+        if args.version != cur:
+            raise Refused(f"version {args.version} is not the current version ({cur}) of {date}")
+        conf = plan.get("confirmed") or {}
+        if conf.get("version") == cur and plan.get("status") != "Draft":
+            print(f"Day plan {date} version {cur} is already confirmed ({plan.get('status')}).")
+            return 0
+        plan["status"] = "Confirmed"
+        plan["confirmed"] = {"version": cur, "at": now_iso(zone), "said": said}
+        save_plan(date, plan)
+    print(f"Confirmed day plan {date} version {cur}. Not in the calendar yet.")
+    return 0
+
+
+# ── calendar ────────────────────────────────────────────────────────────────
+def minutes_of(iso_local: str, date: str) -> int:
+    """Minutes from local midnight of ``date`` to a naive local ISO time."""
+    day0 = datetime.strptime(date, "%Y-%m-%d")
+    dt = datetime.strptime(iso_local, "%Y-%m-%dT%H:%M")
+    return int((dt - day0).total_seconds() // 60)
+
+
+def event_range(ev: dict, date: str) -> str:
+    return f"{hhmm(minutes_of(ev['start'], date) % 1440)}-{hhmm(minutes_of(ev['end'], date) % 1440)}"
+
+
+def own_events(events: list, date: str) -> dict:
+    """Marker events written for this date, grouped by block id."""
+    out = {}
+    for ev in events:
+        parsed = cal_adapter.parse_marker(ev.get("marker"))
+        if parsed and parsed[0] == date:
+            out.setdefault(parsed[1], []).append(ev)
+    return out
+
+
+def matches(ev: dict, block: dict, date: str) -> bool:
+    return (not ev.get("all_day")
+            and ev["start"] == f"{date}T{block['start']}"
+            and ev["end"] == f"{date}T{block['end']}"
+            and ev["title"] == block["title"])
+
+
+def find_clashes(events: list, agreed: list, date: str) -> list:
+    """Timed, busy events that are not this plan's own and overlap an agreed block."""
+    clashes = []
+    for ev in events:
+        parsed = cal_adapter.parse_marker(ev.get("marker"))
+        if (parsed and parsed[0] == date) or ev.get("all_day") or not ev.get("busy"):
+            continue
+        e_start, e_end = minutes_of(ev["start"], date), minutes_of(ev["end"], date)
+        for b in agreed:
+            if e_start < to_minutes(b["end"]) and e_end > to_minutes(b["start"]):
+                clashes.append((b, ev))
+    return clashes
+
+
+def plan_ops(agreed: list, events: list, date: str) -> list:
+    """Ops needed to make the calendar equal the agreed blocks.
+    Each op: {op, block, event (existing marker event or None)}."""
+    own = own_events(events, date)
+    agreed_ids = {b["id"] for b in agreed}
+    deletes, updates, creates, nones = [], [], [], []
+    for block_id in sorted(own, key=block_num):
+        if block_id not in agreed_ids:
+            for ev in own[block_id]:
+                deletes.append({"op": "delete", "block": block_id, "event": ev,
+                                "note": "block is no longer in the plan"})
+    for b in sorted(agreed, key=lambda x: block_num(x["id"])):
+        evs = own.get(b["id"], [])
+        if not evs:
+            creates.append({"op": "create", "block": b["id"], "spec": b, "event": None})
+            continue
+        keep = next((e for e in evs if matches(e, b, date)), evs[0])
+        for extra in evs:
+            if extra is not keep:
+                deletes.append({"op": "delete", "block": b["id"], "event": extra,
+                                "note": "duplicate event for this block"})
+        if matches(keep, b, date):
+            nones.append({"op": "none", "block": b["id"], "spec": b, "event": keep})
+        else:
+            updates.append({"op": "update", "block": b["id"], "spec": b, "event": keep})
+    return deletes + updates + creates + nones
+
+
+def day_event(b: dict, date: str, zone: str) -> dict:
+    return {"title": b["title"], "date": date, "start": b["start"], "end": b["end"],
+            "zone": zone, "marker": cal_adapter.dayplan_marker(date, b["id"])}
+
+
+def run_op(adapter, op: dict, date: str, zone: str):
+    """Run one write. Returns (attempted_ok, note). Never raises on a calendar error."""
+    try:
+        if op["op"] == "create":
+            adapter.create_day_event(day_event(op["spec"], date, zone))
+        elif op["op"] == "update":
+            if not op["event"].get("id"):
+                return False, "the existing event has no id, cannot update it"
+            adapter.update_day_event(op["event"]["id"], day_event(op["spec"], date, zone))
+        else:
+            if not op["event"].get("id"):
+                return False, "the existing event has no id, cannot delete it"
+            adapter.delete_day_event(op["event"]["id"])
+        return True, ""
+    except CalendarError as e:
+        return False, f"{type(e).__name__}: {e}"
+    except Exception as e:  # noqa: BLE001 - one failed op must not stop the others
+        return False, f"{type(e).__name__}: {e}"
+
+
+def verify(agreed: list, events: list, date: str):
+    """Compare the read-back with the agreed blocks.
+    Returns ({block_id: (ok, reason, event_id)}, [stale marker events])."""
+    own = own_events(events, date)
+    result = {}
+    for b in agreed:
+        evs = own.get(b["id"], [])
+        if not evs:
+            result[b["id"]] = (False, "not found in the calendar after the write", None)
+        elif len(evs) > 1:
+            result[b["id"]] = (False, f"{len(evs)} events carry this block's marker", None)
+        elif matches(evs[0], b, date):
+            result[b["id"]] = (True, "", evs[0].get("id") or None)
+        else:
+            ev = evs[0]
+            result[b["id"]] = (
+                False,
+                f"calendar has {event_range(ev, date)} {ev['title']!r}, plan has "
+                f"{b['start']}-{b['end']} {b['title']!r}",
+                ev.get("id") or None)
+    agreed_ids = {b["id"] for b in agreed}
+    stale = [ev for bid, evs in own.items() if bid not in agreed_ids for ev in evs]
+    return result, stale
+
+
+def record_calendar(plan: dict, version: int, zone: str, result: str, details: list) -> None:
+    plan["status"] = result
+    plan["calendar"] = {"version": version, "at": now_iso(zone), "result": result,
+                        "details": details}
+
+
+def cmd_calendar(args) -> int:
+    date = check_date(args.date)
+    zone = require_zone()
+    said = (args.said or "").strip()
+    if not said:
+        raise Refused("--said must carry the owner's explicit request to write the calendar")
+    with plan_lock(date):
+        plan = load_plan(date)
+        if plan is None:
+            raise Refused(f"no plan for {date}")
+        n = current_version(plan)
+        if args.version != n:
+            raise Refused(f"version {args.version} is not the current version ({n}) of {date}")
+        status = plan.get("status")
+        conf = plan.get("confirmed") or {}
+        cal = plan.get("calendar") or {}
+        gate = ((status == "Confirmed" and conf.get("version") == n)
+                or (status in APPLIED and cal.get("version") == n))
+        if not gate:
+            raise Refused(
+                f"version {n} of {date} is {status}, not confirmed: the owner must confirm "
+                f"this version first (kb-dayplan confirm --version {n})")
+        return apply_calendar(date, zone, plan, n)
+
+
+def apply_calendar(date: str, zone: str, plan: dict, n: int) -> int:
+    adapter = cal_adapter.get_adapter()
+    blocks = plan.get("blocks") or []
+    agreed = [b for b in blocks if not b.get("fixed")]
+
+    # Step 2: look at the day. If the calendar cannot be read, nothing is written.
+    try:
+        before = adapter.list_day_events(date, zone)
+    except CalendarError as e:
+        reason = f"the calendar could not be read ({e}); nothing was written"
+        details = [{"block": b["id"], "op": "failed", "ok": False, "reason": reason}
+                   for b in agreed]
+        record_calendar(plan, n, zone, "Partial", details)
+        save_plan(date, plan)
+        print(f"not written: could not read the calendar for {date}: {e}")
+        print(f"Day plan {date} v{n}: Partial. Nothing was written to the calendar.")
+        for b in agreed:
+            print(f"  NOT written: {b['start']}-{b['end']} {b['title']} - {reason}")
+        return 3
+
+    # Step 3: any clash means nothing is written.
+    clashes = find_clashes(before, agreed, date)
+    if clashes:
+        details = []
+        print(f"Day plan {date} v{n}: Conflict. Nothing was written to the calendar.")
+        for b, ev in clashes:
+            reason = f"overlaps {event_range(ev, date)} {ev['title']!r}"
+            print(f"  NOT written: {b['start']}-{b['end']} {b['title']} - {reason}")
+            details.append({"block": b["id"], "op": "conflict", "ok": False, "reason": reason})
+        record_calendar(plan, n, zone, "Conflict", details)
+        save_plan(date, plan)
+        return 3
+
+    # Step 4: what has to change to make the calendar equal the agreed blocks.
+    ops = plan_ops(agreed, before, date)
+    writes = [o for o in ops if o["op"] != "none"]
+    already = (plan.get("status") == "In calendar"
+               and (plan.get("calendar") or {}).get("version") == n)
+    if not writes and already:
+        print(f"Day plan {date} v{n}: In calendar. Nothing to change.")
+        print_summary(agreed, verify(agreed, before, date)[0], [])
+        return 0
+
+    # Step 5: run the writes one by one (deletes, updates, creates), then read back.
+    attempts = {}
+    for op in writes:
+        attempts[id(op)] = run_op(adapter, op, date, zone)
+    after, read_back_error = before, None
+    if writes:
+        try:
+            after = adapter.list_day_events(date, zone)
+        except CalendarError as e:
+            read_back_error = str(e)
+
+    # Step 6: record only what the read-back shows.
+    if read_back_error is not None:
+        details = []
+        for op in ops:
+            if op["op"] == "none":
+                details.append({"block": op["block"], "op": "none", "ok": True,
+                                "reason": "already in the calendar before the writes"})
+                continue
+            _ok, note = attempts[id(op)]
+            details.append({
+                "block": op["block"], "op": op["op"], "ok": False,
+                "reason": f"not verified: the read-back failed ({read_back_error}); "
+                          + (f"the write reported: {note}" if note else "the write was sent")})
+        record_calendar(plan, n, zone, "Partial", details)
+        save_plan(date, plan)
+        print(f"Day plan {date} v{n}: Partial. Writes were sent but the calendar could not be "
+              f"read back ({read_back_error}). Do not assume these blocks are in the calendar.")
+        return 3
+
+    verdict, stale = verify(agreed, after, date)
+    details = []
+    for b in agreed:
+        op = next(o for o in ops if o["block"] == b["id"] and o["op"] in ("create", "update", "none"))
+        ok, why, _event_id = verdict[b["id"]]
+        _wrote_ok, note = attempts.get(id(op), (True, ""))
+        if ok:
+            text = {"create": "created", "update": "updated", "none": "already in the calendar"}[op["op"]]
+            if note:
+                text += f" (the write reported an error, but the read-back shows it: {note})"
+            details.append({"block": b["id"], "op": op["op"], "ok": True, "reason": text})
+        else:
+            details.append({"block": b["id"], "op": "failed" if note else op["op"], "ok": False,
+                            "reason": (f"the write failed: {note}; " if note else "") + why})
+    after_ids = {ev.get("id") for ev in after if ev.get("id")}
+    idless_deletes = 0  # delete ops on an event the calendar listed without an id
+    for op in ops:
+        if op["op"] != "delete":
+            continue
+        _wrote_ok, note = attempts[id(op)]
+        label = f"{op['event'].get('title')!r} ({op['note']})"
+        event_id = op["event"].get("id")
+        # Gone only if the event has an id and the read-back no longer lists it:
+        # an event without an id cannot be shown to be gone.
+        if event_id and event_id not in after_ids:
+            details.append({"block": op["block"], "op": "delete", "ok": True,
+                            "reason": f"deleted {label}"})
+        else:
+            idless_deletes += 0 if event_id else 1
+            details.append({"block": op["block"], "op": "failed", "ok": False,
+                            "reason": f"still in the calendar: {label}" + (f"; {note}" if note else "")})
+    covered = {op["event"]["id"] for op in ops if op["op"] == "delete" and op["event"].get("id")}
+    for ev in stale:
+        if ev.get("id") in covered:
+            continue
+        if not ev.get("id") and idless_deletes > 0:
+            idless_deletes -= 1  # already reported by its failed delete above
+            continue
+        bid = (cal_adapter.parse_marker(ev["marker"]) or (None, "?"))[1]
+        details.append({"block": bid, "op": "failed", "ok": False,
+                        "reason": f"stale event {ev['title']!r} is in the calendar"})
+
+    all_ok = all(d["ok"] for d in details)
+    for b in blocks:
+        b["event_id"] = None if b.get("fixed") else verdict[b["id"]][2]
+    result = "In calendar" if all_ok else "Partial"
+    record_calendar(plan, n, zone, result, details)
+    save_plan(date, plan)
+    print_summary(agreed, verdict, details, header=f"Day plan {date} v{n}: {result}.")
+    return 0 if all_ok else 3
+
+
+def print_summary(agreed: list, verdict: dict, details: list, header=None) -> None:
+    """One line per agreed block, then the removals, from what the read-back showed."""
+    if header:
+        print(header)
+    by_block = {d["block"]: d for d in details if d["op"] != "delete"}
+    for b in agreed:
+        ok, why, _event_id = verdict[b["id"]]
+        line = f"  {b['start']}-{b['end']}  {b['title']}"
+        if ok:
+            note = by_block.get(b["id"], {}).get("reason")
+            print(f"{line} - in the calendar" + (f" ({note})" if note else ""))
+        else:
+            print(f"{line} - NOT in the calendar: {by_block.get(b['id'], {}).get('reason') or why}")
+    agreed_ids = {b["id"] for b in agreed}
+    for d in details:
+        if d["block"] in agreed_ids and d["op"] != "delete":
+            continue
+        if d["op"] == "delete":
+            print(f"  removed from the calendar: {d['reason']}")
+        elif not d["ok"]:
+            print(f"  NOT cleaned up (block {d['block']}): {d['reason']}")
+
+
+# ── main ────────────────────────────────────────────────────────────────────
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="kb-dayplan",
+        description="The saved plan for a day, and the only way to put it in the calendar.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("show", help="print the current plan")
+    s.add_argument("--date", help="YYYY-MM-DD (default: today, local zone)")
+    s.add_argument("--json", action="store_true", help="one JSON object")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("set", help="save the plan as the next version (Draft)")
+    s.add_argument("--date")
+    s.add_argument("--goal", required=True)
+    s.add_argument("--goal-source", dest="goal_source", default="")
+    s.add_argument("--outcome", action="append")
+    s.add_argument("--block", action="append", help='"HH:MM-HH:MM|title|kind"')
+    s.add_argument("--fixed", action="append", help='"HH:MM-HH:MM|title"')
+    s.add_argument("--change", required=True, help="what changed in this version")
+    s.set_defaults(fn=cmd_set)
+
+    s = sub.add_parser("confirm", help="record the owner's yes for the current version")
+    s.add_argument("--date")
+    s.add_argument("--version", type=int, required=True)
+    s.add_argument("--said", required=True, help="the owner's words")
+    s.set_defaults(fn=cmd_confirm)
+
+    s = sub.add_parser("calendar", help="write the agreed blocks to the calendar")
+    s.add_argument("--date")
+    s.add_argument("--version", type=int, required=True)
+    s.add_argument("--said", required=True, help="the owner's request, in their words")
+    s.set_defaults(fn=cmd_calendar)
+    return p
+
+
+def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args)
+    except Refused as e:
+        print(f"kb-dayplan: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

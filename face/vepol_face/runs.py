@@ -65,6 +65,8 @@ class Conversation:
     task_done_moved: bool = False
     # Display only: the agent's own session behind a terminal card, for its title and preview.
     agent_transcript_id: str | None = None
+    # The day (YYYY-MM-DD) this session plans; None for every other session.
+    day_plan: str | None = None
 
 
 class RunStore:
@@ -97,11 +99,11 @@ class RunStore:
 
     # -------------------------------------------------------------- write
     def create_conversation(self, target: str, runtime: str, title: str = "", transport: str = "oneshot",
-                            task: dict | None = None) -> Conversation:
+                            task: dict | None = None, day_plan: str | None = None) -> Conversation:
         conv_id = uuid.uuid4().hex[:12]
         conv = Conversation(
             id=conv_id, target=target, runtime=runtime,
-            seq=self._next_seq(), title=title, transport=transport, task=task,
+            seq=self._next_seq(), title=title, transport=transport, task=task, day_plan=day_plan,
             # Its own tmux session, so several terminals of one agent can run in one project.
             terminal_name=f"kb-{target}-{conv_id}-{runtime}" if transport == "terminal" else None,
         )
@@ -246,6 +248,7 @@ class RunStore:
             task_done_moved=bool(blob.get("task_done_moved", False)),
             # Saved before every agent had a title reader: the Claude session id carries over.
             agent_transcript_id=blob.get("agent_transcript_id") or blob.get("claude_transcript_id"),
+            day_plan=blob.get("day_plan") if isinstance(blob.get("day_plan"), str) else None,
         )
 
     def get_run(self, conv_id: str, run_id: str) -> Run | None:
