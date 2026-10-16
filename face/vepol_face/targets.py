@@ -32,10 +32,12 @@ class Target:
 
 def discover_targets(hub: pathlib.Path | None = None) -> list[Target]:
     hub = pathlib.Path(hub or HUB)
+    # Hub sessions run in the hub folder itself: that is where the startup hook and AGENTS.md give
+    # the agent the hub's card, state and log (in its parent, the home folder, it gets nothing).
     targets = [
         Target(
             slug="hub", label="Vepol hub",
-            cwd=str(hub.parent), knowledge=str(hub), kind="hub",
+            cwd=str(hub), knowledge=str(hub), kind="hub",
         )
     ]
 
@@ -115,11 +117,13 @@ def add_project(hub: pathlib.Path, path: str) -> tuple[Target, bool]:
     if not raw.is_dir():
         raise ProjectRefused(f"no such folder: {raw}")
     folder = raw.resolve()
+    hub_real = hub.resolve()
+    if folder == hub_real:
+        return discover_targets(hub)[0], False  # the hub folder was picked: open the hub
     if folder.name == "knowledge" and folder.parent != folder:
         folder = folder.parent  # the wiki folder was picked; the project is its parent
     home = pathlib.Path.home().resolve()
-    hub_real = hub.resolve()
-    if folder in (home, pathlib.Path("/"), hub_real) or hub_real in folder.parents:
+    if folder in (home, pathlib.Path("/"), hub_real, hub_real.parent) or hub_real in folder.parents:
         raise ProjectRefused("pick a project folder, not the home folder or the hub")
 
     knowledge = folder / "knowledge"

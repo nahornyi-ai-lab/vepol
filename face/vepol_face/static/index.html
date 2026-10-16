@@ -1421,7 +1421,7 @@
     });
     // Paths under the folder that holds the hub (the home folder on a normal install) read as ~/…
     const hubTarget = allTargets.find((t) => t.kind === "hub");
-    const home = hubTarget ? hubTarget.cwd.replace(/\/+$/, "") : "";
+    const home = hubTarget ? hubTarget.knowledge.replace(/\/+$/, "").replace(/\/[^/]+$/, "") : "";
     const short = (cwd) => !home ? cwd : cwd === home ? "~" : cwd.startsWith(home + "/") ? `~${cwd.slice(home.length)}` : cwd;
     $("picker-list").innerHTML = slugs.length ? slugs.map((slug) => {
       const t = allTargets.find((x) => x.slug === slug);
@@ -1514,9 +1514,11 @@
     $("tasks-feedback").hidden = true;
     hideTaskNotice();
     try {
+      // Hub sessions run inside the hub folder, so its board is backlog.md there.
+      const board = task.project === "hub" ? "backlog.md" : "knowledge/backlog.md";
       const text = task.id
-        ? `Task ${task.id} from knowledge/backlog.md: "${task.title}".`
-        : `Task from knowledge/backlog.md: "${task.title}".`;
+        ? `Task ${task.id} from ${board}: "${task.title}".`
+        : `Task from ${board}: "${task.title}".`;
       const body = { target: task.project, runtime: state.runtime, transport: newTransport(), title: task.title };
       if (task.id) body.task = { project: task.project, plan_item_id: task.id };
       const conv = await createAndOpen(body);
