@@ -408,6 +408,11 @@ def test_add_project_registers_a_folder_and_lists_it_by_activity(tmp_path, monke
     again = c.post("/api/projects", json={"path": str(folder / "knowledge")}, headers=h).json()
     assert (again["slug"], again["created"]) == ("my-new-app", False)
 
+    # Picking the hub folder opens the hub, whose sessions run in the hub folder itself.
+    hub_pick = c.post("/api/projects", json={"path": str(hub)}, headers=h).json()
+    assert (hub_pick["slug"], hub_pick["created"], hub_pick["cwd"]) == ("hub", False, str(hub))
+    assert not (hub / "knowledge").exists()
+
     slugs = [t["slug"] for t in c.get("/api/targets", headers=h).json()]
     assert slugs.index("my-new-app") < slugs.index("old-project") == len(slugs) - 1
 
