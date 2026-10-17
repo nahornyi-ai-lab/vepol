@@ -157,7 +157,7 @@ echo "=== B2: kb-brief error path is localized (en) ==="
 HUB=$(new_hub brief-err-en en)
 write_orch "$HUB" 75
 OUT=$(KB_HUB="$HUB" KB_BRIEF_DRY=1 zsh "$SRC_BIN/kb-brief" 2>/dev/null)
-if grep -q "[А-Яа-я]" <<<"$OUT"; then
+if LC_ALL=en_US.UTF-8 grep -q "[А-Яа-я]" <<<"$OUT"; then
   fail "B2: Russian error text sent to en user: $(head -1 <<<"$OUT")"
 else
   ok "B2: error output has no Cyrillic for en profile"
@@ -194,7 +194,7 @@ grep -qiE "Retro" <<<"$OUT" && ok "R1: English retro header" || fail "R1: header
 HUB=$(new_hub retro-err-en en)
 write_orch "$HUB" 75
 OUT=$(KB_HUB="$HUB" KB_RETRO_DRY=1 zsh "$SRC_BIN/kb-retro" 2>/dev/null)
-if grep -q "[А-Яа-я]" <<<"$OUT"; then
+if LC_ALL=en_US.UTF-8 grep -q "[А-Яа-я]" <<<"$OUT"; then
   fail "R1: Russian retro error for en profile"
 else
   ok "R1: retro error path localized"
@@ -219,7 +219,7 @@ EOF
 HUB=$(remind_hub en)
 OUT=$(KB_HUB="$HUB" $PY "$SRC_BIN/kb-people-remind" --horizon 0 --dry-run 2>/dev/null)
 grep -q "Follow-up reminders" <<<"$OUT" && ok "PR1: en reminder header" || fail "PR1: en header missing: $(head -1 <<<"$OUT")"
-grep -q "[А-Яа-я]" <<<"$OUT" && fail "PR1: Cyrillic in en reminder" || ok "PR1: no Cyrillic for en"
+LC_ALL=en_US.UTF-8 grep -q "[А-Яа-я]" <<<"$OUT" && fail "PR1: Cyrillic in en reminder" || ok "PR1: no Cyrillic for en"
 HUB=$(remind_hub ru)
 OUT=$(KB_HUB="$HUB" $PY "$SRC_BIN/kb-people-remind" --horizon 0 --dry-run 2>/dev/null)
 grep -q "Напоминания о контактах" <<<"$OUT" && ok "PR1: ru reminder header" || fail "PR1: ru header missing: $(head -1 <<<"$OUT")"

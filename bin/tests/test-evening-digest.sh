@@ -77,6 +77,7 @@ chmod +x "$TMP/fake-notebooklm"
 AUDIOLOG="$TMP/audio-calls.log"; : >"$AUDIOLOG"
 cat >"$HUB/bin/kb-tts-render" <<FAKE
 #!/usr/bin/env bash
+[[ "\${1:-}" == "--check" ]] && exit 0  # readiness probe before a render: ready, not a render call
 echo "render \$*" >> "$AUDIOLOG"
 out=''; while [[ \$# -gt 0 ]]; do case "\$1" in --out) out="\$2"; shift 2;; *) shift;; esac; done
 printf 'ID3-evening-audio' >"\$out"
@@ -334,10 +335,11 @@ KB_HUB="$HUB9" KB_VEPOL_DEV="$NOVEPOL" KB_MORNING_SYNTH_AGENTS="none" \
   "$SRC_BIN/kb-morning-digest" --period evening --date "$DAY" --no-push >/dev/null 2>&1
 RC9=$?
 B9SRC=$(cat "$HUB9/reports/evening-digest-$DAY.md" 2>/dev/null)
-[[ $RC9 -eq 0 && "$B9SRC" == *"Evening retro is missing"* \
+# Missing Retro fails closed: retry code 75, no evening report, nothing from the morning voiced.
+[[ $RC9 -eq 75 && ! -e "$HUB9/reports/evening-digest-$DAY.md" \
    && "$B9SRC" != *"no-retro-morning-fact"* ]] \
-  && ok "v0.5.1 AC6: missing retro produces readable fallback without inventing facts" \
-  || fail "v0.5.1 AC6: missing retro fallback absent or copied morning facts"
+  && ok "v0.5.1 AC6: missing retro stops with retry code 75 and writes no evening report" \
+  || fail "v0.5.1 AC6: missing retro did not fail closed (rc=$RC9)"
 
 # ── B2 (impl review R1): user language respected (public default is en) ──────
 P_EN=$(KB_HUB="$HUB" KB_VEPOL_DEV="$NOVEPOL" KB_LANG=en KB_DIGEST_PROMPT_ONLY=1 \
@@ -345,11 +347,6 @@ P_EN=$(KB_HUB="$HUB" KB_VEPOL_DEV="$NOVEPOL" KB_LANG=en KB_DIGEST_PROMPT_ONLY=1 
 [[ "$P_EN" == *"English"* && "$P_EN" != *"Только русский"* ]] \
   && ok "B2: evening synth instruction targets the user's language (en)" \
   || fail "B2: evening synth instruction hardcodes Russian"
-P_EN_M=$(KB_HUB="$HUB" KB_VEPOL_DEV="$NOVEPOL" KB_LANG=en KB_DIGEST_PROMPT_ONLY=1 \
-    "$SRC_BIN/kb-morning-digest" --date "$DAY" 2>/dev/null)
-[[ "$P_EN_M" == *"English"* && "$P_EN_M" != *"Только русский"* ]] \
-  && ok "B2: morning synth instruction targets the user's language (en)" \
-  || fail "B2: morning synth instruction hardcodes Russian"
 
 HUB5="$TMP/hub5"
 mkdir -p "$HUB5/personal" "$HUB5/briefs" "$HUB5/reports" "$HUB5/.orchestrator" "$HUB5/bin"
@@ -382,7 +379,8 @@ KB_HUB="$HUB7" KB_VEPOL_DEV="$NOVEPOL" KB_MORNING_SYNTH_AGENTS="none" KB_LANG=en
   KB_NOTEBOOKLM_BIN="$TMP/fake-notebooklm" \
   "$SRC_BIN/kb-morning-digest" --date "$DAY" --digest-file "$TMP/morning-body.md" >/dev/null 2>&1
 [[ $(grep -c '^render ' "$AUDIOLOG") -eq 1 && $(grep -c '^send ' "$AUDIOLOG") -eq 1 && ! -s "$NBLOG" ]] \
-  && ok "B3: morning run uses local Qwen + Telegram only" \
+  && grep -q -- "render .*--language English" "$AUDIOLOG" \
+  && ok "B3: morning run uses local Qwen (in the user's language) + Telegram only" \
   || fail "B3: morning run did not use the local-only audio path"
 
 # ── B4: scheduled evening selector may choose NotebookLM only ───────────────

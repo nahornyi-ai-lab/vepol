@@ -72,7 +72,7 @@ python3 kb-backlog-xfer/crash.py > /dev/null && pass "crash.py (xfer)" || { fail
 
 echo
 echo "=== agent-contract (8 OUTCOME shapes) ==="
-python3 agent-contract/parse.py > /dev/null && pass "parse.py (8 shapes)" || { fail "parse.py"; exit 1; }
+KB_HUB="$COMPAT_HOME/knowledge" python3 agent-contract/parse.py > /dev/null && pass "parse.py (8 shapes)" || { fail "parse.py"; exit 1; }
 
 echo
 echo "=== lock-order linter ==="
@@ -144,6 +144,18 @@ python3 runtime-registry/fixtures.py > /dev/null && pass "runtime-registry/fixtu
 echo
 echo "=== Processes release (processes.yaml gating, 13 acceptance cases) ==="
 bash processes/run.sh > /dev/null && pass "processes/run.sh (76 assertions)" || { fail "processes/run.sh"; exit 1; }
+
+echo
+echo "=== Daily assistant routines (brief, retro, audio, mail, calendar, people, research, radar, language) ==="
+# Each suite reads $HOME/knowledge/bin by default; the compat HOME points it at this tree's bin/.
+for suite in bin/tests/test-brief-reliability.sh bin/tests/test-morning-brief-fidelity.sh \
+             bin/tests/test-retro-persist.sh bin/tests/test-evening-digest.sh \
+             bin/tests/test-morning-whole-block-audio.sh bin/tests/test-kb-contact-notebook.sh \
+             bin/tests/test-people.sh bin/tests/test-calendar-followups.sh \
+             bin/tests/test-mail-brief-envelope.sh tests/test-daily-research.sh \
+             tests/test-money-radar.sh tests/test-user-language.sh; do
+  HOME="$COMPAT_HOME" bash "$REPO_ROOT/$suite" > /dev/null 2>&1 && pass "$suite" || { fail "$suite"; exit 1; }
+done
 
 echo
 echo "=== ALL Phase 1b tests passed ==="

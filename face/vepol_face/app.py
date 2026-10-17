@@ -841,7 +841,6 @@ def create_app(
         finally:
             receiving.cancel()
             event_task.cancel()
-            await asyncio.gather(receiving, event_task, return_exceptions=True)
             app.state.bus.unsubscribe(conv_id, q)
 
     @app.get("/")
