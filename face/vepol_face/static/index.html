@@ -345,6 +345,20 @@
   .memory-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .memory-card h3 { margin: 0; font-size: 15px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
   .memory-card .project-path { margin: 4px 0 12px; }
+  .today-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 2px 2px 14px; flex: none; }
+  .today-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .today-head h2.section { margin: 0; font-size: 15px; }
+  .today-head button { margin-left: auto; white-space: nowrap; }
+  .today-card .banner { margin: 10px 0 0; }
+  .today-goal { margin-top: 10px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+  .today-goal .muted { font-size: 12px; }
+  .today-list { list-style: disc; margin: 6px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .today-blocks { list-style: none; margin: 10px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .today-blocks li { display: flex; gap: 10px; align-items: baseline; padding: 6px 12px; font-size: 13px; line-height: 1.45; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .today-blocks li:first-child { border-top: 0; }
+  .today-blocks .when { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); white-space: nowrap; flex: none; }
+  .today-blocks .title { flex: 1; min-width: 0; }
+  .today-meta { margin-top: 10px; font-size: 12px; color: var(--ink-dim); overflow-wrap: anywhere; }
   .facts { margin: 0; }
   .facts dt { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); font-weight: 600; margin-bottom: 2px; }
   .facts dd { margin: 0 0 10px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
@@ -503,6 +517,14 @@
       <button id="board-newconv" hidden>+ New session</button>
     </div>
     <div class="board-pane" id="memory-pane">
+      <section class="today-card" id="today-card" aria-label="Today">
+        <div class="today-head">
+          <h2 class="section" id="today-title">Today</h2><span class="muted" id="today-date"></span><span id="today-status"></span>
+          <button id="today-plan" disabled>Plan my day</button>
+        </div>
+        <div id="today-error" class="banner bad" role="alert" hidden></div>
+        <div id="today-body"></div>
+      </section>
       <div class="board-toolbar">
         <input type="search" class="filter" id="memory-filter" aria-label="Filter projects" placeholder="Find a project…" />
         <span id="memory-count" role="status" aria-live="polite"></span>
@@ -1376,7 +1398,8 @@
     await refreshSidebars().catch(() => {});
     await openConv(conv.id);
     const note = startError ? `Could not start the agent: ${startError}`
-      : body.task && conv.existing ? "This task already has a session — opened it." : "";
+      : body.task && conv.existing ? "This task already has a session — opened it."
+      : body.day_plan && conv.existing ? "This day already has a planning session — opened it." : "";
     // Kept for this session until another one opens, so a later refresh of the header does not wipe it.
     if (note && state.conv === conv.id) {
       openNote = { id: conv.id, text: note };
@@ -1401,15 +1424,18 @@
   // ------------------------------------------------ new-session project picker
   // One-project mode (a sidebar click on a project with nothing running): only the agent buttons, a click starts it there.
   // With a task (Tasks → "Start session") the one-project mode starts that task with the chosen agent.
-  const picker = { stage: null, busy: false, project: null, task: null };
+  // With a day plan (Today card → "Plan my day") the one-project mode opens the hub's day-planning session.
+  const picker = { stage: null, busy: false, project: null, task: null, plan: null };
 
   function paintPicker() {
     const q = $("picker-search").value.trim().toLocaleLowerCase();
     const label = (slug) => (allTargets.find((t) => t.slug === slug) || {}).label || slug;
     const one = picker.project;
     const task = one && picker.task;
-    $("picker-title").textContent = task ? `Start task in ${label(one)}` : one ? `New session in ${label(one)}` : "New session";
-    $("picker-sub").textContent = task ? `Pick the agent for task ${task.id ? `${task.id}: ` : ""}${task.title}.`
+    const plan = one && picker.plan;
+    $("picker-title").textContent = plan ? "Plan my day" : task ? `Start task in ${label(one)}` : one ? `New session in ${label(one)}` : "New session";
+    $("picker-sub").textContent = plan ? `Pick the agent to plan ${dayLabel(plan.date)} with.`
+      : task ? `Pick the agent for task ${task.id ? `${task.id}: ` : ""}${task.title}.`
       : one ? "Pick the agent to start here." : "Pick a project to work in. Recently used projects are on top.";
     $("picker-search").hidden = !!one;
     $("picker-list").hidden = !!one;
@@ -1441,6 +1467,7 @@
         state.runtime = b.dataset.pickRuntime;
         renderRuntimes(lastRuntimes);
         if (task) { $("picker").close(); startTaskSession(task); }
+        else if (plan) { $("picker").close(); startDayPlanSession(plan); }
         else if (one) pickProject(one); else paintPicker();
       };
     });
@@ -1451,10 +1478,11 @@
     $("picker-feedback").hidden = !message;
   }
 
-  async function openPicker(stage = null, project = null, task = null) {
+  async function openPicker(stage = null, project = null, task = null, plan = null) {
     picker.stage = stage;
     picker.project = project;
     picker.task = project ? task : null;
+    picker.plan = project ? plan : null;
     pickerError("");
     $("picker-search").value = "";
     paintPicker();
@@ -1530,6 +1558,23 @@
       } else $("prompt").value = text;
     } catch (err) {
       feedback($("tasks-feedback"), `Could not start session: ${err.message}`);
+    }
+  }
+
+  // Called from the picker's agent chip: the hub's session for planning `plan.date`, always a terminal.
+  async function startDayPlanSession(plan) {
+    $("today-error").hidden = true;
+    try {
+      const text = `Plan my day for ${plan.date}: follow ${plan.prompt}`;
+      const conv = await createAndOpen({ target: "hub", runtime: state.runtime, transport: "terminal", day_plan: plan.date });
+      // Never sent by itself: the owner types the line into the terminal and presses Enter.
+      // A reopened session already has its opening line and may hold a draft.
+      if (state.conv !== conv.id || conv.existing) return;
+      taskLine = { id: conv.id, text };
+      $("task-line").hidden = false;
+      $("task-text").textContent = text;
+    } catch (err) {
+      feedback($("today-error"), `Could not start session: ${err.message}`);
     }
   }
 
@@ -1692,7 +1737,54 @@
       <div class="reason">${esc(p.in_progress)} in progress · ${esc(p.ready)} ready · ${esc(p.blocked)} blocked</div>`;
   }
 
+  // ------------------------------------------------ today card (Memory Home)
+  // The plan comes from kb-dayplan through /api/dayplan; the app never writes it. Every plan text goes in as text.
+  const today = { data: null, version: 0 };
+  const PLAN_STATUS = { Draft: "st-idle", Confirmed: "st-active", "In calendar": "st-ok", Conflict: "st-bad", Partial: "st-warn" };
+
+  // "YYYY-MM-DD" -> "Wed, Oct 14" in the viewer's own day.
+  function dayLabel(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+    if (!m) return String(iso || "");
+    return new Date(+m[1], m[2] - 1, +m[3]).toLocaleDateString("en", { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  async function loadToday() {
+    const version = ++today.version;
+    let data;
+    try { data = await api("/api/dayplan"); }
+    catch (err) { data = { error: `Could not read today's plan: ${err.message}` }; }
+    if (version !== today.version) return;
+    today.data = data;
+    paintToday();
+  }
+
+  function paintToday() {
+    const d = today.data;
+    if (!d) return;
+    const err = $("today-error"), body = $("today-body");
+    err.hidden = !d.error;
+    err.textContent = d.error || "";
+    // Without a prompt path there is nothing for the agent to follow, so the button waits for a readable answer.
+    $("today-plan").disabled = !!d.error || !d.prompt;
+    $("today-date").textContent = d.error ? "" : dayLabel(d.date);
+    $("today-status").innerHTML = "";
+    if (d.error) { body.innerHTML = ""; return; }
+    if (!d.exists) { body.innerHTML = `<div class="today-goal muted">No plan for today yet</div>`; return; }
+    const dot = PLAN_STATUS[d.status] || "st-idle";
+    $("today-status").innerHTML = `<span class="chip" id="today-status-chip"><span class="dot ${dot}"></span>${esc(d.status || "Draft")}</span>`;
+    const outcomes = Array.isArray(d.outcomes) ? d.outcomes : [];
+    const blocks = Array.isArray(d.blocks) ? d.blocks : [];
+    const last = Array.isArray(d.history) && d.history.length ? d.history[d.history.length - 1] : null;
+    body.innerHTML = `
+      <div class="today-goal"><span id="today-goal">${esc(d.goal)}</span>${d.goal_source ? ` <span class="muted">· ${esc(d.goal_source)}</span>` : ""}</div>
+      ${outcomes.length ? `<ul class="today-list" id="today-outcomes">${outcomes.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}
+      ${blocks.length ? `<ul class="today-blocks" id="today-blocks">${blocks.map((b) => `<li><span class="when">${esc(b.start)}–${esc(b.end)}</span><span class="title">${esc(b.title)}</span>${b.fixed ? `<span class="chip">fixed</span>` : ""}</li>`).join("")}</ul>` : ""}
+      <div class="today-meta" id="today-meta">Version ${esc(d.version)}${last ? ` · Last change: ${esc(last.change)}${fmtTime(last.at) ? ` · ${esc(fmtTime(last.at))}` : ""}` : ""}</div>`;
+  }
+
   async function loadMemory() {
+    loadToday();
     const version = ++mem.version;
     try {
       const data = await api("/api/memory");
@@ -2700,6 +2792,11 @@
   $("memory-back").onclick = () => { state.memorySlug = null; setBoardView("memory"); };
   // The agent is chosen in the one-project dialog, the same choice a sidebar click offered before 2026-10-01.
   $("mem-newconv").onclick = () => openPicker(null, state.memorySlug);
+  // The plan's own prompt path (from kb-dayplan) travels with the click; the day planning always runs in the hub.
+  $("today-plan").onclick = () => {
+    const d = today.data;
+    if (d && !d.error && d.prompt && d.date) openPicker(null, "hub", null, { date: d.date, prompt: d.prompt });
+  };
   $("mem-open-tasks").onclick = () => {
     paintTaskProjects();
     $("tasks-project").value = state.memorySlug;

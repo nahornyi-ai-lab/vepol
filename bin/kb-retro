@@ -83,6 +83,7 @@ PROMPT="Ты — личный AI-оркестратор${ADDRESS}. Сегодн�
 - последние 50 строк $HUB/log.md
 - сегодняшний файл $HUB/daily/$TODAY.md (если есть — это авто-компилированный extract сессий Claude Code)
 - утренний брифинг \`$HUB/briefs/$TODAY.md\` (полный текст, что был отправлен утром в Telegram)
+- if \`$HUB/personal/day-plans/$TODAY.json\` exists: the day plan agreed with the owner. Section 5 compares the day with the confirmed version of that plan (\`confirmed.version\`), not only with the brief.
 
 Правило времени: утренний бриф — это план и состояние НА УТРО, к вечеру он мог устареть. Используй его только как исторический контекст и для сравнения плана с реальностью. Текущее состояние почты бери только из вечернего mail-блока ниже; текущее состояние задач — из snapshot/log blocks. При противоречии вечерние блоки побеждают утренний бриф. Не смешивай отсутствие daily-inbox или auto daily extract с почтовой выжимкой: если этих файлов нет, это отдельный пропуск дневного источника, а не поломка mail briefing.
 

@@ -21,6 +21,9 @@ _NOT_RUNNING_MARKERS = ("no server running", "can't find", "no such", "error con
 # Set on every session whose pane is a login shell with the agent typed into it; the value is the shell's
 # command name. Sessions without it (created before the shell layout) run the agent as the pane process.
 SHELL_MARKER = "@vepol-shell"
+# A Claude session that plans the day never gets the Google Calendar connector: only `kb-dayplan calendar`
+# may write the calendar, after the owner's explicit request.
+DAY_PLAN_DISALLOWED_TOOLS = ("mcp__claude_ai_Google_Calendar",)
 
 
 def foreground_group(pid: int) -> int | None:
@@ -108,9 +111,10 @@ class TerminalSession:
         self, cwd: str, project: str, runtime: str,
         on_event: Callable[[dict], None], env: dict | None = None,
         session_id: str | None = None, prompt_dir: str | pathlib.Path | None = None,
-        name: str | None = None,
+        name: str | None = None, disallowed_tools: tuple[str, ...] = (),
     ) -> None:
         self.cwd = cwd
+        self.disallowed_tools = tuple(disallowed_tools)
         self.runtime = runtime
         # The conversation's own tmux name when given; else the canonical one.
         self.name = validate_session_name(name) if name else session_name(project, runtime)
@@ -280,6 +284,9 @@ class TerminalSession:
             argv += ["--permission-mode", "manual"]
         elif self.runtime == "agy":
             argv += ["--add-dir", self.cwd]
+        if self.runtime == "claude" and self.disallowed_tools:
+            # Last: the flag takes a list, and nothing may follow it. Both the first start and a resume get it.
+            argv += ["--disallowedTools", *self.disallowed_tools]
         return argv
 
     def _connect(self, create: bool = False) -> bool:

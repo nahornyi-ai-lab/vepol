@@ -94,10 +94,11 @@ class SessionManager:
 
             if mode == "terminal":
                 from .sessions import terminal_name
-                from .terminal_session import TerminalSession
+                from .terminal_session import DAY_PLAN_DISALLOWED_TOOLS, TerminalSession
                 client = TerminalSession(cwd=target.cwd, project=conv.target, runtime=conv.runtime,
                                          on_event=event, env=env, session_id=session_id,
-                                         prompt_dir=self.store.root / "prompts", name=terminal_name(conv))
+                                         prompt_dir=self.store.root / "prompts", name=terminal_name(conv),
+                                         disallowed_tools=DAY_PLAN_DISALLOWED_TOOLS if conv.day_plan else ())
             elif conv.runtime == "claude":
                 from .claude_session import ClaudeSession
                 client = ClaudeSession(target.cwd, session_id, event, identified, env)

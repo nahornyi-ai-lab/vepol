@@ -129,6 +129,12 @@ if os.environ.get("VEPOL_FIXTURE_TASKS") == "1":
                            "owner": r["claim_owner"]} for r in rows]
     expected.update({"gamma": "error", "delta": "none", "hub": "none"})
 
+if os.environ.get("VEPOL_FIXTURE_DAYPLAN") == "1":
+    # The tree's own kb-dayplan reads this hub's personal/day-plans/ (the app hands it KB_HUB); a runner writes the plan.
+    (hub / "bin").mkdir(parents=True, exist_ok=True)
+    if not (hub / "bin" / "kb-dayplan").is_symlink():  # a restart on the same fixture folder keeps it
+        (hub / "bin" / "kb-dayplan").symlink_to(REAL_HUB / "bin" / "kb-dayplan")
+
 if os.environ.get("VEPOL_FIXTURE_AUTOMATIONS") == "1":
     # One small valid registry (kb-tick's own parser) and two failed kb-tick attempts today.
     import datetime

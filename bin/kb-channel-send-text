@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlsplit
 
 
 MAX_UTF16 = 3500
-MESSAGE_TYPES = {"brief", "brief_error"}
+MESSAGE_TYPES = {"brief", "brief_error", "agent_review"}
 
 
 def emit(outcome: str, message_id=None, reason: str | None = None) -> None:
