@@ -411,9 +411,9 @@ for code in m.LANG_NAMES:
 m.owner_lang=lambda:'es'
 lab=m.labels()
 assert lab is m.L['es'], 'es did not select es chrome'
-assert lab['bands']['black']=='⚫ negra' and lab['rank']=='rango', lab['bands']
+assert lab['bands']['black']=='⚫ negra' and lab['rank']=='puntuación', lab['bands']
 blk=m._find_block(1,{'candidate':{'title':'X','band':'black','money_flow':'y','proof_links':[]},'corroboration':2,'rank_score':80.0}, lab)
-assert 'negra' in blk and 'rango' in blk, blk
+assert 'negra' in blk and 'puntuación' in blk, blk
 assert 'Money flow' not in blk and 'Why now' not in blk, ('English chrome leaked',blk)
 # BOUNDARY (the property that actually matters, not just table-equality): an UNSUPPORTED
 # profile language must degrade CONTENT and CHROME to English together — never content-in-X

@@ -42,24 +42,8 @@ make_hub() {
   mkdir -p "$hub"/bin "$hub"/personal "$hub"/logs "$hub"/briefs "$hub"/daily
   ln -sf "$SRC_BIN/kb-board" "$hub/bin/kb-board"
   echo "language: en" > "$hub/personal/profile.yaml"
-  # minimal valid board so kb-task's `kb-board append` has sections to write to
-  cat > "$hub/backlog.md" <<'EOF'
-# Backlog
-
-## Backlog
-
-## Ready
-
-## In Progress
-
-## Blocked
-
-## Review
-
-## Done
-
-## Cancelled
-EOF
+  # an empty board in kb-board's canonical form, so kb-task's `kb-board append` can write to it
+  printf '# Backlog\n' > "$hub/backlog.md"
   echo "$hub"
 }
 
