@@ -434,8 +434,10 @@ ${C_INFO}Install commands:${C_OFF}
   ${C_DIM}# Required tools (via Homebrew):${C_OFF}
   brew install bash node bun ripgrep git python@3
 
-  ${C_DIM}# Claude CLI:${C_OFF}
-  Download from https://claude.ai/download
+  ${C_DIM}# Claude Code — the command-line tool (the Claude desktop app does not provide it):${C_OFF}
+  curl -fsSL https://claude.ai/install.sh | bash
+  ${C_DIM}# or: brew install --cask claude-code
+  # then open a new terminal and check: claude --version (needs a paid Claude plan)${C_OFF}
 
 After installing, re-run: ./install.sh
 
@@ -1192,7 +1194,7 @@ cat <<NEXT
 ${C_INFO}━━━ Manual steps remaining ━━━${C_OFF}
 
   1. Authenticate Claude Code (if not yet):
-       claude login
+       claude auth login
 
   2. Optional — enable cross-agent review with Codex CLI:
        codex login                      # or place API key in ~/.codex/auth.json

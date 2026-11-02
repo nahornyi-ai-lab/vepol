@@ -35,6 +35,14 @@ this one.
   mentions health and never waits. See
   [docs/health-in-the-brief.md](docs/health-in-the-brief.md).
 
+### Fixed
+- **Install points to Claude Code, not the Claude desktop app** (#34). When
+  `claude` is missing, `install.sh` and `kb-cli-offer` now print the exact
+  install command for Claude Code, the command-line tool
+  (`curl -fsSL https://claude.ai/install.sh | bash` or
+  `brew install --cask claude-code`); the dependency docs and `AGENTS.md` say
+  the same. Login hints use `claude auth login`.
+
 ## [1.1.1] — 2026-10-05
 
 A fix release for the first five minutes after install and for honest failure

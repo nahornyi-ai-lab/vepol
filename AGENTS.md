@@ -116,7 +116,7 @@ is OK (it preserves their content above/below the block).
 Run prerequisite detection. Required:
 
 - macOS 13 or later (the only supported platform)
-- Claude Code (macOS app or CLI binary `claude`)
+- Claude Code (the CLI binary `claude`; the Claude desktop app does not provide it)
 - Node 18 or later
 - Bun 1.0 or later
 - git, bash 5+, ripgrep
