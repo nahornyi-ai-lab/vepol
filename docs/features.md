@@ -409,7 +409,7 @@ the tool.
 | Tool | Required | Why |
 |---|---|---|
 | macOS 13+ | Yes | launchd, paths, brew defaults |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code) (macOS app or CLI) | Yes | MCP/setup host and default orchestrator |
+| [Claude Code](https://code.claude.com/docs/en/setup) (the `claude` command-line tool; the desktop app does not provide it) | Yes | MCP/setup host and default orchestrator |
 | Node 18+ | Yes | Skills runtime |
 | [Bun](https://bun.sh/) 1.0+ | Yes | Performance scripts |
 | git, bash 5+, ripgrep | Yes | Scripts |

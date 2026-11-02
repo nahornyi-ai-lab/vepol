@@ -12,7 +12,7 @@ command to install anything missing, but it never auto-installs a package manage
 |---|---|---|---|
 | macOS | 13 (Ventura) | launchd, paths | — (Linux on roadmap) |
 | git | any recent | clone/upgrade, repo ops | `brew install git` |
-| Claude CLI | current | core orchestrator | https://claude.ai/download |
+| Claude Code (the `claude` command-line tool, not the desktop app) | current | core orchestrator | `curl -fsSL https://claude.ai/install.sh \| bash` or `brew install --cask claude-code` ([setup](https://code.claude.com/docs/en/setup)) |
 | node | 18+ | skills / MCP runtime | `brew install node` |
 | bun | 1+ | fast scripts | `brew install bun` |
 | ripgrep (`rg`) | any | search across the field | `brew install ripgrep` |
@@ -23,7 +23,8 @@ One-liner for the Homebrew route:
 
 ```bash
 brew install bash node bun ripgrep git python@3
-# Claude CLI: https://claude.ai/download
+# Claude Code, the command-line tool (the desktop app does not provide `claude`):
+curl -fsSL https://claude.ai/install.sh | bash   # or: brew install --cask claude-code
 ```
 
 Python libraries (checked, not auto-installed):
