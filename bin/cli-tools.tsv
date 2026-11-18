@@ -11,11 +11,15 @@
 # Add a future CLI (deepseek/kimi/qwen/...) = append ONE line with a known kind.
 # NO version numbers anywhere. NO shell snippets — detection logic lives in kb-cli-roster.
 # fallback-of: <name>  in column 5 marks this tool as a backup for another (optional).
+# claude and codex list the same lookup order the scripts use (bin/_kb_claude_runner.py
+# claude_bin, bin/_kb_codex.py codex_bin); scheduled jobs run under launchd, whose PATH
+# lacks ~/.local/bin, so the absolute fallbacks matter. KB_CLAUDE_BIN / KB_CODEX_BIN
+# overrides are honoured by the scripts, not by this file.
 
-claude     | which-any | claude                              | писать/править код и исполнять (скиллы, интеграции, запуск проекта)
-codex      | path-any  | $HOME/.local/bin/codex              | анализ, планирование, консервативное второе мнение, большие ресёрчи, куски кода
-agy        | path-any  | $HOME/.local/bin/agy:agy            | независимое мнение, ловит нюансы, что упустили codex и claude (зови: agy --add-dir "$PWD")
-grok       | path-any  | $HOME/.grok/bin/grok:grok           | что пишут в соцсетях сейчас; дерзкий, современный, без догм и цензуры
-notebooklm | path-any  | $HOME/.local/bin/notebooklm:notebooklm | аудио/видео-пересказ для человека
-opencode   | path-any  | $HOME/.opencode/bin/opencode:opencode | запасной, если grok недоступен (умеет любые модели) | fallback-of: grok
-hermes     | path-any  | $HOME/.local/bin/hermes:hermes       | оркестратор общего назначения (Nous Hermes) наравне с claude и codex: исполнение, ресёрч, ревью работы claude; читает AGENTS.md из cwd сам; one-shot: hermes -z "<prompt>"; на подписке Codex делит квоту и модель с codex — его ревью работы codex не независимое
+claude     | path-any  | claude:$HOME/.local/bin/claude:/opt/homebrew/bin/claude:/usr/local/bin/claude | write/edit code and run things (skills, integrations, running the project)
+codex      | path-any  | $HOME/.local/bin/codex:codex:/opt/homebrew/bin/codex:/usr/local/bin/codex | analysis, planning, conservative second opinion, big research, chunks of code
+agy        | path-any  | $HOME/.local/bin/agy:agy            | independent opinion; catches nuances codex and claude missed (call: agy --add-dir "$PWD")
+grok       | path-any  | $HOME/.grok/bin/grok:grok           | what people are saying on social media right now; bold, current, no dogma or censorship
+notebooklm | path-any  | $HOME/.local/bin/notebooklm:notebooklm | audio/video recap for a human
+opencode   | path-any  | $HOME/.opencode/bin/opencode:opencode | backup when grok is unavailable (works with any model) | fallback-of: grok
+hermes     | path-any  | $HOME/.local/bin/hermes:hermes       | general-purpose orchestrator (Nous Hermes) on par with claude and codex: execution, research, reviewing claude's work; reads AGENTS.md from cwd on its own; one-shot: hermes -z "<prompt>"; on a Codex subscription it shares quota and model with codex — so its review of codex's work is not independent

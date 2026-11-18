@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kb-multibot-supervisor — main supervisor binary (LaunchAgent target).
 
-Concept: ~/knowledge/concepts/multibot-agent-runtime.md
+Concept: docs/methodology/multibot-agent-runtime.md (in the Vepol repo)
 Spec: §7 + §16 + §17
 
 Reads config from env (TG_API_ID, TG_API_HASH, KB_MULTIBOT_GROUP_CHAT_ID),

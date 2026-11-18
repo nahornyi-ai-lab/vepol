@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Render Russian speech locally with the pinned Qwen3-TTS snapshot, then exit."""
+"""Render speech locally with the pinned Qwen3-TTS snapshot, then exit.
+
+The narration language defaults to the user's profile language
+(personal/profile.yaml via _kb_profile; English when unset).
+
+`kb-tts-render --check` is a readiness probe: it verifies that the runtime and
+model kb-tts-install set up are present and usable, without downloading or
+loading the model. It prints one JSON line on stdout ({"ready": ..., "engine":
+"qwen", "error": ...}), exits 0 when ready, and otherwise exits 3 with a
+one-line reason on stderr.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +29,28 @@ MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
 MODEL_REVISION = "7d3824abff87e49756bb0f83fb5411de75d160c4"
 PYTHON_VERSION = "3.12.9"
 MLX_AUDIO_VERSION = "0.4.5"
-DEFAULT_INSTRUCT = (
-    "A natural native Russian male narrator with clear diction, calm confident delivery, "
+# Files kb-tts-install verifies (by SHA-256) before it promotes a model release.
+MODEL_FILES = ("model.safetensors", "speech_tokenizer/model.safetensors")
+ENGINE = "qwen"
+CHECK_NOT_READY = 3
+VOICE_INSTRUCT_TEMPLATE = (
+    "A natural native {language} male narrator with clear diction, calm confident delivery, "
     "restrained podcast-news style, medium pace, and no theatrical exaggeration."
 )
+# Kept for callers that import it; equals the template rendered for Russian.
+DEFAULT_INSTRUCT = VOICE_INSTRUCT_TEMPLATE.format(language="Russian")
+
+
+def profile_language_name() -> str:
+    """The user's language name for the model (e.g. "Russian"), English by default."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        from _kb_profile import get_language, language_name
+
+        hub = os.environ.get("KB_HUB", os.path.expanduser("~/knowledge"))
+        return language_name(get_language(hub)) or "English"
+    except Exception:  # noqa: BLE001 - language is presentation; never block audio
+        return "English"
 
 
 class InterruptedRender(Exception):
@@ -149,23 +177,101 @@ def load_install(home: Path) -> tuple[dict[str, object], Path, Path]:
     return data, model, python
 
 
+def tts_home() -> Path:
+    return Path(os.environ.get("KB_TTS_HOME", "~/.local/share/vepol-qwen-tts")).expanduser().resolve()
+
+
+def worker_path() -> Path:
+    return Path(os.environ.get("KB_TTS_WORKER", str(Path(__file__).resolve().parent / "_kb_tts/worker.py")))
+
+
+def readiness_problem(home: Path) -> str | None:
+    """Why local narration cannot run right now, or None when it can.
+
+    Checks only what kb-tts-install sets up: the install marker and its pins,
+    the verified model files, the runtime Python with the pinned mlx-audio,
+    the worker script and ffmpeg (the digest renders MP3). It never downloads
+    anything and never loads the model.
+    """
+    try:
+        _, model, python = load_install(home)
+    except SystemExit as exc:
+        return str(exc.code)
+    except (OSError, ValueError, AttributeError) as exc:
+        return f"TTS install marker is unreadable ({exc}); rerun kb-tts-install"
+    for relative in MODEL_FILES:
+        path = model / relative
+        if not path.is_file() or path.stat().st_size == 0:
+            return f"model file is missing: {path}; rerun kb-tts-install"
+    if not os.access(python, os.X_OK):
+        return f"runtime Python is not executable: {python}; rerun kb-tts-install"
+    try:
+        probe = subprocess.run(
+            [str(python), "-c",
+             "import importlib.metadata as m; print(m.version('mlx-audio'))"],
+            capture_output=True, text=True, timeout=30, check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"runtime Python cannot start ({exc}); rerun kb-tts-install"
+    found = (probe.stdout or "").strip()
+    if probe.returncode != 0 or found != MLX_AUDIO_VERSION:
+        return (f"runtime has mlx-audio {found or 'missing'}, expected "
+                f"{MLX_AUDIO_VERSION}; rerun kb-tts-install")
+    worker = worker_path()
+    if not worker.is_file():
+        return f"TTS worker is missing: {worker}"
+    ffmpeg = os.environ.get("KB_TTS_FFMPEG") or shutil.which("ffmpeg")
+    if not ffmpeg or not Path(ffmpeg).is_file() or not os.access(ffmpeg, os.X_OK):
+        return "ffmpeg is required for MP3 output; install it (brew install ffmpeg)"
+    return None
+
+
+def check() -> int:
+    problem = readiness_problem(tts_home())
+    if problem is None:
+        print(json.dumps({"ready": True, "engine": ENGINE}))
+        return 0
+    problem = " ".join(problem.split())
+    print(json.dumps({"ready": False, "engine": ENGINE, "error": problem}, ensure_ascii=False))
+    print(f"kb-tts-render: local narration is not ready: {problem}", file=sys.stderr)
+    return CHECK_NOT_READY
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    inputs = parser.add_mutually_exclusive_group(required=True)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check", action="store_true",
+                        help="Report whether the local runtime and model are ready, then exit.")
+    inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument("--text")
     inputs.add_argument("--file", type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--language", default="Russian")
-    parser.add_argument("--voice-instruct", default=DEFAULT_INSTRUCT)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--language", default=None,
+                        help="Narration language name (default: the profile language).")
+    parser.add_argument("--voice-instruct", default=None)
     args = parser.parse_args()
+
+    if args.check:
+        if args.text is not None or args.file is not None or args.out is not None:
+            parser.error("--check takes no other arguments")
+        return check()
+    if args.text is None and args.file is None:
+        parser.error("one of the arguments --text --file is required")
+    if args.out is None:
+        parser.error("the following arguments are required: --out")
+    if args.language is None:
+        args.language = profile_language_name()
+    if args.voice_instruct is None:
+        args.voice_instruct = VOICE_INSTRUCT_TEMPLATE.format(language=args.language)
 
     extension = args.out.suffix.lower()
     if extension not in {".wav", ".mp3"}:
         parser.error("--out must end in .wav or .mp3")
 
-    home = Path(os.environ.get("KB_TTS_HOME", "~/.local/share/vepol-qwen-tts")).expanduser().resolve()
+    home = tts_home()
     _, model, python = load_install(home)
-    worker = Path(os.environ.get("KB_TTS_WORKER", str(Path(__file__).resolve().parent / "_kb_tts/worker.py")))
+    worker = worker_path()
     if not worker.is_file():
         raise SystemExit(f"TTS worker is missing: {worker}")
     ffmpeg = os.environ.get("KB_TTS_FFMPEG") or shutil.which("ffmpeg")

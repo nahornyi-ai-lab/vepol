@@ -14,8 +14,8 @@ subprocess's stdout pipe, it calls watchdog.touch(run_id) — this is the
 single "I'm alive" signal.
 
 Why not OS-level mechanism (e.g., a timer per process)? Because supervisor
-also needs to track these timestamps for diagnostic reporting ("процесс
-молчал 15 мин, прервал" — concept §7.8) and for catchup-on-restart logic.
+also needs to track these timestamps for diagnostic reporting ("the process
+was silent for 15 min, stopped it" — concept §7.8) and for catchup-on-restart logic.
 In-memory dict on supervisor instance is simplest.
 """
 
@@ -35,7 +35,8 @@ class WatchedRun:
     """Runtime watchdog state for one spawned agent process.
 
     `last_stdout_ts` updates each time spawner reads a chunk. `silence_sec`
-    is per-agent override or default 900s. `pid` for SIGTERM/SIGKILL.
+    is per-agent override or default 900s. `pid` is the real child pid, the
+    only process SIGTERM/SIGKILL is sent to.
     """
 
     run_id: str
@@ -66,7 +67,14 @@ class Watchdog:
         hard_timeout_sec: int | None = None,
         now: float | None = None,
     ) -> None:
-        """Register a new spawned run for watchdog monitoring."""
+        """Register a new spawned run for watchdog monitoring.
+
+        `pid` must be the real child pid (reported by the spawner once the
+        process exists). A placeholder such as -1 or 0 is rejected: a kill
+        on it would signal every process the user owns or the whole group.
+        """
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError(f"watchdog needs the real child pid, got {pid!r}")
         n = now if now is not None else _now_epoch()
         self._watched[run_id] = WatchedRun(
             run_id=run_id,

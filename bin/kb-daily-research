@@ -118,11 +118,13 @@ def rel(path: pathlib.Path) -> str:
 
 
 def load_config() -> dict[str, str]:
-    if not CONFIG_PATH.is_file():
-        write_config(DEFAULT_CONFIG.copy())
+    # A missing file means "all defaults". It is NOT created here: the file is
+    # shared with kb-learning-arxiv, which would log every key this runner
+    # used to seed (mode, source_mode, ...) as an ignored legacy key.
     cfg = DEFAULT_CONFIG.copy()
     seen_keys = set()
-    for raw in CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.is_file() else ""
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or ":" not in line:
             continue
@@ -149,27 +151,37 @@ def load_config() -> dict[str, str]:
     return cfg
 
 
-def write_config(cfg: dict[str, str]) -> None:
-    merged = DEFAULT_CONFIG.copy()
-    merged.update({k: str(v) for k, v in cfg.items()})
-    lines = [
-        "# Vepol daily research configuration.",
-        "# Default mode is ai_agents_radar; set topic_override for a one-topic deep dive.",
-    ]
-    for key in (
-        "focus_project",
-        "mode",
-        "topic_override",
-        "research_mode",
-        "source_mode",
-        "max_attempts",
-        "max_sources",
-    ):
-        val = merged.get(key, "")
-        if val == "":
-            lines.append(f'{key}: ""')
-        else:
-            lines.append(f"{key}: {val}")
+def write_config(updates: dict[str, str]) -> None:
+    """Set only the given keys in personal/daily-research.yaml.
+
+    The file is shared with kb-learning-arxiv (max_papers, arxiv_categories,
+    social_check, focus_context, ...): every other line, comment included, is
+    kept as it is. A key already in the file is rewritten in place (its last
+    occurrence wins on read, so every occurrence is rewritten); a new key is
+    appended. A missing file is created with just these keys."""
+    def render(key: str, val: str) -> str:
+        return f'{key}: ""' if val == "" else f"{key}: {val}"
+
+    pending = {k: str(v) for k, v in updates.items()}
+    text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.is_file() else ""
+    lines = text.splitlines()
+    if not lines:
+        lines = ["# Vepol daily research configuration."]
+    written: set[str] = set()
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        # Only top-level keys belong to this runner (no indentation).
+        if raw[:1].isspace():
+            continue
+        key = stripped.split(":", 1)[0].strip()
+        if key in pending:
+            lines[i] = render(key, pending[key])
+            written.add(key)
+    for key, val in pending.items():
+        if key not in written:
+            lines.append(render(key, val))
     atomic_write(CONFIG_PATH, "\n".join(lines) + "\n")
 
 
@@ -214,6 +226,7 @@ def lock_path(date_iso: str) -> pathlib.Path:
 
 
 def short_topic(topic: str) -> str:
+    # Cyrillic letters are kept on purpose: a pinned topic may be written in Russian.
     s = re.sub(r"[^A-Za-zА-Яа-я0-9 _.-]+", "", topic).strip()
     s = re.sub(r"\s+", " ", s)
     return s[:70] or "Vepol research"
@@ -382,34 +395,34 @@ def pick_id(data: Any, *keys: str) -> str:
 
 
 def render_packet(date_iso: str, topic: str, selection_source: str, rationale: str, focus: str) -> str:
-    return f"""# Ежедневный research для Vepol — {date_iso}
+    return f"""# Daily research for Vepol — {date_iso}
 
-## Тема
+## Topic
 
 {topic}
 
-## Почему выбрана
+## Why this was selected
 
 - focus_project: `{focus}`
 - selection_source: `{selection_source}`
 - rationale: {rationale}
 
-## Контекст Vepol
+## Vepol context
 
-Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, и daily product-learning loop.
+Vepol is a local, Markdown-first system for memory and agent orchestration: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, and a daily product-learning loop.
 
-## Инструкция для NotebookLM
+## Instructions for NotebookLM
 
-Сделай аудиообзор на языке пользователя ({user_lang_name()}) как практический research recap для Vepol.
+Make an audio overview in the user's language ({user_lang_name()}) as a practical research recap for Vepol.
 
-Обязательная структура смысла:
+Required structure of the content:
 
-1. Что нашли: 3–5 главных выводов из web research.
-2. Как применить в Vepol: какие продуктовые, runtime, KB, UX или safety изменения стоит рассмотреть.
-3. Что не брать: что выглядит привлекательным, но сейчас не подходит.
-4. Следующие действия: 2–4 конкретных follow-up для backlog/spec/research.
+1. What we found: the 3–5 main takeaways from the web research.
+2. How to apply it in Vepol: which product, runtime, KB, UX or safety changes are worth considering.
+3. What to skip: what looks attractive but does not fit right now.
+4. Next steps: 2–4 concrete follow-ups for backlog/spec/research.
 
-Не пересказывай источники по очереди. Синтезируй, но не выдумывай факты сверх найденных источников.
+Do not retell the sources one by one. Synthesize, but do not invent facts beyond the sources found.
 """
 
 
@@ -673,13 +686,26 @@ def collect_anthropic_candidates() -> list[dict[str, Any]]:
     return out
 
 
+def arxiv_snapshot_path(date_iso: str) -> pathlib.Path:
+    """The day's arXiv snapshot: the legacy research snapshot when a hub still
+    has a producer for it, else the one kb-learning-arxiv writes."""
+    legacy = HUB / "sources" / f"arxiv-ai-research-snapshot-{date_iso}.md"
+    if legacy.is_file():
+        return legacy
+    return HUB / "sources" / f"arxiv-learning-snapshot-{date_iso}.md"
+
+
 def collect_arxiv_candidates(date_iso: str) -> list[dict[str, Any]]:
-    path = HUB / "sources" / f"arxiv-ai-research-snapshot-{date_iso}.md"
+    path = arxiv_snapshot_path(date_iso)
     text = read_text(path, limit=50000)
     if not text:
+        log(f"{date_iso}: no arXiv snapshot at {rel(path)} (kb-learning-arxiv writes it); "
+            "paper lane empty")
         return []
     out: list[dict[str, Any]] = []
-    pattern = re.compile(r"- \*\*(?P<title>.*?)\*\*.*?\((?P<url>https://arxiv\.org/abs/[^)]+)\)", re.DOTALL)
+    # Legacy entries carry "(https://arxiv.org/abs/ID)"; kb-learning-arxiv
+    # entries put the bare link on the line after "- **Title** — Authors".
+    pattern = re.compile(r"- \*\*(?P<title>.*?)\*\*.*?\(?(?P<url>https://arxiv\.org/abs/[^\s)]+)\)?", re.DOTALL)
     for match in pattern.finditer(text):
         title = clean_text(match.group("title"), limit=180)
         block = text[match.start() : min(len(text), match.end() + 700)]
@@ -783,7 +809,7 @@ def render_radar_packet(date_iso: str, topic: str, rationale: str, focus: str, s
         )
 
     watchlist = "\n".join(f"- {name}" for name in WATCHLIST)
-    return f"""# AI-agent radar для Vepol — {date_iso}
+    return f"""# AI-agent radar for Vepol — {date_iso}
 
 ## Topic
 
@@ -811,24 +837,24 @@ def render_radar_packet(date_iso: str, topic: str, rationale: str, focus: str, s
 
 {watchlist}
 
-## Контекст Vepol
+## Vepol context
 
-Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, и daily product-learning loop.
+Vepol is a local, Markdown-first system for memory and agent orchestration: KB, daily/log, backlog, specs, cross-review, runtime safety, NotebookLM listening artifacts, and a daily product-learning loop.
 
-## Инструкция для NotebookLM
+## Instructions for NotebookLM
 
-Сделай короткий аудиообзор на языке пользователя ({user_lang_name()}) как практический AI-agent radar для пользователя Vepol.
+Make a short audio overview in the user's language ({user_lang_name()}) as a practical AI-agent radar for the Vepol user.
 
-Обязательная структура смысла:
+Required structure of the content:
 
-1. Что случилось за сутки/неделю: 3–5 самых важных сигналов из selected sources.
-2. Что сейчас на пике обсуждения: какие статьи, demos, releases or community threads выглядят горячими.
-3. Кого/что отслеживать дальше: watchlist people/labs/projects.
-4. Что это значит для Vepol: implications for local agents, KB, governance, source selection, product positioning.
-5. Что не раздувать: weak signals, hype, unsupported claims.
-6. Следующие действия: 2–4 concrete follow-ups for backlog/spec/research.
+1. What happened over the past day/week: the 3–5 most important signals from the selected sources.
+2. What is peaking in discussion right now: which papers, demos, releases or community threads look hot.
+3. Who/what to track next: watchlist people/labs/projects.
+4. What this means for Vepol: implications for local agents, KB, governance, source selection, product positioning.
+5. What not to overhype: weak signals, hype, unsupported claims.
+6. Next steps: 2–4 concrete follow-ups for backlog/spec/research.
 
-Не пересказывай источники по очереди. Синтезируй, но не выдумывай факты сверх selected sources.
+Do not retell the sources one by one. Synthesize, but do not invent facts beyond the selected sources.
 """
 
 
@@ -887,6 +913,10 @@ def migrate_legacy_text_state(manifest: dict[str, Any]) -> None:
     manifest.pop("mode", None)
 
 
+# kb-channel-send exit code for "Telegram is not configured".
+RC_TELEGRAM_NOT_CONFIGURED = 3
+
+
 def process_outputs() -> set[str]:
     raw = os.environ.get("KB_PROCESS_OUTPUTS", "telegram,file")
     return {part.strip() for part in raw.split(",") if part.strip()}
@@ -904,22 +934,46 @@ def resolve_channel_send_bin() -> str:
     return found or ""
 
 
+# Telegram text digest labels per user language (legacy exception: an explicit
+# config `language` wins, else the profile). Unknown codes fall back to en.
+TEXT_DIGEST_LABELS = {
+    "en": {
+        "topic": "Topic",
+        "source": "Source",
+        "no_sources": "No fresh sources collected",
+        "packet": "Full packet",
+    },
+    "ru": {
+        "topic": "Тема",
+        "source": "Источник",
+        "no_sources": "Свежих источников не собрано",
+        "packet": "Полный packet",
+    },
+}
+
+
+def text_digest_labels() -> dict[str, str]:
+    code = str(load_config().get("language", "en")).strip().lower()
+    return TEXT_DIGEST_LABELS.get(code, TEXT_DIGEST_LABELS["en"])
+
+
 def render_text_digest(date_iso: str, topic: str, sources: list[dict[str, Any]], packet: pathlib.Path) -> str:
+    lab = text_digest_labels()
     lines = [
         f"📡 AI-agent radar {date_iso}",
-        f"Тема: {topic}",
+        f"{lab['topic']}: {topic}",
         "",
     ]
     if sources:
         for idx, item in enumerate(sources[:8], start=1):
-            title = clean_text(item.get("title", ""), limit=140) or "Источник"
+            title = clean_text(item.get("title", ""), limit=140) or lab["source"]
             url = str(item.get("url") or "").strip()
             lines.append(f"{idx}. {title} — {url}")
     else:
-        lines.append("Свежих источников не собрано")
+        lines.append(lab["no_sources"])
     lines.extend([
         "",
-        f"Полный packet: {rel(packet)}",
+        f"{lab['packet']}: {rel(packet)}",
     ])
     return "\n".join(lines)
 
@@ -952,6 +1006,17 @@ def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mp
         timeout=60,
         check=False,
     )
+    if proc.returncode == RC_TELEGRAM_NOT_CONFIGURED:
+        # Not delivered, not an error: the packet is on disk, so the text run
+        # completes (rc 0) and later routines in processes.yaml still run.
+        manifest["digest_delivered"] = False
+        manifest["text_status"] = "completed"
+        manifest["text_error"] = None
+        manifest["telegram"] = "not_configured"
+        save_manifest(mpath, manifest)
+        log(f"{date_iso}: telegram not configured; text digest not sent, "
+            f"packet kept at {rel(packet_path(date_iso))}")
+        return 0
     if proc.returncode != 0:
         manifest["text_status"] = "failed"
         manifest["text_error"] = "telegram delivery failed"
@@ -961,6 +1026,7 @@ def deliver_text_digest(date_iso: str, digest: str, manifest: dict[str, Any], mp
         log(f"{date_iso}: telegram delivery failed: {detail}")
         return 1
 
+    manifest.pop("telegram", None)
     manifest["digest_delivered"] = True
     manifest["text_status"] = "completed"
     manifest["text_error"] = None
@@ -1171,14 +1237,14 @@ def _run_locked(date_iso: str, force: bool = False, text_only: bool = False) -> 
 
         if radar_mode:
             prompt = (
-                f"Сделай короткий AI-agent radar на языке пользователя ({user_lang_name()}) для Vepol: что случилось за сутки/неделю, "
-                "что сейчас на пике обсуждения, кого/что отслеживать дальше, что это значит для Vepol, "
-                "что не раздувать, следующие действия."
+                f"Make a short AI-agent radar in the user's language ({user_lang_name()}) for Vepol: what happened over the past day/week, "
+                "what is peaking in discussion right now, who/what to track next, what this means for Vepol, "
+                "what not to overhype, next steps."
             )
         else:
             prompt = (
-                f"Сделай короткий аудиообзор daily research на языке пользователя ({user_lang_name()}) для Vepol: "
-                "что нашли, как применить в Vepol, что не брать, следующие действия."
+                f"Make a short audio overview of the daily research in the user's language ({user_lang_name()}) for Vepol: "
+                "what we found, how to apply it in Vepol, what to skip, next steps."
             )
         generated = run_notebooklm(
             [
@@ -1232,25 +1298,23 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.set_topic is not None:
-        cfg = load_config()
-        cfg["topic_override"] = args.set_topic.strip()
-        cfg["mode"] = "override" if cfg["topic_override"] else "ai_agents_radar"
-        write_config(cfg)
+        topic = args.set_topic.strip()
+        write_config({
+            "topic_override": topic,
+            "mode": "override" if topic else "ai_agents_radar",
+        })
         return 0
 
     if args.auto_topic:
-        cfg = load_config()
-        cfg["topic_override"] = ""
-        cfg["mode"] = "ai_agents_radar"
-        cfg["source_mode"] = "curated"
-        write_config(cfg)
+        write_config({
+            "topic_override": "",
+            "mode": "ai_agents_radar",
+            "source_mode": "curated",
+        })
         return 0
 
     if args.legacy_auto_topic:
-        cfg = load_config()
-        cfg["topic_override"] = ""
-        cfg["mode"] = "auto"
-        write_config(cfg)
+        write_config({"topic_override": "", "mode": "auto"})
         return 0
 
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):

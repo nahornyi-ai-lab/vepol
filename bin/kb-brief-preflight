@@ -28,6 +28,8 @@ CHILD_EVIDENCE_TERMS = (
     "ordered",
     "installed",
     "started moving",
+    # Russian stems of the same evidence words (signed, moving, ordered, ...):
+    # project logs may be written in Russian.
     "подпис",
     "договор подпис",
     "переез",
@@ -43,6 +45,8 @@ BACKLOG_RENTAL_TERMS = (
     "lease",
     "rental",
     "rent",
+    # Russian stems (contract, rent, secure, push through, sign) for backlogs
+    # written in Russian.
     "договор",
     "аренд",
     "закрепить",
@@ -107,6 +111,7 @@ def parse_registry(hub: Path) -> list[Project]:
     # `slug | status | category | path | description` (5 columns), while a
     # grown hub may insert extra columns (e.g. `parent`). Map the path and
     # description columns from the header row instead of hardcoding indices.
+    # Registries made from older Russian templates use Russian column names.
     path_idx: int | None = None
     desc_idx: int | None = None
     for raw in read_text(registry, 500_000).splitlines():

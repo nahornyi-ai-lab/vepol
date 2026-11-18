@@ -210,7 +210,7 @@ def main() -> int:
     workdir = _workdir_for(slug, config.projects_dir)
     if not workdir or not workdir.is_dir():
         print(f"✗ project not found for slug={slug!r}.\n"
-              f"  Run `init-kb` in the project directory first, then retry.",
+              f"  Open Claude Code in the project directory, run `/init-kb` first, then retry.",
               file=sys.stderr)
         return 2
 
@@ -224,7 +224,7 @@ def main() -> int:
             yaml_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             print(f"✗ .orchestration.yaml missing at {yaml_path}.\n"
-                  f"  Run `init-kb` in the project first to bootstrap the wiki.",
+                  f"  Run `/init-kb` in Claude Code in the project first to bootstrap the wiki.",
                   file=sys.stderr)
             return 2
 

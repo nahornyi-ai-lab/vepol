@@ -16,6 +16,15 @@ SRC_BIN="${KB_DIGEST_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+
 MIG="$SRC_BIN/kb-digest-migrate"
 if [[ ! -x "$MIG" ]]; then
   fail "kb-digest-migrate missing from $SRC_BIN"

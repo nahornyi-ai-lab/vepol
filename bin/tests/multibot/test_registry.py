@@ -227,7 +227,8 @@ class LoadFromProjectsDirTests(unittest.TestCase):
                 encoding="utf-8",
             )
             # Invalid runtime causes spec build to raise; loader catches and skips.
-            # Behavior chosen: be permissive on load (skip), strict on update (kb-init-agent).
+            # Behavior chosen: the loader is permissive (skips the agent) while
+            # _spec_from_yaml itself is strict (raises).
             # This test documents that invalid runtime causes the agent to be SKIPPED,
             # not the supervisor to crash.
             with self.assertRaises(ValueError):

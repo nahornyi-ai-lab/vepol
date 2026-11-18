@@ -173,5 +173,5 @@ or project log. The trace is short; it does not need a risk register or another
 approval format.
 
 Knowledge gaps discovered while checking a real external API still follow the
-normal KB delegation rule: resolve the fact in `knowledge/sources/` or
-`concepts/`, then return to the same one-pass review.
+normal KB delegation rule: write the fact to `knowledge/sources/` or
+`knowledge/reports/`, then return to the same one-pass review.

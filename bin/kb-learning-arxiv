@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """kb-learning-arxiv — scheduled learning: arXiv-only 3-paper digest in the
-user's language, with Codex for translation/analysis and optional Grok social
-context when explicitly enabled.
+user's language, with Claude for translation/analysis (Codex as the fallback)
+and optional Grok social context when explicitly enabled.
 
 Specs: learning-arxiv-implementation-spec-2026-06-12 +
 user-language-setting-2026-06-12 + split-translation-social-2026-06-17
 (KB decisions; all cross-reviewed).
 
 Flow: fetch arXiv Atom → deterministic regex ranking → select up to 3 papers
-→ one Codex call (offline, --sandbox read-only) for user-language
-study/method/result summaries per paper, bounded by title+full paper text
-when the PDF can be extracted, with explicit abstract fallback → short
-Telegram digest + file artifacts. If `social_check: grok` is set explicitly,
-Grok adds X/Reddit social context as an independent optional stage; a Grok
-failure degrades only the social lines. The digest/report language comes from
-personal/profile.yaml via _kb_profile.
+→ one analysis call through the agent chain (KB_LEARNING_ARXIV_TRANSLATE_AGENTS,
+default claude,codex; offline, no edits) for user-language study/method/result
+summaries per paper, bounded by title+full paper text when the PDF can be
+extracted, with explicit abstract fallback → Telegram digest (a header plus
+one message per paper) + file artifacts. If `social_check: grok` is set
+explicitly, Grok adds X/Reddit social context as an independent optional
+stage; a Grok failure degrades only the social lines. The digest/report
+language comes from personal/profile.yaml via _kb_profile. "Why selected"
+speaks to the user's own work in general; it is framed around a project only
+when personal/daily-research.yaml sets focus_project or focus_context.
+
+When Telegram is not configured (kb-channel-send exits 3) the digest is not
+sent, the report and sources stay on disk, and the run still exits 0.
 
 Primary selection is arXiv-only by construction: no RSS/HN/GitHub/news
 collector exists in this runner, so official-source links can never outrank
@@ -22,7 +28,8 @@ papers. NotebookLM is never called here — audio stays manual-only.
 
 Artifacts per date:
   sources/arxiv-learning-snapshot-<DATE>.md
-  sources/arxiv-learning-translation-codex-<DATE>.md
+  sources/arxiv-learning-translation-codex-<DATE>.md (historical name: written
+      by whichever agent did the analysis)
   sources/arxiv-learning-social-grok-<DATE>.md (only when social_check: grok)
   reports/learning-arxiv-summary-<DATE>.md
   .orchestrator/learning-arxiv-<DATE>.json (+ .lock)
@@ -33,6 +40,9 @@ Env:
   KB_LEARNING_ARXIV_DISABLE_NETWORK 1 = fail fetch unless fixture is set
   KB_LEARNING_ARXIV_GROK_BIN        grok binary override (tests use a fake)
   KB_LEARNING_ARXIV_GROK_TIMEOUT    grok social seconds (default 600)
+  KB_LEARNING_ARXIV_TRANSLATE_AGENTS analysis chain (default claude,codex)
+  KB_CLAUDE_BIN                     claude binary override (else PATH,
+                                    ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)
   KB_CODEX_BIN                      codex binary override (tests use a fake)
   KB_LEARNING_ARXIV_CODEX_TIMEOUT   codex translation seconds (default 300)
   KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR  test fixture dir with <arxiv-id>.txt
@@ -171,6 +181,8 @@ def L(key: str):
 
 SOCIAL_STATUSES = {"found", "weak", "not_found", "degraded"}
 SOCIAL_OFF_VALUES = {"", "off", "none", "skip", "skipped", "disabled", "false", "0", "no"}
+# Detects Russian (Cyrillic) letters: accept_loc() uses it to reject an
+# untranslated English slip when the user language is ru.
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 # Topic keyword groups for the deterministic ranker (spec: Deterministic
@@ -252,6 +264,18 @@ LABELS = {
             "safety": "про безопасность (alignment) — рамки агентских действий.",
             "_default": "расширяет картину текущего AI-ресёрча.",
         },
+        # Used when no focus_project/focus_context is configured: about the
+        # user's own work with AI agents, not about any particular product.
+        "why_templates_generic": {
+            "agents": "напрямую про агентные системы — пригодится, если ты строишь или используешь AI-агентов.",
+            "reasoning": "про качество рассуждений/планирования — влияет на то, как агенты разбивают и выполняют задачи.",
+            "memory": "про память/RAG/KB — как агенты хранят и находят знания.",
+            "tools": "про инструменты (MCP) — как агенты вызывают внешние инструменты.",
+            "evaluation": "про оценку агентов — пригодится для проверки качества их работы.",
+            "local": "про локальные/эффективные модели — что можно запускать на своей машине.",
+            "safety": "про безопасность (alignment) — рамки агентских действий.",
+            "_default": "расширяет картину текущего AI-ресёрча.",
+        },
         "report_title": "arXiv learning — разбор {date}",
         "report_stats": ("Просмотрено свежих статей: {fetched}. Релевантных кандидатов: "
                          "{relevant}. Выбрано: {n}."),
@@ -267,6 +291,7 @@ LABELS = {
         "report_translate_status": "Статус перевода",
         "no_new_papers": "Сегодня новых статей arXiv нет.",
         "report_sources": "Источники",
+        "continued": "продолжение",
     },
     "en": {
         "scanned": "Scanned {fetched} fresh arXiv papers, {relevant} matched the topics.",
@@ -306,6 +331,17 @@ LABELS = {
             "safety": "about safety (alignment) — the guardrails of agent actions.",
             "_default": "broadens the picture of current AI research.",
         },
+        # Used when no focus_project/focus_context is configured.
+        "why_templates_generic": {
+            "agents": "directly about agent systems — useful if you build or use AI agents.",
+            "reasoning": "about reasoning/planning quality — affects how agents break down and carry out tasks.",
+            "memory": "about memory/RAG/KB — how agents store and find knowledge.",
+            "tools": "about tools (MCP) — how agents call external tools.",
+            "evaluation": "about agent evaluation — useful for checking the quality of their work.",
+            "local": "about local/efficient models — what you can run on your own machine.",
+            "safety": "about safety (alignment) — the guardrails of agent actions.",
+            "_default": "broadens the picture of current AI research.",
+        },
         "report_title": "arXiv learning — breakdown {date}",
         "report_stats": ("Fresh papers scanned: {fetched}. Relevant candidates: "
                          "{relevant}. Selected: {n}."),
@@ -321,6 +357,7 @@ LABELS = {
         "report_translate_status": "Translation status",
         "no_new_papers": "There are no new arXiv papers today.",
         "report_sources": "Sources",
+        "continued": "continued",
     },
 }
 
@@ -365,7 +402,8 @@ def rel(path: pathlib.Path) -> str:
 # Config (read-only; legacy keys are ignored with a single log line)
 # --------------------------------------------------------------------------
 
-def load_config() -> dict:
+def load_config(quiet: bool = False) -> dict:
+    """quiet=True skips the log lines (for repeated internal reads)."""
     cfg = {
         "learning_topic": "ai_agents",
         "max_papers": MAX_PAPERS_DEFAULT,
@@ -405,19 +443,58 @@ def load_config() -> dict:
                      "focus_context"):
             if val:
                 cfg[key] = val
-    if legacy_present:
+    if legacy_present and not quiet:
         log(f"legacy config keys ignored: {', '.join(sorted(legacy_present))}")
-    cfg["social_check"] = normalize_social_check(cfg.get("social_check"))
+    cfg["social_check"] = normalize_social_check(cfg.get("social_check"), quiet=quiet)
     return cfg
 
 
-def normalize_social_check(value) -> str:
+# Only a missing or empty focus_project counts as unset. Any value, including
+# the "focus_project: auto" that older kb-daily-research runs seeded into
+# existing files, keeps the project-framed prompt those setups already get.
+FOCUS_PROJECT_UNSET = {""}
+REGISTRY_LIVE_ROW_RE = re.compile(r"^\|\s*([a-z0-9][a-z0-9-]{0,63})\s*\|\s*live\s*\|")
+
+
+def focus_configured(cfg: dict) -> bool:
+    """True when personal/daily-research.yaml names a focus project or context."""
+    project = str(cfg.get("focus_project") or "").strip().lower()
+    return bool(str(cfg.get("focus_context") or "").strip()) or project not in FOCUS_PROJECT_UNSET
+
+
+_FOCUS_CONFIGURED = None
+
+
+def focus_is_configured() -> bool:
+    global _FOCUS_CONFIGURED
+    if _FOCUS_CONFIGURED is None:
+        _FOCUS_CONFIGURED = focus_configured(load_config(quiet=True))
+    return _FOCUS_CONFIGURED
+
+
+def registry_live_projects(limit: int = 6) -> list:
+    """Slugs of live projects from the hub's registry.md (best effort; [] when
+    absent). Slugs are [a-z0-9-] only, so they are safe in a prompt."""
+    try:
+        text = (HUB / "registry.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    slugs = []
+    for line in text.splitlines():
+        m = REGISTRY_LIVE_ROW_RE.match(line)
+        if m and m.group(1) not in slugs:
+            slugs.append(m.group(1))
+    return slugs[:limit]
+
+
+def normalize_social_check(value, quiet: bool = False) -> str:
     raw = str(value or "").strip().lower()
     if raw == "grok":
         return "grok"
     if raw in SOCIAL_OFF_VALUES:
         return "off"
-    log(f"unknown social_check={raw!r}; social disabled")
+    if not quiet:
+        log(f"unknown social_check={raw!r}; social disabled")
     return "off"
 
 
@@ -945,13 +1022,13 @@ def method_text(paper: dict, limit: int = 240) -> str:
 
 
 def why_selected_text(paper: dict) -> str:
-    """«Почему выбрана» prose (spec full-paper-messages D3): the LLM's
+    """The "Why selected" prose (spec full-paper-messages D3): the LLM's
     two-clause why_selected_loc when available, else the topic-group template
     (documented degraded mode — never the scoring kitchen)."""
     loc = _loc_field(paper, "why_selected")
     if loc:
         return loc
-    templates = L("why_templates")
+    templates = L("why_templates" if focus_is_configured() else "why_templates_generic")
     for name, _rx in TOPIC_GROUPS:
         if name in paper.get("_groups", []):
             return templates[name]
@@ -1105,8 +1182,29 @@ def _translate_codex(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> 
     return _run_agent(argv, timeout, capture_file=out_file)
 
 
+def claude_bin() -> str:
+    """Find the Claude Code CLI (shared contract): $KB_CLAUDE_BIN when set and
+    executable, then `claude` on PATH, then ~/.local/bin, /opt/homebrew/bin and
+    /usr/local/bin. Scheduled runs get launchd's PATH, which lacks
+    ~/.local/bin, so the fixed fallbacks matter. First executable hit wins;
+    nothing found returns "claude" and the lane fails as a launch error."""
+    candidates = []
+    configured = os.environ.get("KB_CLAUDE_BIN", "").strip()
+    if configured:
+        candidates.append(os.path.expanduser(configured))
+    on_path = shutil.which("claude")
+    if on_path:
+        candidates.append(on_path)
+    candidates += [os.path.expanduser("~/.local/bin/claude"),
+                   "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "claude"
+
+
 def _translate_claude(prompt_file: pathlib.Path, date_iso: str, timeout: int) -> tuple:
-    bin_ = _resolve_agent_bin("claude", ["/opt/homebrew/bin/claude"])
+    bin_ = claude_bin()
     argv = [bin_, "-p", _pointer_instruction(prompt_file),
             "--output-format", "text", "--no-session-persistence"]
     return _run_agent(argv, timeout, unbounded=True)
@@ -1240,14 +1338,26 @@ def codex_prompt(date_iso: str, papers: list) -> str:
     papers_block = "\n".join(blocks)
     # Spec D3: the owner's project focus grounds why_selected_loc. focus_project
     # is the project slug; focus_context is an optional owner-curated line about
-    # what is being built right now (anti-formulaic grounding).
+    # what is being built right now (anti-formulaic grounding). Without either,
+    # clause (b) speaks to the user's own work in general, never to Vepol.
     cfg = load_config()
-    focus_lines = ["The user's project context: a local AI orchestrator with "
-                   "agents, memory/KB in markdown and tool-use (Vepol)."]
-    if cfg.get("focus_project"):
-        focus_lines.append(f"Focus project: {cfg['focus_project']}.")
-    if cfg.get("focus_context"):
-        focus_lines.append(f"Current focus: {cfg['focus_context']}.")
+    if focus_configured(cfg):
+        focus_lines = ["The user's project context: a local AI orchestrator with "
+                       "agents, memory/KB in markdown and tool-use (Vepol)."]
+        if cfg.get("focus_project"):
+            focus_lines.append(f"Focus project: {cfg['focus_project']}.")
+        if cfg.get("focus_context"):
+            focus_lines.append(f"Current focus: {cfg['focus_context']}.")
+    else:
+        focus_lines = ["No focus project is configured: write clause (b) for the "
+                       "user's own work with AI agents in general, without assuming "
+                       "a particular product."]
+        projects = registry_live_projects()
+        if projects:
+            focus_lines.append(
+                "The user's active projects (from their registry): "
+                f"{', '.join(projects)}; name one only when the paper clearly fits it."
+            )
     FOCUS_BLOCK = " ".join(focus_lines)
     return f"""# Translate + analyze today's arXiv papers ({date_iso})
 
@@ -1315,6 +1425,8 @@ def run_grok(date_iso: str, papers: list) -> tuple:
     prompt_file = ORCH / f"learning-arxiv-grok-prompt-{date_iso}.md"
     atomic_write(prompt_file, grok_prompt(date_iso, papers))
     timeout = int(os.environ.get("KB_LEARNING_ARXIV_GROK_TIMEOUT", str(GROK_TIMEOUT_DEFAULT)))
+    # Read-only like Money Radar's Grok lane: the social search needs web
+    # tools only, so writing, editing and shell are denied.
     cmd = [
         grok_bin(),
         "--cwd", str(HUB),
@@ -1324,6 +1436,7 @@ def run_grok(date_iso: str, papers: list) -> tuple:
         "--max-turns", "120",
         "--no-subagents",
         "--no-memory",
+        "--deny", "write", "--deny", "edit", "--deny", "bash",
     ]
     try:
         # stdin=DEVNULL: CLI agents crash or hang on an inherited closed/open
@@ -1559,16 +1672,24 @@ def translate_check(date_iso: str, papers: list) -> tuple:
     return status, accepted_agent, attempts, last_raw
 
 
-# D5 — degradation becomes visible. Exact owner-facing wording (spec); the
-# report is voiced by the morning digest in the owner's language (ru).
+# D5 — degradation becomes visible. Exact user-facing wording (spec), per user
+# language; the report is voiced by the morning digest in the user's language.
+# Unknown language codes fall back to en.
 TRANSLATE_WARNINGS = {
-    "degraded": "⚠️ перевод недоступен — ниже английские выдержки",
-    "partial": "⚠️ перевод получился не для всех статей — часть на английском",
+    "ru": {
+        "degraded": "⚠️ перевод недоступен — ниже английские выдержки",
+        "partial": "⚠️ перевод получился не для всех статей — часть на английском",
+    },
+    "en": {
+        "degraded": "⚠️ translation unavailable — English excerpts below",
+        "partial": "⚠️ translation did not work for every paper — some are in English",
+    },
 }
 
 
 def translate_warning(status: str) -> str:
-    return TRANSLATE_WARNINGS.get(status, "")
+    pack = TRANSLATE_WARNINGS.get(UI_LANG, TRANSLATE_WARNINGS["en"])
+    return pack.get(status, "")
 
 
 def _translate_chain_reasons(attempts: list) -> str:
@@ -1666,9 +1787,9 @@ def title_display(paper: dict, limit: int = 160) -> str:
 
 
 # NOTE: the old score-based reason_text (topics; abstract-signal; score) is
-# gone from ALL user surfaces (spec full-paper-messages D4): «Почему выбрана»
+# gone from ALL user surfaces (spec full-paper-messages D4): "Why selected"
 # is why_selected_text everywhere; the raw scoring audit lives in the report's
-# «Скоры» line and the snapshot's reason= field (p["reason"]).
+# "Scores" line and the snapshot's reason= field (p["reason"]).
 
 
 def render_snapshot(date_iso: str, papers: list, runner_ups: list, fetched: int, relevant: int) -> str:
@@ -1911,7 +2032,7 @@ def paper_sections(p: dict, idx: int, total: int, social_status: str,
 
 
 def continuation_head(p: dict, idx: int, total: int) -> str:
-    return f"{idx}/{total} · {title_display(p, None)} (продолжение)"
+    return f"{idx}/{total} · {title_display(p, None)} ({L('continued')})"
 
 
 def pack_paper_messages(p: dict, idx: int, total: int, social_status: str) -> list:
@@ -1975,6 +2096,10 @@ def render_messages(date_iso: str, papers: list, relevant: int, max_papers: int,
 # --------------------------------------------------------------------------
 # Delivery
 # --------------------------------------------------------------------------
+
+# kb-channel-send exit code for "Telegram is not configured".
+RC_TELEGRAM_NOT_CONFIGURED = 3
+
 
 def process_outputs() -> set:
     raw = os.environ.get("KB_PROCESS_OUTPUTS", "telegram,file")
@@ -2057,6 +2182,8 @@ def deliver_messages(date_iso: str, fresh_messages: list, manifest: dict) -> int
             return _delivery_failed(
                 date_iso, manifest,
                 f"telegram delivery failed at message {i + 1}/{len(messages)}: {exc}")
+        if proc.returncode == RC_TELEGRAM_NOT_CONFIGURED:
+            return _telegram_not_configured(date_iso, manifest)
         if proc.returncode != 0:
             detail = proc.stderr.strip() or proc.stdout.strip() or f"rc={proc.returncode}"
             return _delivery_failed(
@@ -2068,6 +2195,7 @@ def deliver_messages(date_iso: str, fresh_messages: list, manifest: dict) -> int
     manifest["digest_delivered"] = True
     manifest["status"] = "completed"
     manifest["error"] = None
+    manifest.pop("telegram", None)
     save_manifest(date_iso, manifest)
     log(f"{date_iso}: digest delivered ({len(messages)} messages)")
     return 0
@@ -2085,6 +2213,21 @@ def _render_failed(date_iso: str, manifest: dict, exc: Exception) -> int:
     save_manifest(date_iso, manifest)
     log(f"{date_iso}: {manifest['error']}")
     return 1
+
+
+def _telegram_not_configured(date_iso: str, manifest: dict) -> int:
+    """kb-channel-send exit 3: no bot token / chat id. Not delivered, not an
+    error — the report and sources are already on disk, so the day completes
+    (rc 0) and the morning digest and Money Radar that wait on it still run.
+    The stored messages stay, so a later run sends them once Telegram is set up."""
+    manifest["digest_delivered"] = False
+    manifest["telegram"] = "not_configured"
+    manifest["status"] = "completed"
+    manifest["error"] = None
+    save_manifest(date_iso, manifest)
+    log(f"{date_iso}: telegram not configured; digest not sent, "
+        f"report kept at {rel(report_path(date_iso))}")
+    return 0
 
 
 def _delivery_failed(date_iso: str, manifest: dict, error: str) -> int:

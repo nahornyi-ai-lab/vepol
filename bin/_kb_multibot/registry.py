@@ -1,12 +1,13 @@
 """Agent registry — load per-project .orchestration.yaml into in-memory dict.
 
-Concept §7.1: hub-level derived `~/knowledge/.orchestrator/agents.yaml` собирается
-из per-project `.orchestration.yaml`. Editable per-project: `parent_slug`, `bot_*`,
+Concept §7.1: hub-level derived `~/knowledge/.orchestrator/agents.yaml` is assembled
+from per-project `.orchestration.yaml`. Editable per-project: `parent_slug`, `bot_*`,
 `persona`, `topics`, `allowed_users`. Derived: `children_slugs` (computed from
 inverse parent_slug relationship).
 
-Loader is read-only — does not write the derived agents.yaml file. That's the job
-of `kb-rebuild-registry --agents` subcommand (see kb-rebuild-registry script).
+Loader is read-only — it does not write a derived agents.yaml file (nothing
+does today). Agents are added and changed with `kb-multibot-add` and
+`kb-multibot-remove`, which edit the per-project `.orchestration.yaml`.
 
 This module is the runtime-side: supervisor at startup walks `~/knowledge/projects/*/
 knowledge/.orchestration.yaml` and builds AgentRegistry in memory.

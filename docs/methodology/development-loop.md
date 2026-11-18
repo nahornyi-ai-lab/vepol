@@ -17,7 +17,8 @@ Related pages:
 - [TRIZ for Design](triz-for-design.md) — design discipline (Phase 2)
 - [Spec-Driven Workflow](spec-driven-workflow.md) — spec → tests → code
 - [Lightweight Spec Review](cross-agent-review.md) — the single review pass
-- [Orchestrated Knowledge Base](orchestrated-knowledge-base.md) — the substrate
+- [Orchestrated Knowledge Base](orchestrated-knowledge-base.md) — the shared
+  memory the loop writes to
 
 ## The loop
 
@@ -50,7 +51,7 @@ alternatives and why the smallest suitable one won.
 
 **3. Specification.** Before code, write `knowledge/decisions/<spec>.md`, **at
 most 150 lines**. Headings are yours; the file must answer four questions: what
-we do (visible behaviour, plain language), how it works (the logic structurally
+we do (visible behavior, plain language), how it works (the logic structurally
 — input -> steps -> output, every branch named), what is out of scope, and how
 we check it (acceptance one testable line each, what happens on failure, and the
 mandatory E2E path). Name the concrete code/API/schema files the design relies
@@ -127,9 +128,14 @@ rule. Two escapes from the same phase require revising the loop.
 
 ## Enforcement
 
+The loop is enforced by instruction and by the owner, not by code: `kb-board`
+does not check for a spec, a review or an approval before a task moves to
+`In Progress`.
+
 - Hub/project `AGENTS.md` carries the compact loop for every runtime.
-- Before `In Progress`, require a spec, exactly one lightweight independent
-  review, and owner approval. Otherwise the first task is writing the spec.
+- Before moving a task to `In Progress`, the agent makes sure it has a spec,
+  exactly one lightweight independent review, and owner approval. Otherwise
+  the first task is writing the spec.
 - Owner approval binds to the exact content hash. The lightweight review does
   not restart for wording or hash churn.
 - RED/E2E tests, live smoke, `kb-doctor`, and board close remain mandatory.

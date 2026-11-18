@@ -90,6 +90,8 @@ _DIAGNOSTIC_PREFIXES = (
     "codex executable unavailable",
     "orchestrator failed",
     "retro could not be assembled",
+    # Russian forms of the same diagnostics ("error", "unavailable", "failed
+    # to", and kb-retro's ru "retro could not be assembled" label).
     "ошибка",
     "недоступ",
     "не удалось",
@@ -99,6 +101,7 @@ _DIAGNOSTIC_SHAPE_WORDS = (
     "empty",
     "failed",
     "failure",
+    # Russian "empty" and "failure", for the same reason.
     "пусто",
     "сбой",
 )

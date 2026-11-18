@@ -85,7 +85,7 @@ class ProductionBackend:
     """Preferred backend: read Gmail through CODEX, read-only.
 
     Gmail is reachable from the background only via Codex's gmail plugin (owner
-    directive: "именно кодекс должен читать"); a headless `claude -p` does not
+    directive: "Codex is the one that must read it"); a headless `claude -p` does not
     carry the claude.ai Gmail connector. So this backend spawns Codex via
     _kb_mail.host.CodexHostRunner. Calendar still uses _kb_mcp.McpHostRunner.
 

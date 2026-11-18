@@ -1,5 +1,19 @@
 # Vepol: The Autonomous AI Operating Environment
 
+> **Generated from earlier docs.** NotebookLM wrote this briefing from earlier versions of the Vepol docs. It shows the product vision, and several parts of it are still direction: the six-month autonomy timeline and the edit tracking behind it, a strategy file that rewrites itself every week, and workload that adapts to your health data. Today the brief only reads a daily health file from your own sync and suggests rest after a bad night.
+>
+> Some details have also changed:
+>
+> - Node and Bun are optional.
+> - Session capture is an opt-in at install. Moving notes from `daily/` into `concepts/` or `solutions/` is up to you and your agents; nothing does it automatically.
+> - The `SessionStart` hook loads `AGENTS.md`, the agent card, `state.md`, the recent `log.md`, open work and escalations. It does not load `README.md`.
+> - Cross-agent review is one review of a non-trivial spec by a second agent, then your approval. There is no 2-of-3 quorum.
+> - Running `auto: true` tasks is experimental. Nothing runs them on a schedule.
+> - Task boards use `Backlog`, `Ready`, `In Progress`, `Review` and `Done` sections.
+> - The mail routine reads and sorts your inbox but never drafts or sends.
+>
+> The [main README](../../README.md) and [docs/features.md](../features.md) describe what ships today.
+
 ## Executive Summary
 
 Vepol is an opinionated, local-first personal operating environment designed to transform passive AI interactions into a proactive partnership. It is explicitly not a "memory tool"; rather, it utilizes a structured markdown knowledge base as infrastructure to support autonomous CLI-capable agents that grow in agency over time. By layering active orchestrators—Claude Code, Codex, Antigravity CLI, and future agents—over a unified source of truth, Vepol automates routine tasks, monitors user health and goals, and self-reflects on its own operational strategies.

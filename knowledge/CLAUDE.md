@@ -1,4 +1,4 @@
-# LLM Wiki Hub — Claude Code adapter
+# Vepol hub — Claude Code adapter
 
 This file exists for Claude Code's `CLAUDE.md` convention.
 It is not the canonical hub contract.

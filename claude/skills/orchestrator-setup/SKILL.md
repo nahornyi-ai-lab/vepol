@@ -1,262 +1,186 @@
 ---
 name: orchestrator-setup
-description: Bootstrap the personal Karpathy-wiki + active orchestrator on a clean macOS — clones the orchestrator-seed repo, runs install.sh, verifies prereqs (Claude CLI / Codex CLI / optional Antigravity CLI / Node / Bun), wires LaunchAgents (planner / tick / channel-telegram / orchestrator-cycle), creates the first project wiki, and verifies via kb-doctor. Use this skill when the user says "set up orchestrator", "установи orchestrator", "разверни базу знаний", "/orchestrator-setup", "set up the wiki system", "deploy orchestrator-seed", or otherwise indicates they want to install the full system on this machine. The skill is idempotent — safe to re-run.
+description: Install, finish or check Vepol (https://github.com/nahornyi-ai-lab/vepol) on this Mac by driving its own installer — install.sh agent modes --capabilities, --probe, --dry-run, --apply, --verify — then verify with kb-doctor and, if the user wants, turn on scheduled routines (LaunchAgents). Use this skill when the user says "set up Vepol", "install Vepol", "set up orchestrator", "/orchestrator-setup", "set up the wiki system", or otherwise wants the full system installed on this machine. Users may ask in their own language, for example Russian user phrasing such as "установи Vepol" or "разверни базу знаний". Safe to re-run (install.sh is idempotent).
 ---
 
-# orchestrator-setup — turnkey deploy of the Karpathy-wiki + active orchestrator
+# orchestrator-setup — install Vepol by driving its installer
 
-Bootstraps the entire system from `aladin2907/orchestrator-seed` on this machine. After running, the user has:
+You drive Vepol's installer; you never re-implement it. `install.sh`, `upgrade.sh` and
+`uninstall.sh` make every file change. If a mode, tool or script you need is missing or
+behaves oddly, stop and tell the user — do not improvise.
 
-- `~/knowledge/` hub with bin/, _template/, CLAUDE.md
-- `~/.claude/CLAUDE.md` master schema
-- 4 LaunchAgents loaded (planner 00:05, tick every 5 min, channel-telegram KeepAlive, orchestrator-cycle 07:30+20:45)
-- One bootstrapped project with `cycle_enabled: false` (safety toggle)
-- All `kb-*` CLIs available in `$PATH` via `~/knowledge/bin/`
+Read these in the Vepol repo before you install (step 1 gets the repo):
 
-Reference: `~/knowledge/orchestrator-seed/docs/setup.md` is the canonical setup walkthrough.
+- `SETUP.prompt.md` — the canonical agent install flow. This skill follows it.
+- `AGENTS.md` — the agent install and evolution contract: conflict checks for an existing
+  `~/knowledge/` and `~/.claude/`, prerequisites, personalization, and what you must not do.
+- `docs/dependency-matrix.md` — prerequisites and the exact command to install each one.
 
 ## When to run
 
-- User says: «set up orchestrator», «установи orchestrator», «разверни базу знаний», «/orchestrator-setup», «deploy seed», «установи personal KB system»
-- User clones the seed manually and asks how to finish setup
-- Fresh macOS without `~/knowledge/` directory
+- The user wants Vepol on this Mac, or an earlier install stopped halfway.
+- `~/knowledge/` does not exist yet, or `./install.sh --verify --json` reports problems.
 
 ## When NOT to run
 
-- `~/knowledge/bin/kb-doctor` already exists AND `launchctl list | grep com.knowledge` shows ≥3 agents → system already deployed; redirect user to `kb-doctor --strict` for health check or `~/knowledge/orchestrator-seed/docs/troubleshooting.md` for debug
-- User is on Linux/Windows (the seed is macOS-specific via LaunchAgents) — explain limitation, suggest manual port using `bin/` scripts only
-- User's `$HOME` is unusual (e.g. `/var/root`, `/tmp`) — refuse, ask for corrected env
+- Vepol is already installed and healthy (`./install.sh --verify --json` exits 0). Point the
+  user to `~/knowledge/bin/kb-doctor install-health` for a full health check instead.
+- The machine is not macOS 13 or later. Vepol supports macOS only; `install.sh` refuses to
+  install anywhere else. Explain and stop.
+- `~/knowledge/` exists but has no Vepol markers (`bin/kb-tick`, `_template/`): it belongs to
+  another system. Stop and follow `AGENTS.md` § 1.1 — never install into it without the
+  user's explicit OK, and offer a backup first.
 
-## Pre-flight checks
+## Rules
 
-Before doing ANY mutation, verify these one-by-one and **stop with explicit message** if any fail:
+- Ask before anything that installs software, changes files outside the repo, loads a
+  background service, or touches an account. Never use `sudo`, and never install Homebrew or
+  another package manager: show the exact command and let the user run it.
+- Never send secrets, tokens, private paths or knowledge-base contents off this machine.
+  Never ask the user to paste a token into the chat.
+- Treat empty or error output as failure, never as "nothing to do".
+- Set only the `VEPOL_ENABLE_*` variables the user approved. Never set `VEPOL_APPLY_C01=1`
+  on your own.
+- Fix one thing at a time and re-run the same check. After three failed tries, stop and hand
+  it back to the user. Never weaken a security or privacy check to make an error go away.
+- If a step fails, leave the partial state as it is and report which step failed, with its
+  output. `install.sh` is idempotent, so the user can fix the cause and re-run.
 
-| Check | Command | Failure response |
-|---|---|---|
-| macOS | `uname` returns `Darwin` | "This skill is macOS-only — see seed docs/setup.md for manual port" |
-| Homebrew | `brew --version` | "Install via https://brew.sh first, then re-run" |
-| Node ≥ 18 | `node --version` shows v18+ | "Run `brew install node@20` then re-run" |
-| Bun | `bun --version` | "Run `brew install oven-sh/bun/bun` then re-run" |
-| Python ≥ 3.11 | `python3 --version` | "Run `brew install python@3.13` then re-run" |
-| Claude CLI ≥ 2.1.113 | `claude --version` | "Install Claude Code, the command-line tool (the desktop app does not provide `claude`): `brew install --cask claude-code` or the installer at https://code.claude.com/docs/en/setup; then `claude auth login`, then re-run" |
-| Codex CLI | `$HOME/.local/bin/codex --version` | "Run `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=\"$HOME/.local/bin\" sh`, then `$HOME/.local/bin/codex login`, then re-run" |
-| Antigravity CLI (optional reviewer) | `agy --version` | "Run `npm install -g agy (https://antigravity.google/cli/install.sh)`, configure auth, then re-run" |
-| ripgrep | `rg --version` | "Run `brew install ripgrep` then re-run" |
-| Logged into Claude | `claude auth status` reports you are logged in | "Run `claude auth login` and complete browser auth, then re-run" |
-| Logged into Codex | `$HOME/.local/bin/codex config get` or check token file | "Run `$HOME/.local/bin/codex login`, then re-run" |
+## Steps
 
-The skill should run all checks first, list the missing items, give the user copy-paste commands to fix, and exit. Only proceed when ALL preflight checks pass.
+### 1. Get the repo
 
-## Step-by-step procedure
-
-### Step 1. Confirm intent
-
-Read this back to the user verbatim and ask `OK to proceed?`:
-
-> I'll deploy the full Karpathy-wiki + active orchestrator system on this Mac.
-> What I'll do:
-> 1. Clone `git@github.com:aladin2907/orchestrator-seed.git` into `~/knowledge/orchestrator-seed/`
-> 2. Run `./install.sh` which:
->    - Creates `~/knowledge/` with bin/, _template/, CLAUDE.md
->    - Installs `~/.claude/CLAUDE.md` master schema (if absent)
->    - Loads 4 LaunchAgents (planner, tick, channel-telegram, orchestrator-cycle)
->    - Patches claude-memory-compiler (if you have it)
-> 3. Run `kb-doctor --strict` to verify a clean install
-> 4. Optional: bootstrap your first project wiki via `new-wiki <path>`
->
-> The system runs cron-like jobs daily (07:30 morning plan, 20:45 evening retro) but every project ships with `cycle_enabled: false` — you opt-in per project.
->
-> Approve with «yes» / «давай», cancel with «no».
-
-If user says yes → proceed. Otherwise → stop, ask what they want instead.
-
-### Step 2. Clone the seed
+If you are not already inside a Vepol clone and `~/vepol` does not exist, ask, then:
 
 ```bash
-SEED_DIR="$HOME/knowledge/orchestrator-seed"
-mkdir -p "$HOME/knowledge"
-if [[ -d "$SEED_DIR/.git" ]]; then
-  echo "Seed already cloned — running git pull"
-  cd "$SEED_DIR" && git pull --ff-only
-else
-  git clone https://github.com/aladin2907/orchestrator-seed.git "$SEED_DIR"
-fi
+git clone https://github.com/nahornyi-ai-lab/vepol ~/vepol
+cd ~/vepol
 ```
 
-If clone fails (network / auth) → report the error verbatim, stop. Don't fabricate a fix.
+Read `VERSION` and `README.md`.
 
-### Step 3. Run install.sh
+### 2. Check the installer is new enough
 
 ```bash
-cd "$SEED_DIR"
-./install.sh 2>&1 | tee /tmp/orchestrator-install.log
+./install.sh --capabilities --json
 ```
 
-The script is idempotent. If something fails midway, the log shows where. Parse the tail of the log for any error markers:
-- `error:` / `failed` / `permission denied` → report exact line, stop
-- `loaded com.knowledge.*` × 4 → success
+The output must list `--probe`, `--apply` and `--verify`. If the command errors, prints
+nothing, or lacks them, stop and tell the user to update the clone (or fall back to the
+interactive `./install.sh`). Never run a bare `./install.sh` hoping it only looks — it
+installs.
 
-### Step 4. Verify
-
-Run these in order, report each result:
+### 3. Look at the machine (changes nothing)
 
 ```bash
-# 4.1 — kb-doctor strict
-~/knowledge/bin/kb-doctor --strict
-# Expected: P0=0 (info-only findings OK)
-
-# 4.2 — LaunchAgents loaded
-launchctl list | grep com.knowledge
-# Expected 4 lines: planner, tick, channel-telegram, orchestrator-cycle
-
-# 4.3 — broker reachable
-~/knowledge/bin/kb-orchestrator-run "echo hello world" --cwd /tmp \
-    --timeout 30 --json-status --run-id "$(uuidgen)"
-# Expected: outputs "hello world", JSON file written to ~/knowledge/.orchestrator/runs/
-
-# 4.4 — atomic backlog mutation works
-~/knowledge/bin/kb-backlog append hub "verify install" --by self --json
-~/knowledge/bin/kb-backlog list
-# Expected: shows "verify install" under Open
-
-# 4.5 — security guard installed (seed git hooks)
-test -L ~/knowledge/orchestrator-seed/.git/hooks/pre-commit && echo "✓ pre-commit"
-test -L ~/knowledge/orchestrator-seed/.git/hooks/pre-push && echo "✓ pre-push"
-~/knowledge/bin/kb-doctor seed-content-audit
-# Expected: both hooks symlinked, audit returns P0=0 P1=0 (P2 advisory OK)
+./install.sh --probe --json
 ```
 
-If 4.5 fails (hooks missing): re-run `cd ~/knowledge/orchestrator-seed && ./install.sh`
-— hook installation is idempotent and will fix it.
+Report `prereqs_missing_required`, `prereqs_missing_optional` and
+`needs_security_migration`. Exit code 10 means a required prerequisite is missing; 11 means
+a partial install (the hub exists but `bin/` is not linked).
 
-If 4.3 returns `category: auth` → user not logged into providers; remind them to run `claude auth login`, `codex login`, and configure Antigravity CLI auth if Gemini is enabled as reviewer.
+For each missing tool, show the command from `docs/dependency-matrix.md`, let the user run
+it, then probe again. Codex CLI is optional (cross-agent review) and uses the official
+standalone installer:
 
-If 4.4 fails with permission/lock errors → report and stop, point to docs/troubleshooting.md.
-
-### Step 5. (Optional) Bootstrap first project
-
-Ask the user:
-
-> Want to set up your first project wiki right now?
-> Give me an absolute path to an existing project (e.g. `~/projects/myapp`) and I'll create `<project>/AGENTS.md`, `<project>/CLAUDE.md`, and `<project>/knowledge/` with full coordination triad.
-> Skip with «later» / «потом».
-
-If they give a path:
 ```bash
-~/knowledge/bin/new-wiki <path-to-project> [slug] [category]
+curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
-Show them the resulting structure:
+Python packages are checked, not installed. If the install warns about them, show
+`python3 -m pip install --user -r requirements.txt`; if pip answers
+`externally-managed-environment` (Homebrew's Python), show
+`python3 -m pip install --break-system-packages -r requirements.txt` instead.
+
+### 4. Preview, then install
+
 ```bash
-ls "<project>/knowledge/"
-cat "<project>/knowledge/README.md"
+./install.sh --dry-run --json
 ```
 
-Remind them: project ships with `cycle_enabled: false`. To opt-in:
-1. Edit `<project>/knowledge/.orchestration.yaml` → `cycle_enabled: true`
-2. Run `~/knowledge/bin/kb-rebuild-registry apply`
-3. Verify with `kb-doctor migration-readiness <slug>` (P0=0 means ready)
+Show the plan and ask which extras the user wants. All are off unless set:
 
-### Step 6. Tell the user what just happened + next steps
+- `VEPOL_ENABLE_LAUNCHD=1` — scheduled routines (see step 6)
+- `VEPOL_ENABLE_TELEGRAM=1` — scaffold for Claude Code's own Telegram plugin (chatting with Claude from Telegram; it needs a second bot). The brief and the retro do not need it: they read `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from `~/knowledge/personal/.secrets`
+- `VEPOL_MERGE_HOOKS=1` — add Vepol's session hooks to an existing `~/.claude/settings.json` (a backup is kept)
+- `VEPOL_ENABLE_MEMORY_COMPILER=1` — automatic session capture (claude-memory-compiler)
 
-Use this template (fill in actual values):
+Then install with only the approved ones, for example:
 
-> ✅ Orchestrator deployed
->
-> System state:
-> - Hub: `~/knowledge/`
-> - Seed: `~/knowledge/orchestrator-seed/` (git tracked, push your fork later)
-> - LaunchAgents: 4 loaded
-> - Bootstrapped project: <path> (slug=<slug>, status=seeded, cycle_enabled=false)
->
-> What runs automatically:
-> - 00:05 daily — `kb-planner` drafts tomorrow's brief draft
-> - every 5 min — `kb-tick` (channel guard, brief/retro firing)
-> - 07:00 — `kb-brief` posts brief to Telegram (after you wire `~/knowledge/personal/.secrets`)
-> - 07:30 — `kb-orchestrator-cycle plan` (no-op until you `approved_at:`)
-> - 20:45 — `kb-orchestrator-cycle retro` (only fires for `cycle_enabled: true` projects)
-> - long-lived — `com.knowledge.channel-telegram` (incoming TG messages)
->
-> Next steps:
-> 1. Configure secrets (Telegram, Anthropic, OpenAI keys) — see `~/knowledge/orchestrator-seed/docs/setup.md` § Telegram bridge
-> 2. Decide which projects opt into the daily cycle. Start with one — flip `cycle_enabled: true` in its `.orchestration.yaml`, run `kb-rebuild-registry apply`, watch the next evening retro.
-> 3. Read `~/knowledge/orchestrator-seed/docs/README.md` — entrypoint for everything else.
->
-> Health check anytime: `kb-doctor --strict`
-> Troubleshooting: `~/knowledge/orchestrator-seed/docs/troubleshooting.md`
-
-## Common failure modes (preempt these)
-
-### `claude auth login` works but broker returns `auth`
-The CLI is logged in but the session token isn't where the broker looks. Run:
 ```bash
-ls ~/.claude/auth.json && head -c 50 ~/.claude/auth.json
+VEPOL_ENABLE_LAUNCHD=1 VEPOL_ENABLE_MEMORY_COMPILER=1 ./install.sh --apply
 ```
-If empty/absent → re-run `claude auth login` and watch for the success message.
 
-### LaunchAgent loads but exits 78 / 1
-Path issue in plist — usually `__HOME__` substitution failed. Check the rendered plist:
+If the probe reported `"needs_security_migration": true`, explain why it matters: legacy
+bypass-permission keys in `~/.claude/settings.json` let an injected prompt run tools without
+the user's approval. Get the user's explicit OK, then re-run the same apply command with
+`VEPOL_APPLY_C01=1` added (keep the approved `VEPOL_ENABLE_*`; an extra left out is recorded
+as declined).
+
+### 5. Verify
+
 ```bash
-grep -E "Program|Path" ~/Library/LaunchAgents/com.knowledge.tick.plist | head
+./install.sh --verify --json              # core substrate; exit 13 lists verify_problems
+~/knowledge/bin/kb-doctor install-health  # manifest, skills, hooks, LaunchAgents
 ```
-If you see literal `__HOME__` → re-run `install.sh`.
 
-### `bun: command not found` after install
-Bun was installed but PATH not refreshed. Open a new terminal OR run:
+Expect no P0 or P1 findings; P2 findings are advisory. Then run the quick proof and tell
+the user what each command shows (the `kb-*` commands live in `~/knowledge/bin/`; run them
+from there if they are not on the PATH yet):
+
 ```bash
-export PATH="$HOME/.bun/bin:$PATH"
-hash -r
+kb-doctor
+kb-demo brief
+kb-task "My first Vepol task"
+kb-search "first Vepol"
 ```
 
-### kb-doctor reports P1 "reports/ directory missing" for a project
-Expected — `reports/` is created on first cycle invocation OR can be pre-created:
-```bash
-mkdir -p <project>/knowledge/reports
-```
+Finally, read the user the newest receipt under `~/knowledge/install/receipts/` and
+summarize: version, what is installed, which extras are on, and anything left to do.
 
-## Security guard (built-in to every install)
+### 6. Scheduled routines (opt-in)
 
-The seed ships with a 3-layer guard against accidentally publishing
-personal data to GitHub. Every install gets this for free; nothing
-to configure.
+With `VEPOL_ENABLE_LAUNCHD=1`, `install.sh` renders the plists from `launchd/` into
+`~/Library/LaunchAgents/` and loads them:
 
-**Layer 1 — `kb-seed-sync` leak-scan.** Runs on every commit. Greps the
-seed for known identifier patterns (maintainer name variants, real
-project slugs, local paths like `/Users/<name>`, API token shapes,
-etc.). Refuses to commit on hit.
+- `com.knowledge.tick` — every 15 minutes runs the routines declared in
+  `~/knowledge/personal/processes.yaml` (morning brief, evening retro, learning digest, …)
+- `com.knowledge.planner` — at 00:05 works out the day's timing (sunrise/sunset, brief and
+  retro times) for `kb-tick`
+- `com.knowledge.orchestrator-cycle` — the project cycle: morning plan at 07:30, evening
+  retro at 20:45
+- `com.knowledge.people-review-bot` — Telegram buttons for staged contacts; idle until a bot
+  token is set
 
-**Layer 2 — `kb-seed-sync` structural audit.** Runs immediately after
-leak-scan. Invokes `kb-doctor seed-content-audit` which verifies:
-- live `registry.md` / `hierarchy.yaml` / `migration-*.yaml` NOT tracked
-- `personal/`, `concepts/`, `people/`, `companies/`, `solutions/`,
-  `raw/`, `sources/` directories NOT tracked
-- `.orchestrator/`, `logs/` NOT tracked
-- Hub-level `log.md` / `state.md` / `backlog.md` / `escalations.md` /
-  `incidents.md` / `strategies.md` NOT tracked (only `_template/`
-  versions allowed)
-- No dated `reports/<YYYY-MM-DD>.md` in templates (only `_template.md`)
-- No real personal slugs (read at runtime from live migration table)
-  appearing in docs as examples instead of placeholders
+If the user declined at install time, turn them on later by re-running `./install.sh --apply`
+with `VEPOL_ENABLE_LAUNCHD=1` plus any other extras the user already has on (plists that
+already exist are kept). Check with `launchctl list | grep com.knowledge` and
+`~/knowledge/bin/kb-doctor install-health`; logs are in `~/knowledge/logs/`. Which routines run, and when, is set in `processes.yaml`
+(see `docs/daily-routine.md`).
 
-**Layer 3 — git pre-push hook.** Last line of defense before bytes
-hit the remote. Runs `kb-doctor seed-content-audit`. If P1 findings,
-push is blocked. Force-bypass with `git push --no-verify` (NOT
-recommended).
+Delivery to Telegram needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in
+`~/knowledge/personal/.secrets` (mode 600). The user fills these in themselves.
 
-If a user reports «moy push не проходит» — first check what the audit
-says; explain the finding; help fix the leak; never advise --no-verify.
+Each project starts with `cycle_enabled: false` in `<project>/knowledge/.orchestration.yaml`,
+so the project cycle skips it. Only the user turns it on; check readiness first with
+`~/knowledge/bin/kb-doctor migration-readiness <slug>`.
 
-The structure is documented in `docs/security-and-privacy.md`.
+### 7. First project (optional)
 
-## Important constraints
+Offer to set up the first project wiki: in that project's folder, run the `init-kb` skill
+(open Claude Code there and type `/init-kb`; print mode cannot hold the skill's
+confirmation dialog). Do not scan `~/` recursively to find projects —
+follow `AGENTS.md` § 2.1.
 
-- **Never** modify a user's existing project files outside `<project>/AGENTS.md`, `<project>/CLAUDE.md`, and `<project>/knowledge/`. Code stays code.
-- **Never** push to GitHub on behalf of the user. The seed at `~/knowledge/orchestrator-seed/` has the upstream `aladin2907/orchestrator-seed` remote — explicit user action required to push.
-- **Never** flip `cycle_enabled: true` automatically. Default is opt-in for safety; user must do it deliberately.
-- If anything goes wrong mid-install, leave the partial state intact and report exactly which step failed. Don't try to "clean up" — the install.sh is idempotent so the user can fix-and-retry.
+## Undo and upgrade
 
-## What this skill is NOT
+- Undo a fresh install: `./uninstall.sh`. It removes only Vepol's managed files and never
+  deletes user data. If it is missing, stop — do not delete anything by hand.
+- Move to the newest release later: `./upgrade.sh` (`./upgrade.sh --check` only reports).
 
-- Not a replacement for `init-kb` skill (which is per-project wiki bootstrap; runs AFTER orchestrator-setup).
-- Not a config wizard for secrets (.secrets / .env contents) — that's manual per setup.md.
-- Not Linux/Windows compatible — LaunchAgents are macOS-specific.
+## What this skill is not
+
+- Not a replacement for `init-kb`, which sets up one project's wiki and runs after this.
+- Not a secrets wizard: the user fills in `.secrets` and `.env` values themselves.
+- Not for Linux or Windows: the scheduled routines rely on macOS LaunchAgents.

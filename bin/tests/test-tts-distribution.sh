@@ -23,6 +23,16 @@ fi
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+STUB_BIN=$(mktemp -d)
+trap 'cleanup; rm -rf "$STUB_BIN"' EXIT
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$STUB_BIN/$agent"
+  chmod +x "$STUB_BIN/$agent"
+done
+export PATH="$STUB_BIN:$PATH" KB_CLAUDE_BIN="$STUB_BIN/claude" KB_CODEX_BIN="$STUB_BIN/codex"
+
 FILES=(
   kb-morning-digest kb-channel-send-audio kb-tts-install kb-tts-render _kb_processes.py
   _kb_digest_migrate.py kb-digest-migrate
@@ -163,10 +173,14 @@ PY
     || bad "installer rewrote customized digest blocks"
 fi
 
+# The README is product-first; feature setup (both audio routes) lives in
+# docs/features.md, so either file may carry the guidance.
+GUIDE=("$PUBLIC/README.md")
+[[ -f "$PUBLIC/docs/features.md" ]] && GUIDE+=("$PUBLIC/docs/features.md")
 if [[ ! -f "$PUBLIC/README.md" || ! -f "$PUBLIC/CHANGELOG.md" ]]; then
   ok "public guidance check not applicable to this standalone root"
-elif grep -Fq 'kb-tts-install' "$PUBLIC/README.md" \
-   && grep -Fq 'NotebookLM' "$PUBLIC/README.md" \
+elif grep -Fq 'kb-tts-install' "${GUIDE[@]}" \
+   && grep -Fq 'NotebookLM' "${GUIDE[@]}" \
    && grep -Fq 'local Qwen' "$PUBLIC/CHANGELOG.md"; then
   ok "public guidance documents both selectable audio routes"
 else

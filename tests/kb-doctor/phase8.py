@@ -130,6 +130,43 @@ def f_report_quality():
     shutil.rmtree(sb)
 
 
+def f_report_quality_sections():
+    print("report-quality-check: status:done sections — English and legacy Russian headings")
+    today = dt.date.today().isoformat()
+    front = (
+        f"---\nreport_id: alpha-{today}\nslug: alpha\ndate: {today}\n"
+        f"cycle: evening\nstatus: done\nrun_id: x\n---\n\n"
+    )
+    english = (
+        "## What was done today\n- a\n\n## What was planned\n- b\n\n"
+        "## Delta (plan − actual)\n- closed: 1\n\n"
+        "## Candidates (what could be done tomorrow)\n\n## Escalations (upward)\n"
+    )
+    # Reports written from the older Russian template/prompt must still pass.
+    legacy_ru = (
+        "## Что сделано сегодня\n- a\n\n## Что было в плане\n- b\n\n"
+        "## Дельта (план − факт)\n- closed: 1\n\n"
+        "## Candidates (что можно сделать завтра)\n\n## Escalations (наверх)\n"
+    )
+    for label, body in (("English", english), ("legacy Russian", legacy_ru)):
+        sb = setup_sandbox()
+        (sb / "alpha" / "knowledge" / "reports" / f"{today}.md").write_text(front + body, encoding="utf-8")
+        proc = kbd(sb, "report-quality-check")
+        assert_("missing-section" not in proc.stdout,
+                f"{label} section headings satisfy the done-report check (got: {proc.stdout[:200]})")
+        shutil.rmtree(sb)
+
+    sb = setup_sandbox()
+    (sb / "alpha" / "knowledge" / "reports" / f"{today}.md").write_text(
+        front + "## Candidates\n\n## Escalations\n", encoding="utf-8",
+    )
+    proc = kbd(sb, "report-quality-check")
+    assert_(proc.stdout.count("missing-section") == 3,
+            f"missing done/planned/delta sections are flagged (got: {proc.stdout[:300]})")
+    assert_("What was done" in proc.stdout, "missing-section finding names the English section")
+    shutil.rmtree(sb)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # cycle-source-id-collision
 # ──────────────────────────────────────────────────────────────────────────
@@ -483,6 +520,72 @@ def f_install_health_codex_optional():
     shutil.rmtree(sb)
 
 
+def f_install_health_binaries_match_installer():
+    """Required binaries = install.sh REQUIRED_TOOLS; the rest are optional.
+
+    A clean Mac that followed the README has git, claude, rg and python3 but
+    maybe not gh/uv/jq/node/bun; install-health --strict must not fail on it.
+    claude counts where install.sh finds it (shared lookup), not only on PATH.
+    """
+    print("install-health binaries: installer-required → P1 when missing; gh/uv/jq/node/bun → info")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_bins", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_bins", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-ih-bins-"))
+    bindir = sb / "bin"
+    bindir.mkdir()
+
+    def stub(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    required = ("git", "claude", "rg", "python3")
+    for name in required:
+        stub(bindir / name)
+
+    # Hermetic: KB_CLAUDE_BIN would count as a found claude.
+    saved_claude_bin = os.environ.pop("KB_CLAUDE_BIN", None)
+    try:
+        findings = mod._ih_check_binaries(sb, env_path=str(bindir))
+        blocking = [f for f in findings if f.severity in {"P0", "P1"}]
+        assert_(not blocking, f"no P0/P1 with only installer-required tools present (got: {[f.id for f in blocking]})")
+        optional = {f.file: f for f in findings if f.id.startswith("install-health:optional-binary-missing")}
+        assert_(set(optional) == {"gh", "uv", "jq", "node", "bun"},
+                f"gh/uv/jq/node/bun reported as optional (got: {sorted(optional)})")
+        assert_(all(f.severity == "info" for f in optional.values()), "optional binaries are info, not P1")
+
+        (bindir / "rg").unlink()
+        findings = mod._ih_check_binaries(sb, env_path=str(bindir))
+        missing = [f for f in findings if f.id.startswith("install-health:binary-missing:") and f.severity == "P1"]
+        assert_([f.file for f in missing] == ["rg"], f"a missing installer-required tool stays P1 (got: {[f.id for f in missing]})")
+        stub(bindir / "rg")
+
+        # Claude Code's native installer puts claude in ~/.local/bin, which may
+        # not be on PATH yet right after install: install.sh accepts it there.
+        (bindir / "claude").unlink()
+        stub(sb / ".local" / "bin" / "claude")
+        findings = mod._ih_check_binaries(sb, env_path=str(bindir))
+        assert_(not [f for f in findings if f.severity in {"P0", "P1"}],
+                "claude in ~/.local/bin (not on PATH) counts as present")
+        (sb / ".local" / "bin" / "claude").unlink()
+        if not any(pathlib.Path(p).is_file() for p in ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")):
+            findings = mod._ih_check_binaries(sb, env_path=str(bindir))
+            missing = [f for f in findings if f.id.startswith("install-health:binary-missing:")]
+            assert_([f.file for f in missing] == ["claude"] and missing[0].severity == "P1",
+                    f"claude found nowhere stays P1 (got: {[f.id for f in missing]})")
+    finally:
+        if saved_claude_bin is not None:
+            os.environ["KB_CLAUDE_BIN"] = saved_claude_bin
+    shutil.rmtree(sb)
+
+
 def f_install_health_runtime_bypass_flags():
     """Runtime launch flags must not reintroduce bypass mode."""
     print("install-health runtime bypass flags: channel/launchd flag → P0")
@@ -525,6 +628,293 @@ def f_install_health_runtime_bypass_flags():
     (launch_agents / "com.knowledge.channel-telegram.plist").write_text("<plist></plist>\n", encoding="utf-8")
     findings = mod._ih_check_runtime_bypass_flags(home, seed)
     assert_(not findings, "safe runtime launch surfaces produce no bypass findings")
+    shutil.rmtree(sb)
+
+
+def f_install_health_optional_launchagents():
+    """Scheduled tasks accepted: only what install.sh installs is expected.
+
+    install.sh installs tick, planner, orchestrator-cycle and people-review-bot.
+    The repo also ships channel-telegram and multibot-supervisor templates that
+    are set up by hand; kb-bootstrap-manifest marks them optional, and an
+    absent optional LaunchAgent is info, not a P0 broken install.
+    """
+    print("install-health optional LaunchAgents: not installed by install.sh → info, not P0")
+
+    bin_dir = pathlib.Path(__file__).resolve().parents[2] / "bin"
+    mods = {}
+    for name, fname in (("doctor", "kb-doctor"), ("manifest", "kb-bootstrap-manifest")):
+        mod_name = f"kb_{name}_under_test_optional_la"
+        loader = importlib.machinery.SourceFileLoader(mod_name, str(bin_dir / fname))
+        spec = importlib.util.spec_from_loader(mod_name, loader)
+        assert_(spec is not None and spec.loader is not None, f"load {fname} module spec")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        mods[name] = mod
+    doctor, manifest_mod = mods["doctor"], mods["manifest"]
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-optional-la-"))
+    doctor.HUB = sb / "knowledge"
+    (doctor.HUB / ".orchestrator").mkdir(parents=True)  # no opt-out marker: tasks accepted
+    seed = sb / "seed"
+    (seed / "launchd").mkdir(parents=True)
+    home = sb / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    installed = ("tick", "planner", "orchestrator-cycle", "people-review-bot")
+    for short in installed + ("channel-telegram", "multibot-supervisor"):
+        (seed / "launchd" / f"com.knowledge.{short}.plist.template").write_text(
+            f"<plist>{short} __HOME__</plist>\n", encoding="utf-8",
+        )
+    for short in installed:
+        (agents / f"com.knowledge.{short}.plist").write_text(f"<plist>{short}</plist>\n", encoding="utf-8")
+
+    manifest = manifest_mod.build_manifest(seed, home)
+    files = manifest["files"]
+    optional = sorted(k for k, v in files.items() if v.get("optional"))
+    assert_(optional == ["launchd-channel-telegram", "launchd-multibot-supervisor"],
+            f"manifest marks only the LaunchAgents install.sh does not install as optional (got: {optional})")
+    assert_(all(files[f"launchd-{s}"]["installed_hash"] for s in installed),
+            "the four installer LaunchAgents are recorded with their hash")
+
+    findings = doctor._ih_check_entries(manifest, home=home)
+    blocking = [f.id for f in findings if f.severity in {"P0", "P1"}]
+    assert_(not blocking, f"accepted scheduled tasks + absent optional LaunchAgents → no P0/P1 (got: {blocking})")
+    info = sorted(f.file for f in findings if f.id.startswith("install-health:optional-not-installed"))
+    assert_(len(info) == 2 and all(("channel-telegram" in p or "multibot-supervisor" in p) for p in info),
+            f"absent optional LaunchAgents are reported as info (got: {info})")
+
+    # A required (installer) LaunchAgent missing at bootstrap stays P0, with the fix.
+    (agents / "com.knowledge.planner.plist").unlink()
+    findings = doctor._ih_check_entries(manifest_mod.build_manifest(seed, home), home=home)
+    p0 = [f for f in findings if f.severity == "P0"]
+    assert_([f.id.split(":")[3] for f in p0] == ["launchd-planner"],
+            f"a missing installer LaunchAgent is still P0 (got: {[f.id for f in p0]})")
+    assert_("re-run install.sh" in p0[0].message, "the P0 names the fix")
+    shutil.rmtree(sb)
+
+
+def f_install_health_settings_hook_fix_hint():
+    """settings-hook-missing must name the fix: kb-claude-hooks --apply."""
+    print("install-health settings hooks: missing hook P0 names `kb-claude-hooks --apply`")
+
+    doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
+    loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_hook_hint", str(doctor_path))
+    spec = importlib.util.spec_from_loader("kb_doctor_under_test_hook_hint", loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-hook-hint-"))
+    home = sb / "home"
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    # A user's own settings.json that predates Vepol: no hooks at all.
+    settings.write_text(json.dumps({"model": "opus", "hooks": {"Stop": []}}), encoding="utf-8")
+    findings = mod._ih_check_settings(home)
+    missing = [f for f in findings if f.id.startswith("install-health:settings-hook-missing")]
+    assert_(len(missing) == 3 and all(f.severity == "P0" for f in missing),
+            "each of the three missing Vepol hooks is P0")
+    assert_(all("~/knowledge/bin/kb-claude-hooks --apply" in f.message for f in missing),
+            "each settings-hook-missing finding names `~/knowledge/bin/kb-claude-hooks --apply`")
+
+    settings.write_text(json.dumps({"hooks": {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "~/knowledge/bin/kb-session-start"}]}],
+        "SessionEnd": [{"hooks": [{"type": "command", "command": "~/knowledge/bin/kb-session-end"}]}],
+        "PreCompact": [{"hooks": [{"type": "command", "command": "~/knowledge/bin/kb-pre-compact"}]}],
+    }}), encoding="utf-8")
+    assert_(not mod._ih_check_settings(home), "all three hooks present → no finding")
+    shutil.rmtree(sb)
+
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+_PIP_USER = "python3 -m pip install --user -r "
+_PIP_BREW = "python3 -m pip install --break-system-packages -r "
+
+
+def _load_doctor(name):
+    loader = importlib.machinery.SourceFileLoader(name, str(_REPO / "bin" / "kb-doctor"))
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert_(spec is not None and spec.loader is not None, "load kb-doctor module spec")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _module_dir(root, blocked=(), present=()):
+    """A PYTHONPATH dir: `blocked` modules import like missing ones, `present` are empty stubs."""
+    root.mkdir(parents=True, exist_ok=True)
+    for name in blocked:
+        (root / f"{name}.py").write_text(
+            f"raise ModuleNotFoundError(\"No module named '{name}'\", name={name!r})\n",
+            encoding="utf-8")
+    for name in present:
+        (root / f"{name}.py").write_text("", encoding="utf-8")
+    return root
+
+
+def _python3_on(bindir, pythonpath):
+    """bindir/python3: this interpreter with PYTHONPATH pinned (hermetic packages)."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    wrapper = bindir / "python3"
+    wrapper.write_text(f"#!/bin/sh\nPYTHONPATH='{pythonpath}' exec '{sys.executable}' \"$@\"\n",
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def f_install_health_python_packages():
+    """requirements.txt packages missing for the PATH python3 → P1 naming the pip command."""
+    print("install-health python packages: missing for PATH python3 → P1 with the install command")
+    mod = _load_doctor("kb_doctor_under_test_pypkgs")
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-ih-pypkgs-"))
+    req = str(_REPO / "requirements.txt")
+
+    _python3_on(sb / "none", _module_dir(sb / "mods-none",
+                                         blocked=("frontmatter", "click", "yaml", "jellyfish")))
+    findings = mod._ih_check_python_packages(env_path=str(sb / "none"))
+    assert_(len(findings) == 1 and findings[0].severity == "P1"
+            and findings[0].id.startswith("install-health:python-packages-missing:"),
+            f"all four missing → one P1 python-packages-missing (got: {[f.id for f in findings]})")
+    msg = findings[0].message
+    assert_(all(p in msg for p in ("python-frontmatter", "click", "PyYAML", "jellyfish")),
+            "the P1 names the pip package names")
+    assert_(_PIP_USER + req in msg and _PIP_BREW + req in msg,
+            f"the P1 names the --user and --break-system-packages commands (got: {msg})")
+
+    _python3_on(sb / "some", _module_dir(sb / "mods-some", blocked=("jellyfish",),
+                                         present=("frontmatter", "click", "yaml")))
+    findings = mod._ih_check_python_packages(env_path=str(sb / "some"))
+    assert_(len(findings) == 1 and "missing=jellyfish" in findings[0].evidence,
+            f"only the missing package is listed (got: {[f.evidence for f in findings]})")
+
+    _python3_on(sb / "all", _module_dir(sb / "mods-all",
+                                        present=("frontmatter", "click", "yaml", "jellyfish")))
+    assert_(mod._ih_check_python_packages(env_path=str(sb / "all")) == [],
+            "all four importable → no finding")
+    # A relative PATH entry: the python3 it names is the one checked, not a false P1.
+    saved_cwd = os.getcwd()
+    os.chdir(sb)
+    try:
+        findings = mod._ih_check_python_packages(env_path="all")
+    finally:
+        os.chdir(saved_cwd)
+    assert_(findings == [], f"relative PATH entry → python3 found and checked (got: {[f.id for f in findings]})")
+
+    (sb / "nopy").mkdir()
+    assert_(mod._ih_check_python_packages(env_path=str(sb / "nopy")) == [],
+            "no python3 on PATH → no extra finding (binary-missing covers it)")
+
+    broken = sb / "broken"
+    broken.mkdir()
+    (broken / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (broken / "python3").chmod(0o755)
+    findings = mod._ih_check_python_packages(env_path=str(broken))
+    assert_([f.severity for f in findings] == ["P1"]
+            and findings[0].id.startswith("install-health:python-packages-unchecked:"),
+            "a python3 that cannot run the check → P1 python-packages-unchecked")
+
+    import inspect
+    assert_("_ih_check_python_packages()" in inspect.getsource(mod.install_health_check),
+            "install_health_check() runs the package check")
+    shutil.rmtree(sb)
+
+
+def f_install_health_corelocation_info():
+    """CoreLocationCLI is optional (planner sun times only) → info with the brew command."""
+    print("install-health CoreLocationCLI: missing → info naming `brew install --cask corelocationcli`")
+    mod = _load_doctor("kb_doctor_under_test_corelocation")
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-ih-coreloc-"))
+    real_is_file = pathlib.Path.is_file
+    pathlib.Path.is_file = lambda self: False if self.name == "CoreLocationCLI" else real_is_file(self)
+    try:
+        findings = mod._ih_check_binaries(sb, env_path=str(sb))
+    finally:
+        pathlib.Path.is_file = real_is_file
+    cl = [f for f in findings if f.id.startswith("install-health:binary-missing-corelocationcli")]
+    assert_(len(cl) == 1 and cl[0].severity == "info", "CoreLocationCLI missing is info, not P2")
+    assert_("brew install --cask corelocationcli" in cl[0].message, "the info names the install command")
+    assert_("KB_FALLBACK_LAT" in cl[0].message, "the info names the fallback that works without it")
+    shutil.rmtree(sb)
+
+
+def f_mcp_check_shared_claude_lookup():
+    """mcp-check finds claude where calendar reads do (_kb_mcp.runner._find_claude)."""
+    print("mcp-check: claude in ~/.local/bin or $KB_CLAUDE_BIN (not on PATH) is found")
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-mcp-lookup-"))
+    home = sb / "home"
+    log = sb / "claude-calls.log"
+    stub = home / ".local" / "bin" / "claude"
+    stub.parent.mkdir(parents=True)
+    # Offline stub: logs its argv and fails, so no probe or canary goes anywhere.
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\necho stub-claude >&2\nexit 3\n",
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "KB_HUB": str(sb / "knowledge"),
+           "LANG": "en_US.UTF-8"}
+
+    def run(extra=None):
+        proc = subprocess.run([sys.executable, str(_REPO / "bin" / "kb-doctor"), "mcp-check",
+                               "--format", "json"], env={**env, **(extra or {})},
+                              capture_output=True, text=True, timeout=60)
+        assert_(proc.returncode == 0, f"mcp-check runs (stderr: {proc.stderr[-300:]})")
+        return json.loads(proc.stdout)["findings"]
+
+    found = run()
+    assert_(not any(f["id"].startswith("mcp-check:host-missing") for f in found),
+            "claude only in ~/.local/bin → no host-missing P0")
+    assert_([f["file"] for f in found if f["id"].startswith("mcp-check:host-rc")] == [str(stub)],
+            f"the probe ran ~/.local/bin/claude (got: {found})")
+    assert_(log.read_text(encoding="utf-8").startswith("-p "), "the prompt follows -p")
+
+    other = sb / "elsewhere" / "claude"
+    other.parent.mkdir()
+    shutil.copy2(stub, other)
+    found = run({"KB_CLAUDE_BIN": str(other)})
+    assert_([f["file"] for f in found if f["id"].startswith("mcp-check:host-rc")] == [str(other)],
+            "$KB_CLAUDE_BIN wins over ~/.local/bin")
+
+    stub.unlink()
+    if not any(pathlib.Path(p).is_file() for p in ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")):
+        found = run()
+        missing = [f for f in found if f["id"].startswith("mcp-check:host-missing")]
+        assert_(len(missing) == 1 and missing[0]["severity"] == "P0"
+                and "~/.local/bin" in missing[0]["message"],
+                "claude found nowhere → P0 host-missing naming where it looked")
+    shutil.rmtree(sb)
+
+
+def f_cli_missing_python_package_message():
+    """kb-idea and kb-contact print the pip command, not a traceback, when a package is missing."""
+    print("kb-idea / kb-contact: missing requirements.txt package → one line with the pip command")
+    sb = pathlib.Path(tempfile.mkdtemp(prefix="kb-cli-pypkgs-"))
+    req = str(_REPO / "requirements.txt")
+    base = {**os.environ, "HOME": str(sb), "KB_HUB": str(sb / "knowledge")}
+
+    def run(script, args, blocked):
+        mods = _module_dir(sb / ("mods-" + "-".join(blocked)), blocked=blocked)
+        return subprocess.run([sys.executable, str(_REPO / "bin" / script), *args],
+                              env={**base, "PYTHONPATH": str(mods)},
+                              capture_output=True, text=True, timeout=60)
+
+    cases = (
+        ("kb-idea", ["capture", "My first Vepol idea"], ("frontmatter",), "python-frontmatter"),
+        ("kb-contact", ["add", "Jane Doe"], ("click",), "click"),
+        ("kb-contact", ["add", "Jane Doe"], ("yaml",), "PyYAML"),
+        # jellyfish is imported only when fuzzy name matching runs.
+        ("kb-contact", ["context", "Nobody Known"], ("jellyfish",), "jellyfish"),
+    )
+    for script, args, blocked, package in cases:
+        proc = run(script, args, blocked)
+        err = proc.stderr.strip()
+        assert_(proc.returncode == 1 and "Traceback" not in proc.stderr and len(err.splitlines()) == 1,
+                f"{script} {args[0]} without {package}: exit 1, one line, no traceback (got: {proc.stderr[-400:]!r})")
+        assert_(err.startswith(f"{script}: Python package {package} is missing for ")
+                and _PIP_USER + req in err and _PIP_BREW + req in err,
+                f"{script} names the missing package and the install command")
     shutil.rmtree(sb)
 
 
@@ -983,6 +1373,7 @@ def f_audit_fc_source_contract():
 def main():
     f_decompose_staleness()
     f_report_quality()
+    f_report_quality_sections()
     f_csid_collision()
     f_seed_docs_drift()
     f_channel_instances()
@@ -991,7 +1382,14 @@ def main():
     f_install_health_orchestrator_cycle_disabled_state()
     f_install_health_optional_feature_opt_out()
     f_install_health_codex_optional()
+    f_install_health_binaries_match_installer()
     f_install_health_runtime_bypass_flags()
+    f_install_health_optional_launchagents()
+    f_install_health_settings_hook_fix_hint()
+    f_install_health_python_packages()
+    f_install_health_corelocation_info()
+    f_mcp_check_shared_claude_lookup()
+    f_cli_missing_python_package_message()
     f_audit_fc_nongit_and_sync_contract()
     f_audit_fc_nested_parent_repo()
     f_audit_fc_unicode_filename()

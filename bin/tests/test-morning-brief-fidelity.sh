@@ -5,6 +5,14 @@
 set -uo pipefail
 PASS=0; FAIL=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SRC_BIN="${KB_MORNING_FIDELITY_SRC_BIN:-$HOME/knowledge/bin}"
 BRIEF="$SRC_BIN/kb-brief"
 MAIL_BLOCK="$SRC_BIN/kb-mail-block"
@@ -84,7 +92,7 @@ done
 for heading in "${EN_HEADINGS[@]}"; do
   has "$EN" "$heading" && ok "AC1 EN prompt requires $heading" || fail "AC1 EN missing $heading"
 done
-if has "$RU" "каждым из пяти" || has "$RU" "каждый логический"; then
+if has "$RU" "every logical input"; then
   ok "AC1 prompt explicitly covers every logical input"
 else
   fail "AC1 no every-logical-input requirement"
@@ -103,10 +111,10 @@ has "$EN" "There were no emails today." && has "$EN" "These emails arrived today
 has "$RU" "Sender One" && has "$RU" "Subject One" && has "$RU" "Sender Two" \
   && has "$RU" "Subject Two" && ok "AC2 injected low-priority mail remains in prompt" \
   || fail "AC2 injected mail items missing"
-has "$RU" "каждое" && has "$RU" "действ" \
+has "$RU" "list every email" && has "$RU" "whether action is needed" \
   && ok "AC2 prompt requires every item plus action state" \
   || fail "AC2 every-mail-item/action-state rule missing"
-if has "$RU" "ноль действий" || has "$RU" "zero actions"; then
+if has "$RU" "zero actions"; then
   ok "AC1 no-action case is explicit"
 else
   fail "AC1 model may invent an action"
@@ -125,7 +133,7 @@ has "$EN" '"available":true' && has "$EN" '"duration_min":437' && has "$EN" "�
 NO_HEALTH=$(KB_HUB="$HUB" KB_LANG=en KB_BRIEF_PROMPT_ONLY=1 KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   zsh "$BRIEF" 2>/dev/null)
 if has "$NO_HEALTH" "🫀" || has "$NO_HEALTH" "Health" || has "$NO_HEALTH" "health, " \
-    || has "$NO_HEALTH" "здоровье" || ! has "$NO_HEALTH" "🗓 Day plan"; then
+    || ! has "$NO_HEALTH" "🗓 Day plan"; then
   fail "unset KB_HEALTH_METRICS still mentions health"
 else
   ok "unset KB_HEALTH_METRICS: no health block and no body section"
@@ -164,6 +172,7 @@ PY
   chmod 600 "$MAIL_HUB/personal/mail/briefs/${DAY}-morning.json"
 }
 write_mail_env 24
+# The mail hub is ru, so the cap warning checked below is the Russian one.
 B24=$(KB_HUB="$MAIL_HUB" KB_LANG=ru KB_MAIL_NOW="${DAY}T06:15:00+02:00" \
   "$MAIL_BLOCK" --period morning 2>/dev/null)
 write_mail_env 25
@@ -184,6 +193,8 @@ import importlib.util, json, os, pathlib, sys
 path, tmp = sys.argv[1], pathlib.Path(sys.argv[2])
 spec = importlib.util.spec_from_file_location("brief_delivery", path)
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+# Mixed scripts, ZWJ emoji, combining marks and flags: splits must keep
+# every grapheme cluster whole.
 text = ("абзац 👨‍👩‍👧‍👦 e\u0301 🇺🇦 строка\n\n" * 20).strip()
 parts = mod.split_text(text, 45)
 assert len(parts) > 3
@@ -537,6 +548,57 @@ EOF
   [[ "$RB_RC" != "0" && -e "$RB_SIDE" ]] \
     && ok "AC3 rollback blocks attempted failed plan" \
     || fail "AC3 rollback discarded attempted plan"
+
+  # Telegram not configured: the sender tried nothing. The day file says
+  # `delivery: not_configured` (not telegram_failed); the part stays unsent and
+  # the next run resends it, after which the usual evidence takes over.
+  NC_DIR="$TMP/not-configured"; mkdir -p "$NC_DIR"
+  NC_DAY="$NC_DIR/day.md"; NC_SIDE="$NC_DIR/private/brief-delivery-$DAY.json"
+  NC_PART="$NC_DIR/private/part.txt"
+  printf -- '---\ndate: 2026-07-13\ndelivery: pending\n---\n\nNOT CONFIGURED BODY\n' > "$NC_DAY"
+  nc_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))' "$NC_SIDE" "$1"; }
+  set +e
+  python3 "$HELPER" plan --day-file "$NC_DAY" --sidecar "$NC_SIDE" \
+    --date "$DAY" --language ru --limit 3500 >/dev/null 2>&1
+  python3 "$HELPER" begin --day-file "$NC_DAY" --sidecar "$NC_SIDE" --part-file "$NC_PART" >/dev/null 2>&1
+  python3 "$HELPER" finish --day-file "$NC_DAY" --sidecar "$NC_SIDE" \
+    --outcome not_configured --part-file "$NC_PART" >/dev/null 2>&1
+  NC_RC=$?
+  set -e
+  [[ "$NC_RC" == "20" && "$(nc_field status)" == "failed" && "$(nc_field not_sent_reason)" == "not_configured" \
+     && ! -e "$NC_PART" ]] && grep -q '^delivery: not_configured$' "$NC_DAY" \
+     && grep -q '^delivery_parts_sent: 0$' "$NC_DAY" \
+    && ok "AC3 not-configured finish records delivery: not_configured, part unsent" \
+    || fail "AC3 not-configured finish rc=$NC_RC status=$(nc_field status) day=$(grep '^delivery:' "$NC_DAY")"
+  set +e
+  NC_PLAN=$(python3 "$HELPER" plan --day-file "$NC_DAY" --sidecar "$NC_SIDE" \
+    --date "$DAY" --language ru --limit 3500 2>/dev/null); NC_PRC=$?
+  set -e
+  [[ "$NC_PRC" == "0" && "$NC_PLAN" == *'"status": "failed"'* ]] && grep -q '^delivery: not_configured$' "$NC_DAY" \
+    && ok "AC3 not-configured plan is reusable and keeps its day-file value" \
+    || fail "AC3 not-configured replan rc=$NC_PRC out=$NC_PLAN"
+  set +e
+  NC_BEGIN=$(python3 "$HELPER" begin --day-file "$NC_DAY" --sidecar "$NC_SIDE" --part-file "$NC_PART" 2>/dev/null)
+  set -e
+  [[ "$NC_BEGIN" == *'"index": 1'* && "$(nc_field not_sent_reason)" == "None" ]] \
+    && grep -q '^delivery: telegram_sending$' "$NC_DAY" \
+    && ok "AC3 not-configured part is resent; the reason clears on the new attempt" \
+    || fail "AC3 not-configured resend begin=$NC_BEGIN reason=$(nc_field not_sent_reason)"
+  set +e
+  python3 "$HELPER" finish --day-file "$NC_DAY" --sidecar "$NC_SIDE" \
+    --outcome known_rejection --part-file "$NC_PART" >/dev/null 2>&1
+  set -e
+  grep -q '^delivery: telegram_failed$' "$NC_DAY" \
+    && ok "AC3 a real rejection after setup still reads telegram_failed" \
+    || fail "AC3 rejection after not-configured: $(grep '^delivery:' "$NC_DAY")"
+  set +e
+  python3 "$HELPER" begin --day-file "$NC_DAY" --sidecar "$NC_SIDE" --part-file "$NC_PART" >/dev/null 2>&1
+  python3 "$HELPER" finish --day-file "$NC_DAY" --sidecar "$NC_SIDE" \
+    --outcome success --message-id 77 --part-file "$NC_PART" >/dev/null 2>&1
+  set -e
+  grep -q '^delivery: telegram_ok$' "$NC_DAY" && grep -q '^delivery_message_id: 77$' "$NC_DAY" \
+    && ok "AC3 not-configured brief ends telegram_ok once sent" \
+    || fail "AC3 not-configured final state: $(grep '^delivery' "$NC_DAY")"
 fi
 
 echo "=== AC3: generation-error notification uses the same durable sender ==="
@@ -588,6 +650,7 @@ fi
 case "$mode" in
   success) printf '{"outcome":"success","message_id":9001}\n'; exit 0 ;;
   known_rejection) printf '{"outcome":"known_rejection","message_id":null}\n'; exit 20 ;;
+  not_configured) printf '{"outcome":"not_configured","message_id":null}\n'; exit 3 ;;
   interrupt) kill -TERM $$ ;;
   *) printf '{"outcome":"ambiguous","message_id":null}\n'; exit 21 ;;
 esac
@@ -649,6 +712,29 @@ EOF
      && $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$INT_SIDE") == ambiguous ]] \
     && ok "AC3 interrupted error notice resolves sending to ambiguous" \
     || fail "AC3 interrupted error notice was automatically retried"
+
+  # The notice text is also printed on stderr when nobody would otherwise see
+  # it: a scheduled run without Telegram (here) or any manual run.
+  NCE_HUB=$(make_error_hub notice-not-configured)
+  printf 'not_configured\n' > "$NCE_HUB/.mode"
+  set +e
+  KB_PROCESS_ID=daily KB_HUB="$NCE_HUB" BRIEF_TIMEOUT=1 zsh "$BRIEF" >"$NCE_HUB/stdout" 2>"$NCE_HUB/stderr"
+  NCE_RC=$?
+  set -e
+  [[ "$NCE_RC" == "1" && ! -s "$NCE_HUB/stdout" \
+     && "$(cat "$NCE_HUB/stderr")" == "⚠️ Брифинг не составлен: ни один ИИ-агент не ответил.
+Проверь $NCE_HUB/logs/brief.log" ]] \
+     && grep -q '^delivery: not_configured$' "$NCE_HUB/.orchestrator/brief-error-$ERR_DAY.md" \
+    && ok "AC3 undeliverable error notice (scheduled, no Telegram) is printed on stderr, ru" \
+    || fail "AC3 undeliverable notice rc=$NCE_RC stderr=$(cat "$NCE_HUB/stderr")"
+  printf 'success\n' > "$NCE_HUB/.mode"
+  set +e
+  KB_PROCESS_ID=daily KB_HUB="$NCE_HUB" BRIEF_TIMEOUT=1 zsh "$BRIEF" >/dev/null 2>"$NCE_HUB/stderr2"
+  set -e
+  [[ ! -s "$NCE_HUB/stderr2" && $(wc -l < "$NCE_HUB/.calls" | tr -d ' ') == "2" ]] \
+     && grep -q '^delivery: telegram_ok$' "$NCE_HUB/.orchestrator/brief-error-$ERR_DAY.md" \
+    && ok "AC3 not-configured error notice is sent once Telegram works; scheduled stderr stays quiet" \
+    || fail "AC3 notice after setup: calls=$(wc -l < "$NCE_HUB/.calls") stderr=$(cat "$NCE_HUB/stderr2")"
 
   echo "=== Health: scheduled run without wait settings does not wait ==="
   SCHED_HUB=$(make_error_hub scheduled)

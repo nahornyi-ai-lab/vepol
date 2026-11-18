@@ -173,8 +173,9 @@ def cmd_full() -> int:
     # Validate
     rc = cmd_check()
     if rc == 0:
-        print("\n✓ kb-multibot-setup complete. Next: create bots via @BotFather "
-              "and run `kb-init-agent <slug>` per agent.")
+        print("\n✓ kb-multibot-setup complete. Next: create one bot per project via "
+              "@BotFather and run `kb-multibot-add <token>` for each "
+              "(add `--slug <slug>` if the project can't be inferred from the bot's username).")
     return rc
 
 

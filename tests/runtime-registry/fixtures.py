@@ -422,6 +422,33 @@ def main() -> int:
         bad["runtimes"][0]["available"] = "yes"
         assert_(out.validate(bad, schema) != [], "available must be a boolean")
 
+        print("T15: shipped roster under a launchd-like PATH — codex only on PATH, claude only in ~/.local/bin")
+        with tempfile.TemporaryDirectory(prefix="kb-runtime-registry-launchd-") as tmp2:
+            sb2 = Sandbox(pathlib.Path(tmp2))
+            (sb2.orch / "cli-tools.tsv").write_text(
+                (HUB_LIVE / "bin" / "cli-tools.tsv").read_text(encoding="utf-8"))
+            home = sb2.root / "home"
+            brew = sb2.root / "brewbin"
+            for path, name in ((brew / "codex", "codex"), (home / ".local" / "bin" / "claude", "claude")):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                sb2._script(path, FAKE_RUNTIME.format(
+                    name=name, token=TOKENS[name], log=sb2.log, modes=sb2.modes))
+            env2 = sb2.env({"HOME": str(home), "PATH": f"{brew}:/usr/bin:/bin"})
+            argv2 = [sys.executable, str(BIN), "--json", "--now", NOW]
+            proc = subprocess.run(argv2, capture_output=True, text=True, env=env2)
+            rows = by_name(json.loads(proc.stdout))
+            assert_(rows["codex"]["installed"] == "yes", "codex found through PATH by the shipped roster row")
+            assert_(rows["claude"]["installed"] == "yes",
+                    "claude found in ~/.local/bin although PATH lacks it (launchd)")
+            proc = subprocess.run(argv2 + ["--probe", "codex", "claude"],
+                                  capture_output=True, text=True, env=env2)
+            rows = by_name(json.loads(proc.stdout))
+            calls = sb2.calls()
+            assert_(any(l.startswith("codex exec") for l in calls) and any(l.startswith("claude -p") for l in calls),
+                    f"probes ran the sandbox copies, not host installs: {calls}")
+            assert_(rows["codex"]["healthy"] == "yes" and rows["claude"]["healthy"] == "yes",
+                    "both probes succeed through the resolved paths")
+
         print("T9: live hub untouched by the whole suite")
         live_cache_after = LIVE_CACHE.read_bytes() if LIVE_CACHE.exists() else None
         assert_(live_cache_after == live_cache_before, "live ~/knowledge/.orchestrator/runtime-registry.json unchanged/absent")

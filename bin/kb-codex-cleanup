@@ -7,14 +7,24 @@
 # waiting for the stale broker to release.
 #
 # This script:
-#   1. Finds all broker processes whose --cwd falls under ~/knowledge (or another root).
-#   2. Kills the broker + its app-server peers (pid group).
+#   1. Finds the broker processes it owns: those whose --cwd is the hub
+#      ($KB_HUB, default ~/knowledge), a folder under it, or a project
+#      knowledge/ folder linked from <hub>/projects/ — or, with --cwd, only
+#      brokers serving that path. Brokers serving any other folder (your own
+#      Codex review in some repo, or "~/knowledge copy") are left alone. A
+#      --cwd that contains a space is trusted only when the broker's real
+#      working directory (lsof) is an owned folder too.
+#   2. Stops each matched broker + its app-server children: TERM first, KILL
+#      only for matched PIDs still alive after a short grace period.
 #   3. Removes /var/folders/**/cxc-*/ directories whose broker.pid is gone or stale.
+#   4. Culls duplicate Claude Code Telegram plugin instances, matched by the
+#      plugin's path (claude-plugins-official/telegram), never by a bare
+#      `server.ts`, so unrelated Bun dev servers survive.
 #
 # Usage:
-#   kb-codex-cleanup                # scan everything under $HOME, report and kill.
+#   kb-codex-cleanup                # brokers under the hub, report and stop them.
 #   kb-codex-cleanup --dry-run      # scan only, don't kill.
-#   kb-codex-cleanup --cwd <path>   # only kill brokers serving this cwd.
+#   kb-codex-cleanup --cwd <path>   # only stop brokers serving this cwd.
 #
 # Idempotent; safe to run frequently.
 
@@ -26,19 +36,92 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
     --cwd) CWD_FILTER="$2"; shift 2 ;;
-    -h|--help) sed -n '1,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,30p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
+HUB="${KB_HUB:-$HOME/knowledge}"
+# Path fragment that identifies the Claude Code Telegram plugin's processes.
+# KB_TELEGRAM_PLUGIN_MARKER exists for tests, so they never match a real plugin.
+TG_PLUGIN_MARKER="${KB_TELEGRAM_PLUGIN_MARKER:-claude-plugins-official/telegram}"
+
 say() { printf '\033[1;36m→\033[0m %s\n' "$1"; }
-kill_pid() {
-  local pid="$1"
+
+# TERM the given PIDs, wait up to ~3 s, then KILL only those still alive.
+stop_pids() {
+  local pid alive=() i
+  [[ $# -eq 0 ]] && return 0
   if [[ "$DRY" -eq 1 ]]; then
-    echo "  (dry-run) would kill PID $pid"
-  else
-    kill "$pid" 2>/dev/null && echo "  killed PID $pid" || echo "  already gone: $pid"
+    for pid in "$@"; do echo "  (dry-run) would stop PID $pid"; done
+    return 0
   fi
+  for pid in "$@"; do
+    kill -TERM "$pid" 2>/dev/null && echo "  sent TERM to PID $pid" || echo "  already gone: $pid"
+  done
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    alive=()
+    for pid in "$@"; do
+      kill -0 "$pid" 2>/dev/null && alive+=("$pid")
+    done
+    [[ ${#alive[@]} -eq 0 ]] && return 0
+    sleep 0.3
+  done
+  for pid in "${alive[@]}"; do
+    kill -KILL "$pid" 2>/dev/null && echo "  killed PID $pid (still alive after TERM)" || true
+  done
+}
+
+# All descendants of a PID (children, grandchildren, ...).
+descendants() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do
+    echo "$child"
+    descendants "$child"
+  done
+}
+
+# Folders whose brokers this script owns.
+OWNED_ROOTS=()
+if [[ -n "$CWD_FILTER" ]]; then
+  OWNED_ROOTS+=("${CWD_FILTER%/}")
+else
+  OWNED_ROOTS+=("${HUB%/}")
+  if [[ -d "$HUB" ]]; then
+    OWNED_ROOTS+=("$(cd "$HUB" 2>/dev/null && pwd -P || true)")
+  fi
+  for link in "$HUB"/projects/*; do
+    [[ -L "$link" && -d "$link" ]] && OWNED_ROOTS+=("$(cd "$link" 2>/dev/null && pwd -P || true)")
+  done
+fi
+
+is_owned_cwd() {
+  local cwd="${1%/}" root
+  [[ -z "$cwd" ]] && return 1
+  for root in "${OWNED_ROOTS[@]}"; do
+    [[ -z "$root" ]] && continue
+    if [[ "$cwd" == "$root" || "$cwd" == "$root"/* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The --cwd value from a broker's `ps` line: the text after the last " --cwd "
+# up to the next " --" or the end of the line. ps joins argv with spaces, so
+# cutting at the first space would read "<hub> copy/repo" as the hub itself.
+broker_cwd_arg() {
+  local line="$1" rest
+  [[ "$line" == *" --cwd "* ]] || return 0
+  rest="${line##* --cwd }"
+  printf '%s\n' "${rest%% --*}"
+}
+
+# A process's real working directory (empty when lsof cannot tell).
+real_cwd() {
+  local lsof_bin
+  lsof_bin="$(command -v lsof || echo /usr/sbin/lsof)"
+  "$lsof_bin" -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true
 }
 
 # Find codex-companion brokers. Use `ps -eo pid=,args=` with explicit width
@@ -52,17 +135,27 @@ else
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     PID=$(echo "$line" | awk '{print $1}')
-    BROKER_CWD=$(echo "$line" | sed -nE 's/.*--cwd ([^ ]+).*/\1/p')
-    if [[ -n "$CWD_FILTER" && "$BROKER_CWD" != "$CWD_FILTER"* ]]; then
-      echo "  skip PID $PID (cwd=$BROKER_CWD)"
+    BROKER_CWD="$(broker_cwd_arg "$line")"
+    if ! is_owned_cwd "$BROKER_CWD"; then
+      echo "  skip PID $PID (cwd=${BROKER_CWD:-unknown}, not a Vepol folder)"
       continue
     fi
+    # A --cwd value with whitespace is ambiguous in ps text (one path with a
+    # space, or a path followed by other arguments). When unsure, do not
+    # kill: stop such a broker only if its real working directory is a Vepol
+    # folder too.
+    if [[ "$BROKER_CWD" == *[[:space:]]* ]]; then
+      REAL_CWD="$(real_cwd "$PID")"
+      if ! is_owned_cwd "$REAL_CWD"; then
+        echo "  skip PID $PID (cwd=$BROKER_CWD is ambiguous; real cwd=${REAL_CWD:-unknown} is not a Vepol folder)"
+        continue
+      fi
+    fi
     echo "  PID $PID · cwd=$BROKER_CWD"
-    kill_pid "$PID"
-    # also kill app-server children (they'll typically die with broker, but be explicit)
-    for child in $(pgrep -P "$PID" 2>/dev/null || true); do
-      kill_pid "$child"
-    done
+    # Stop the broker and its app-server children (they typically die with
+    # the broker, but be explicit).
+    # shellcheck disable=SC2046
+    stop_pids "$PID" $(descendants "$PID")
   done <<< "$BROKERS"
 fi
 
@@ -99,12 +192,38 @@ fi
 # overheats — happened today, see incidents.md).
 #
 # Strategy: find all telegram-channel `bun run` wrappers; if N > 1,
-# keep the most-recently-started (assumed LaunchAgent-managed) and
-# kill the older N-1 + their bun-server.ts children.
+# stop them all + their `bun server.ts` children, then re-bootstrap the
+# LaunchAgent. Only processes tied to the plugin's path are touched.
+tg_wrappers() {
+  # The marker reaches awk through the environment, not argv: an argv holding
+  # both "bun run" and the marker would let ps list this awk as a wrapper.
+  ps -ww -eo pid=,args= 2>/dev/null \
+    | TG_MARKER="$TG_PLUGIN_MARKER" awk 'index($0, "bun run") && index($0, ENVIRON["TG_MARKER"]) && !/grep/' \
+    || true
+}
+
+# PIDs of the Telegram plugin: its wrappers, everything they spawned, and
+# orphaned `bun server.ts` processes whose wrapper is gone. An orphan's argv
+# has no plugin path, so it is matched by its working directory (the plugin
+# folder the wrapper ran it in). A Bun server.ts running anywhere else is
+# never matched.
+tg_plugin_pids() {
+  local pid rest cwd lsof_bin
+  lsof_bin="$(command -v lsof || echo /usr/sbin/lsof)"
+  while read -r pid rest; do
+    [[ -z "$pid" ]] && continue
+    echo "$pid"
+    descendants "$pid"
+  done <<< "$(tg_wrappers)"
+  while read -r pid rest; do
+    [[ -z "$pid" ]] && continue
+    cwd="$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)"
+    [[ -n "$cwd" && "$cwd" == *"$TG_PLUGIN_MARKER"* ]] && echo "$pid"
+  done <<< "$(ps -ww -eo pid=,args= 2>/dev/null | awk '/bun/ && /server\.ts/ && !/grep/' || true)"
+}
+
 say "scanning for stale telegram channel plugin instances"
-TG_WRAPPERS=$(ps -ww -eo pid=,lstart=,args= \
-  | awk '/bun run.*claude-plugins-official\/telegram/ && !/grep/' \
-  || true)
+TG_WRAPPERS=$(tg_wrappers)
 TG_COUNT=$(echo "$TG_WRAPPERS" | grep -c . 2>/dev/null || echo 0)
 TG_COUNT="${TG_COUNT//[^0-9]/}"  # strip non-digits (macOS grep quirk)
 TG_COUNT="${TG_COUNT:-0}"
@@ -122,16 +241,14 @@ elif [[ "$TG_COUNT" -eq 1 ]]; then
 else
   say "  $TG_COUNT telegram channel instances — culling all + bootstrapping clean"
   # macOS BSD utilities don't support `head -n -1`, and start-time sorting via
-  # `lstart` is fragile. Simplest robust approach: kill ALL wrappers and
-  # ALL bun server.ts processes (both wrappers and orphaned children),
-  # then re-bootstrap the LaunchAgent. KeepAlive=true gives us exactly one.
+  # `lstart` is fragile. Simplest robust approach: stop ALL plugin wrappers and
+  # the plugin's server.ts processes (children and orphans), then re-bootstrap
+  # the LaunchAgent. KeepAlive=true gives us exactly one.
+  # shellcheck disable=SC2046
+  stop_pids $(tg_plugin_pids | sort -u)
   if [[ "$DRY" -eq 1 ]]; then
-    echo "  (dry-run) would kill all telegram wrappers + server.ts + bootstrap"
+    echo "  (dry-run) would re-bootstrap channel-telegram"
   else
-    pkill -f 'bun run.*claude-plugins-official/telegram' 2>/dev/null || true
-    sleep 1
-    pkill -9 -f 'bun server\.ts' 2>/dev/null || true
-    sleep 1
     if [[ -f "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" ]]; then
       launchctl bootout "gui/$UID" \
         "$HOME/Library/LaunchAgents/com.knowledge.channel-telegram.plist" 2>/dev/null || true
@@ -142,10 +259,8 @@ else
         || echo "  bootstrap failed — load manually"
     fi
     sleep 2
-    REMAINING=$(ps -ww -eo pid=,args= 2>/dev/null \
-      | awk '/bun run.*claude-plugins-official\/telegram/ && !/grep/' \
-      | wc -l | tr -d ' ')
-    echo "  remaining instances: $REMAINING"
+    REMAINING=$(tg_wrappers | grep -c . || true)
+    echo "  remaining instances: ${REMAINING:-0}"
   fi
 fi
 

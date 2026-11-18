@@ -189,7 +189,7 @@ def setup_sandbox(*, escalation_count_for: dict[str, int] | None = None) -> path
             f"---\\nreport_id: {slug}-{date}\\nslug: {slug}\\ndate: {date}\\n"
             f"cycle: evening\\nparent: ?\\nchildren_rolled_up: []\\n"
             f"status: done\\nrun_id: {run_id}\\n---\\n\\n"
-            f"## Что сделано сегодня\\n- stub task by stub broker\\n\\n"
+            f"## What was done today\\n- stub task by stub broker\\n\\n"
             f"## Candidates\\n\\n"
             + esc_section,
             encoding='utf-8',

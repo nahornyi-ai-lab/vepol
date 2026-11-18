@@ -145,7 +145,7 @@ def parse_projects_md(path: pathlib.Path) -> set[str]:
     """Parse human-facing projects.md roster — return set of declared slugs.
 
     Spec: ~/knowledge/concepts/projects-processes-roster.md
-    Schema: `| slug | путь | описание |` — skip header/separator/schema-doc lines.
+    Schema: `| slug | path | description |` — skip header/separator/schema-doc lines.
     """
     if not path.exists():
         return set()
@@ -159,7 +159,8 @@ def parse_projects_md(path: pathlib.Path) -> set[str]:
         if len(cells) < 3:
             continue
         slug = cells[0]
-        if not slug or slug.lower() in {"slug", "проект"}:
+        # Header words; the Russian one heads the first column of older rosters.
+        if not slug or slug.lower() in {"slug", "project", "проект"}:
             continue
         slugs.add(slug)
     return slugs
@@ -202,6 +203,13 @@ def is_skeleton(text: str) -> bool:
     lowered = text.lower()
     patterns = (
         "{{date}}",
+        # Placeholders of the current English state.md template.
+        "_(one current statement",
+        "_(what is actively being worked or watched now",
+        "_(3-7 current actions",
+        "_(only unresolved questions",
+        # Placeholders of the older Russian state.md template, still present in
+        # existing hubs.
         "что это и в каком состоянии",
         "таблица: метрика",
         "что сейчас проверяем",
@@ -215,6 +223,27 @@ def is_skeleton(text: str) -> bool:
 
 def strip_html_comments(text: str) -> str:
     return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
+
+def backlog_is_board(text: str) -> bool:
+    """True for a backlog.md in the kb-board format (bin/_kb_board).
+
+    The board uses its own status sections (Backlog, Ready, In Progress, …)
+    instead of the older Open / In progress / Done, and an empty board is just
+    its `# ` title — what new-wiki renders from _template/knowledge/backlog.md.
+    Task lines outside any section are not a valid board.
+    """
+    try:
+        from _kb_board.model import STATUS_ORDER
+    except ImportError:
+        return False
+    clean = strip_html_comments(text)
+    sections = re.findall(r"(?m)^##\s+(.+?)\s*$", clean)
+    if any(section not in STATUS_ORDER for section in sections):
+        return False
+    if sections:
+        return True
+    return not re.search(r"(?m)^\s*-\s*\[[ xX>~]\]", clean)
 
 
 def missing_required_headings(text: str, headings: tuple[str, ...]) -> list[str]:
@@ -258,7 +287,10 @@ def check_project(entry: RegistryEntry, project_filter: str | None) -> list[Find
         if not core.is_file():
             findings.append(finding_with_key("missing-core", entry.slug, name, core, "P0", f"missing core KB file {name}", f"expected={core}"))
         elif name in COORDINATION_REQUIRED_HEADINGS:
-            missing_headings = missing_required_headings(read_text(core), COORDINATION_REQUIRED_HEADINGS[name])
+            core_text = read_text(core)
+            if name == "backlog.md" and backlog_is_board(core_text):
+                continue  # kb-board format: its own sections, checked by `kb-board check`
+            missing_headings = missing_required_headings(core_text, COORDINATION_REQUIRED_HEADINGS[name])
             if missing_headings:
                 findings.append(finding_with_key(
                     "core-structure",
@@ -363,7 +395,7 @@ def projects_md_drift_check() -> list[Finding]:
         return findings
 
     roster = parse_projects_md(projects_md_path)
-    # projects.md scope = real init-kb'd projects only; pointer-stubs не входят.
+    # projects.md scope = real init-kb'd projects only; pointer stubs are not included.
     registry_active = {
         e.slug for e in parse_registry(HUB / "registry.md") if e.status in {"live", "seeded"}
     }
@@ -562,7 +594,7 @@ def strict_exit(findings: list[Finding], strict: bool) -> int:
 MAX_DEPTH = int(os.environ.get("KB_CYCLE_MAX_DEPTH", "5"))
 MAX_FANOUT = int(os.environ.get("KB_CYCLE_MAX_FANOUT", "8"))
 
-# Hub root исключён из fanout cap (root исторически широкий — это normal).
+# The hub root is excluded from the fanout cap (the root is historically wide; that is normal).
 HIERARCHY_PATH = HUB / "hierarchy.yaml"
 MIGRATION_PATH = HUB / "migration-2026-04-25.yaml"
 REGISTRY_PATH = HUB / "registry.md"
@@ -587,7 +619,7 @@ def _yaml_simple_value(raw: str):
 
 
 def parse_hierarchy_yaml() -> dict:
-    """Минимальный parser для hierarchy.yaml формата, который пишет kb-rebuild-registry."""
+    """Minimal parser for the hierarchy.yaml format that kb-rebuild-registry writes."""
     if not HIERARCHY_PATH.is_file():
         return {}
     text = HIERARCHY_PATH.read_text(encoding="utf-8")
@@ -620,14 +652,14 @@ def hierarchy_check() -> list[Finding]:
     if not nodes:
         findings.append(
             finding("hierarchy-missing", "hub", str(HIERARCHY_PATH), "P0",
-                    "hierarchy.yaml отсутствует или пуст",
+                    "hierarchy.yaml is missing or empty",
                     evidence=str(HIERARCHY_PATH))
         )
         return findings
     if "hub" not in nodes:
         findings.append(
             finding("hierarchy-no-root", "hub", str(HIERARCHY_PATH), "P0",
-                    "root node 'hub' отсутствует",
+                    "root node 'hub' is missing",
                     evidence="missing hub")
         )
         return findings
@@ -649,25 +681,25 @@ def hierarchy_check() -> list[Finding]:
             if parents.get(slug) is not None:
                 findings.append(
                     finding("hierarchy-parent-invalid", slug, str(HIERARCHY_PATH), "P0",
-                            "hub root должен иметь parent: null", evidence=str(parents.get(slug)))
+                            "hub root must have parent: null", evidence=str(parents.get(slug)))
                 )
             continue
         parent = parents.get(slug)
         if parent is None:
             findings.append(
                 finding("hierarchy-parent-missing", slug, str(HIERARCHY_PATH), "P0",
-                        f"non-root node {slug} без parent", evidence="parent missing")
+                        f"non-root node {slug} has no parent", evidence="parent missing")
             )
             continue
         if parent == slug:
             findings.append(
                 finding("hierarchy-parent-self", slug, str(HIERARCHY_PATH), "P0",
-                        f"parent ссылается на self", evidence=f"parent={parent}")
+                        f"parent points to itself", evidence=f"parent={parent}")
             )
         elif parent != "hub" and parent not in eligible_slugs:
             findings.append(
                 finding("hierarchy-parent-not-eligible", slug, str(HIERARCHY_PATH), "P0",
-                        f"parent '{parent}' не eligible узел", evidence=f"parent={parent}")
+                        f"parent '{parent}' is not an eligible node", evidence=f"parent={parent}")
             )
 
     # Cycles via DFS
@@ -774,7 +806,7 @@ def migration_readiness(slug: str) -> list[Finding]:
     if slug not in nodes:
         findings.append(
             finding("readiness-not-eligible", slug, str(HIERARCHY_PATH), "P0",
-                    f"slug {slug} не в hierarchy.yaml — не orchestration_eligible",
+                    f"slug {slug} is not in hierarchy.yaml — not orchestration_eligible",
                     evidence=slug)
         )
         return findings
@@ -782,7 +814,7 @@ def migration_readiness(slug: str) -> list[Finding]:
     if node.get("kind") != "project":
         findings.append(
             finding("readiness-root-or-non-project", slug, str(HIERARCHY_PATH), "P0",
-                    "non-project node не подлежит cycle_enabled toggle",
+                    "non-project node cannot take the cycle_enabled toggle",
                     evidence=node.get("kind", ""))
         )
         return findings
@@ -816,10 +848,12 @@ def migration_readiness(slug: str) -> list[Finding]:
 
 
 CONCEPTS_RULES: dict[str, dict[str, dict[str, str]]] = {
+    # This concept doc is written in Russian, so two forbidden patterns match
+    # its Russian wording.
     "concepts/retro-roadmap-upgrade.md": {
         "forbidden": {
             r"pending_draft_file\b": "old field name; use pending_draft_ref",
-            r"5-секционный": "old retro section count; use 7-секционный (§6)",
+            r"5-секционный": "old retro section count; use 7 sections (§6)",
             r"now \+ \[auto-approved": "old approved_at marker; use approval_source field",
             r"Sprint-review автоматически в воскресный retro": "Q1 v1 wording contradicts Q5 v2 (separate trigger 21:30)",
         },
@@ -977,12 +1011,18 @@ def report_quality_check() -> list[Finding]:
                 ))
         # If status==done, check 5 required sections
         if m and m.group(1).strip() == "done":
+            # Each section is (English name, *older Russian names). Reports
+            # written from the older Russian template or prompt still count.
             required_sections = (
-                "Что сделано", "Что было в плане", "Дельта",
-                "Candidates", "Escalations",
+                ("What was done", "Что сделано"),
+                ("What was planned", "Что было в плане"),
+                ("Delta", "Дельта"),
+                ("Candidates",),
+                ("Escalations",),
             )
-            for sec in required_sections:
-                if sec not in text:
+            for names in required_sections:
+                if not any(name in text for name in names):
+                    sec = names[0]
                     findings.append(finding(
                         "report-quality:missing-section", slug, str(last_path),
                         "P2", f"report status:done missing section: {sec}",
@@ -1056,7 +1096,11 @@ def seed_docs_drift_check() -> list[Finding]:
 
     Drift means `kb-seed-sync` hasn't been run after a live edit. Per the
     Seed-as-IaC convention, every infra-touching change must be followed
-    by `kb-seed-sync`. P1 finding per drifted file.
+    by `kb-seed-sync`. P2 finding per drifted file.
+
+    `kb-seed-sync` is the maintainer's hub-only mirror tool and does not ship
+    with Vepol; on a normal install the seed has no `knowledge/bin/`, so this
+    check reports nothing.
     """
     findings: list[Finding] = []
     seed_bin = HUB / "orchestrator-seed" / "knowledge" / "bin"
@@ -1107,9 +1151,10 @@ def seed_content_audit_check() -> list[Finding]:
     """Comprehensive audit of `~/knowledge/orchestrator-seed/` to verify
     only structural artifacts get tracked in git, NOT real personal data.
 
-    User concern (2026-04-25): «надо делать проверку на то не выкатываем
-    ли мы секьюрные данные, только основную структуру, работа, семья,
-    здоровья». The leak-scan in kb-seed-sync catches author-specific
+    User concern (2026-04-25): "we need a check that we do not ship
+    sensitive data, only the basic structure: work, family,
+    health". The leak-scan in kb-seed-sync (the maintainer's hub-only mirror
+    tool; it does not ship) catches author-specific
     identifier patterns; this audit goes deeper — verifies the seed
     DOESN'T contain whole categories of files that would carry real data.
 
@@ -1389,7 +1434,15 @@ def _non_empty_line_count(text: str) -> int:
 
 
 def agent_entrypoint_check() -> list[Finding]:
-    """Verify the universal `AGENTS.md` contract and thin runtime adapters."""
+    """Verify the universal `AGENTS.md` contract and thin runtime adapters.
+
+    Checks what install.sh ships: the hub `AGENTS.md` + `CLAUDE.md` adapter,
+    `_template/AGENTS.md`, and the scripts that carry `AGENTS.md` into new
+    projects and the install manifest (`new-wiki`, `kb-bootstrap-manifest`).
+    `_template/CLAUDE.md` and legacy `GEMINI.md` adapters are optional: new-wiki
+    creates no project adapter (Claude Code and Antigravity CLI read
+    `AGENTS.md`), so they are linted only when present.
+    """
     findings: list[Finding] = []
 
     hub_agents = HUB / "AGENTS.md"
@@ -1411,22 +1464,27 @@ def agent_entrypoint_check() -> list[Finding]:
             findings.append(finding(
                 "agent-entrypoint:gemini-unsafe-at-token", "hub", agents_path,
                 "P1",
-                f"{agents_path.name} contains a bare @ token that Gemini may treat as a file import",
+                f"{agents_path.name} contains a bare @ token that Gemini may treat as a file import"
+                " — reword it or write the at-sign as `@`-mention",
                 evidence=f"offset={match.start()} token={text[match.start():match.start()+24]!r}",
             ))
 
+    # (path, required). Only the hub Claude Code adapter is installed and
+    # required; the others are linted when present.
     adapter_paths = [
-        HUB / "CLAUDE.md",
-        HUB / "GEMINI.md",
-        HUB / "_template" / "CLAUDE.md",
-        HUB / "_template" / "GEMINI.md",
+        (HUB / "CLAUDE.md", True),
+        (HUB / "GEMINI.md", False),
+        (HUB / "_template" / "CLAUDE.md", False),
+        (HUB / "_template" / "GEMINI.md", False),
     ]
-    for adapter in adapter_paths:
+    for adapter, required in adapter_paths:
         if not adapter.is_file():
+            if not required:
+                continue
             findings.append(finding(
                 "agent-entrypoint:missing-adapter", "hub", adapter,
                 "P1",
-                f"{adapter.name} adapter is missing",
+                f"{adapter.name} adapter is missing — re-run install.sh, which installs the Vepol repo's knowledge/{adapter.name}",
                 evidence=str(adapter),
             ))
             continue
@@ -1456,7 +1514,6 @@ def agent_entrypoint_check() -> list[Finding]:
 
     script_requirements = [
         (HUB / "bin" / "new-wiki", "AGENTS.md"),
-        (HUB / "bin" / "kb-seed-sync", "AGENTS.md"),
         (HUB / "bin" / "kb-bootstrap-manifest", "knowledge/AGENTS.md"),
     ]
     for script, needle in script_requirements:
@@ -1956,10 +2013,35 @@ INSTALL_HEALTH_REQUIRED_HOOKS = {
     "SessionEnd": "kb-session-end",
     "PreCompact": "kb-pre-compact",
 }
+# The fix for a missing settings.json hook: kb-claude-hooks merges Vepol's
+# SessionStart/SessionEnd/PreCompact entries into an existing settings.json.
+INSTALL_HEALTH_HOOKS_FIX = "~/knowledge/bin/kb-claude-hooks --apply"
 INSTALL_HEALTH_REQUIRED_MANIFEST_FIELDS = (
     "category", "source_path", "install_path", "source_hash", "installed_hash",
 )
-INSTALL_HEALTH_REQUIRED_BINS = ("node", "python3", "rg", "gh", "uv", "bun", "jq", "claude")
+# Keep in sync with install.sh REQUIRED_TOOLS: these are the tools the
+# installer refuses to run without; the ones it lists as optional are not
+# required here. claude is looked up the way install.sh and the routines find
+# it (shared lookup: $KB_CLAUDE_BIN, PATH, ~/.local/bin, Homebrew paths).
+INSTALL_HEALTH_REQUIRED_BINS = ("git", "python3", "rg", "claude")
+# Optional tools (install.sh warns but does not block) → info finding naming
+# what each one enables. Codex is optional too but has its own check
+# (_ih_check_codex_currency).
+INSTALL_HEALTH_OPTIONAL_BINS = {
+    "uv": "session auto-capture (the kb-session-end / kb-pre-compact memory flush) and the local TTS install",
+    "jq": "the Claude Code status line (claude/statusline-command.sh)",
+    "gh": "GitHub operations from agent sessions (PRs, issues, releases)",
+    "node": "installing agent CLIs with npm (for example Codex); no kb-* script runs it",
+    "bun": "Claude Code's Telegram plugin (chatting with Claude through Telegram)",
+}
+# Python packages from requirements.txt that kb-* scripts import (install.sh
+# checks the same four): module name → pip package name.
+INSTALL_HEALTH_PYTHON_PACKAGES = {
+    "frontmatter": "python-frontmatter",
+    "click": "click",
+    "yaml": "PyYAML",
+    "jellyfish": "jellyfish",
+}
 
 # ──────────────────────────────────────────────────────────────────────
 # C-01 (security-model v2) — settings.json scan paths.
@@ -2200,10 +2282,21 @@ def _ih_check_entries(manifest: dict, home: pathlib.Path | None = None) -> list[
                     evidence=opt_out_evidence,
                 ))
                 continue
+            if entry.get("optional") is True:
+                # Shipped but not installed by install.sh (kb-bootstrap-manifest
+                # marks these); absent is a normal state, not a broken install.
+                findings.append(finding_with_key(
+                    "install-health:optional-not-installed", "hub", art_id,
+                    str(install_path), "info",
+                    f"{install_path.stem or art_id} is optional and not installed (install.sh does not set it up)",
+                    evidence=f"install_path={install_path} optional=true",
+                ))
+                continue
             findings.append(finding_with_key(
                 "install-health:installed-hash-null", "hub", art_id,
                 entry.get("install_path", art_id), "P0",
-                f"{art_id}: installed_hash is null — file was missing at bootstrap time",
+                f"{art_id}: installed_hash is null — file was missing at bootstrap time;"
+                " re-run install.sh to install it and refresh the manifest",
                 evidence=f"install_path={entry.get('install_path')}",
             ))
             continue
@@ -2314,7 +2407,8 @@ def _ih_check_settings(home: pathlib.Path) -> list[Finding]:
             findings.append(finding_with_key(
                 "install-health:settings-hook-missing", "hub", hook,
                 str(settings_path), "P0",
-                f"settings.json missing — required hook {hook} unreachable",
+                f"settings.json missing — required hook {hook} unreachable;"
+                f" run `{INSTALL_HEALTH_HOOKS_FIX}` (or re-run install.sh to create it from the full template)",
                 evidence="settings.json absent",
             ))
         return findings
@@ -2334,7 +2428,8 @@ def _ih_check_settings(home: pathlib.Path) -> list[Finding]:
             findings.append(finding_with_key(
                 "install-health:settings-hook-missing", "hub", hook_name,
                 str(settings_path), "P0",
-                f"settings.json hook {hook_name} does not invoke {expected_basename}",
+                f"settings.json hook {hook_name} does not invoke {expected_basename}"
+                f" — run `{INSTALL_HEALTH_HOOKS_FIX}` (adds only the missing Vepol hooks, keeps a backup)",
                 evidence=f"expected_basename={expected_basename}",
             ))
     return findings
@@ -2689,6 +2784,21 @@ def _ih_has_no_compile_early_return(func: ast.FunctionDef | ast.AsyncFunctionDef
     return any(isinstance(s, ast.Return) for s in stmt.body)
 
 
+def _ih_find_claude(home: pathlib.Path, path_env: str) -> str | None:
+    """Claude Code CLI via the shared lookup install.sh and the routines use.
+
+    Order: $KB_CLAUDE_BIN (set and executable), `claude` on `path_env`, then
+    ~/.local/bin/claude, /opt/homebrew/bin/claude, /usr/local/bin/claude.
+    """
+    try:
+        from _kb_claude_runner import claude_bin
+    except ImportError:
+        return shutil.which("claude", path=path_env)
+    env = {"PATH": path_env, "KB_CLAUDE_BIN": os.environ.get("KB_CLAUDE_BIN", "")}
+    found = claude_bin(env=env, home=home)
+    return found if os.path.isabs(found) else None
+
+
 def _ih_check_binaries(home: pathlib.Path, env_path: str | None = None) -> list[Finding]:
     findings: list[Finding] = []
     # Tests can use KB_DOCTOR_INSTALL_HEALTH_PATH to scope binary visibility
@@ -2701,22 +2811,41 @@ def _ih_check_binaries(home: pathlib.Path, env_path: str | None = None) -> list[
                               os.environ.get("PATH", ""))
     )
     for name in INSTALL_HEALTH_REQUIRED_BINS:
-        if shutil.which(name, path=path_env) is None:
+        if name == "claude":
+            found = _ih_find_claude(home, path_env)
+            message = ("required binary not found: claude (looked at $KB_CLAUDE_BIN, PATH,"
+                       " ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)")
+        else:
+            found = shutil.which(name, path=path_env)
+            message = f"required binary missing from PATH: {name}"
+        if found is None:
             findings.append(finding_with_key(
                 "install-health:binary-missing", "hub", name,
                 name, "P1",
-                f"required binary missing from PATH: {name}",
+                message,
                 evidence=f"binary={name}",
             ))
-    # Optional: corelocationcli via cask
+    for name, enables in INSTALL_HEALTH_OPTIONAL_BINS.items():
+        if shutil.which(name, path=path_env) is None:
+            findings.append(finding_with_key(
+                "install-health:optional-binary-missing", "hub", name,
+                name, "info",
+                f"optional binary not on PATH: {name} — only needed for {enables}",
+                evidence=f"binary={name} optional dependency",
+            ))
+    # Optional: corelocationcli via cask. Only kb-planner's informational
+    # sunrise/sunset lookup uses it, and KB_FALLBACK_LAT/LON cover it → info.
     corelocation_paths = [
         "/usr/local/bin/CoreLocationCLI",
         "/opt/homebrew/bin/CoreLocationCLI",
     ]
     if not any(pathlib.Path(p).is_file() for p in corelocation_paths):
         findings.append(finding(
-            "install-health:binary-missing-corelocationcli", "hub", "CoreLocationCLI", "P2",
-            "CoreLocationCLI cask not installed (only kb-tick location-aware brief uses it)",
+            "install-health:binary-missing-corelocationcli", "hub", "CoreLocationCLI", "info",
+            "optional CoreLocationCLI not installed — only the planner's informational"
+            " sunrise/sunset times use it for your location; KB_FALLBACK_LAT and"
+            " KB_FALLBACK_LON in ~/knowledge/personal/.secrets work without it."
+            " Install: brew install --cask corelocationcli",
             evidence="searched=" + ",".join(corelocation_paths),
         ))
     # Optional: obsidian
@@ -2727,6 +2856,68 @@ def _ih_check_binaries(home: pathlib.Path, env_path: str | None = None) -> list[
             evidence="optional dependency",
         ))
     return findings
+
+
+def _ih_requirements_path() -> str:
+    """requirements.txt of the checkout this kb-doctor runs from, shell-quoted."""
+    req = pathlib.Path(__file__).resolve().parent.parent / "requirements.txt"
+    return shlex.quote(str(req)) if req.is_file() else "~/vepol/requirements.txt"
+
+
+def _ih_check_python_packages(env_path: str | None = None) -> list[Finding]:
+    """Import requirements.txt's packages with the python3 on PATH.
+
+    kb-* scripts start with `#!/usr/bin/env python3`, so that interpreter is
+    the one that needs them (install.sh warns about the same four).
+    """
+    import subprocess as _sp
+    path_env = (
+        env_path
+        if env_path is not None
+        else os.environ.get("KB_DOCTOR_INSTALL_HEALTH_PATH",
+                              os.environ.get("PATH", ""))
+    )
+    python3 = shutil.which("python3", path=path_env)
+    if python3 is None:
+        return []  # _ih_check_binaries already reports python3 as missing
+    # A relative PATH entry (".", "") gives a relative path; the probe runs
+    # from "/", so pin it to the one `env python3` would start from here.
+    python3 = os.path.abspath(python3)
+    probe = (
+        "import importlib, sys\n"
+        "for name in sys.argv[1:]:\n"
+        "    try:\n"
+        "        importlib.import_module(name)\n"
+        "    except Exception:\n"
+        "        print(name)\n"
+    )
+    try:
+        res = _sp.run([python3, "-c", probe, *INSTALL_HEALTH_PYTHON_PACKAGES],
+                      capture_output=True, text=True, timeout=30, cwd="/")
+    except (_sp.SubprocessError, OSError) as exc:
+        return [finding_with_key(
+            "install-health:python-packages-unchecked", "hub", "python3", python3, "P1",
+            f"could not run {python3} to check Vepol's Python packages",
+            evidence=repr(exc)[:200],
+        )]
+    if res.returncode != 0:
+        return [finding_with_key(
+            "install-health:python-packages-unchecked", "hub", "python3", python3, "P1",
+            f"could not run {python3} to check Vepol's Python packages",
+            evidence=f"returncode={res.returncode} stderr={res.stderr.strip()[-200:]!r}",
+        )]
+    missing = [INSTALL_HEALTH_PYTHON_PACKAGES[name] for name in res.stdout.split()
+               if name in INSTALL_HEALTH_PYTHON_PACKAGES]
+    if not missing:
+        return []
+    req = _ih_requirements_path()
+    return [finding_with_key(
+        "install-health:python-packages-missing", "hub", "python3", python3, "P1",
+        f"Python packages missing for {python3}: {', '.join(missing)} — kb-idea, kb-contact"
+        f" and the people tools cannot start. Run: python3 -m pip install --user -r {req}"
+        f" (Homebrew Python: python3 -m pip install --break-system-packages -r {req})",
+        evidence=f"python3={python3} missing={','.join(missing)}",
+    )]
 
 
 def _ih_codex_launcher_drift(canonical: pathlib.Path) -> list[Finding]:
@@ -2899,6 +3090,7 @@ def install_health_check() -> list[Finding]:
     findings.extend(_ih_check_launchagents(home, manifest))
     findings.extend(_ih_check_memory_compiler(home))
     findings.extend(_ih_check_binaries(home))
+    findings.extend(_ih_check_python_packages())
     findings.extend(_ih_check_codex_currency())
     return sorted(findings, key=lambda item: (SEVERITY_ORDER[item.severity], item.slug, item.id))
 
@@ -2909,7 +3101,7 @@ def install_health_check() -> list[Finding]:
 #
 # We verify the MCP host is reachable from a non-interactive shell
 # (cron, LaunchAgent) by:
-#   1. claude binary in PATH.
+#   1. claude binary found by the shared lookup calendar reads use.
 #   2. Basic envelope echo — claude responds within timeout, returns
 #      strict-parseable JSON envelope.
 # Tool-specific probes (Calendar, Mail, ...) are added by each module
@@ -2926,15 +3118,22 @@ def mcp_check() -> list[Finding]:
     Returns a list of findings. Empty list = healthy.
     """
     findings: list[Finding] = []
-    import shutil as _sh
     import subprocess as _sp
 
-    claude = _sh.which("claude")
+    # Find claude exactly as calendar reads do (_kb_mcp.runner._find_claude):
+    # $KB_CLAUDE_BIN, PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    try:
+        from _kb_mcp.runner import _find_claude  # type: ignore
+        claude = _find_claude()
+    except ImportError:
+        claude = _ih_find_claude(_ih_home(), os.environ.get("PATH", ""))
     if claude is None:
         findings.append(finding(
             "mcp-check:host-missing", "hub", "<PATH>",
             "P0",
-            "claude binary not found in PATH; MCP-first sources cannot run.",
+            "claude binary not found (looked at $KB_CLAUDE_BIN, PATH, ~/.local/bin,"
+            " /opt/homebrew/bin, /usr/local/bin); MCP-first sources cannot run.",
             "see docs/methodology/mcp-first-sources.md § Preflight",
         ))
         return findings
@@ -2973,8 +3172,8 @@ def mcp_check() -> list[Finding]:
         ))
         return findings
 
-    # Use the same strict parser modules use, to catch the same way.
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    # Use the same strict parser modules use, to catch the same way
+    # (bin/ is already on sys.path from the claude lookup above).
     try:
         from _kb_mcp.runner import _strict_envelope_parse, _validate_success_envelope  # type: ignore
     except ImportError as e:
@@ -3382,10 +3581,11 @@ def main() -> None:
             }, ensure_ascii=False, indent=2))
         else:
             print(render_text(findings, args.verbose), end="")
-        # gate-by-design: any P0 finding → exit 2.
+        # gate-by-design: any P0 finding → exit 2; --strict also fails on P1
+        # (exit 1), as documented for `kb-doctor agent-entrypoint --strict`.
         if any(item.severity == "P0" for item in findings):
             raise SystemExit(2)
-        raise SystemExit(0)
+        raise SystemExit(strict_exit(findings, args.strict))
 
     findings = collect(args.project)
     if args.write:

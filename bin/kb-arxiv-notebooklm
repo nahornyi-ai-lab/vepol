@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""kb-arxiv-notebooklm — turn the daily arXiv snapshot into a Russian NotebookLM report.
+"""kb-arxiv-notebooklm — turn the daily arXiv snapshot into a NotebookLM report
+in the user's language.
 
-Reads sources/arxiv-ai-research-snapshot-<DATE>.md, writes a Russian source
-packet under reports/, uploads it to a monthly NotebookLM notebook, generates
-audio for the daily source (listened to in NotebookLM — no local mp3 download),
-and keeps a resumable manifest keyed on the audio artifact id.
+Reads the day's snapshot that kb-learning-arxiv writes,
+sources/arxiv-learning-snapshot-<DATE>.md (a hub that still has the legacy
+sources/arxiv-ai-research-snapshot-<DATE>.md uses that one), writes a source packet
+under reports/, uploads it to a monthly NotebookLM notebook, generates audio
+for the daily source in the user's language (personal/profile.yaml via
+_kb_profile; listened to in NotebookLM — no local mp3 download), and keeps a
+resumable manifest keyed on the audio artifact id.
 """
 from __future__ import annotations
 
@@ -20,6 +24,9 @@ import sys
 import tempfile
 from typing import Any
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _kb_profile  # noqa: E402
+
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 SOURCES = HUB / "sources"
@@ -28,6 +35,9 @@ ORCH = HUB / ".orchestrator"
 LOG = HUB / "logs" / "arxiv-notebooklm.log"
 
 MAX_ATTEMPTS = int(os.environ.get("KB_ARXIV_NOTEBOOKLM_MAX_ATTEMPTS", "3"))
+
+UI_LANG = _kb_profile.get_language(HUB)
+UI_LANG_NAME = _kb_profile.language_directive(UI_LANG)
 
 
 def resolve_notebooklm_bin() -> str:
@@ -68,7 +78,12 @@ def rel(path: pathlib.Path) -> str:
 
 
 def snapshot_path(date_iso: str) -> pathlib.Path:
-    return SOURCES / f"arxiv-ai-research-snapshot-{date_iso}.md"
+    """The legacy research snapshot when a hub still has a producer for it,
+    else the snapshot kb-learning-arxiv writes for the same day."""
+    legacy = SOURCES / f"arxiv-ai-research-snapshot-{date_iso}.md"
+    if legacy.is_file():
+        return legacy
+    return SOURCES / f"arxiv-learning-snapshot-{date_iso}.md"
 
 
 def packet_path(date_iso: str) -> pathlib.Path:
@@ -116,7 +131,8 @@ def save_manifest(path: pathlib.Path, manifest: dict[str, Any]) -> None:
 
 
 def total_kept(snapshot_text: str) -> int:
-    match = re.search(r"(?m)^total_kept:\s*(\d+)\s*$", snapshot_text)
+    # Legacy snapshots count papers in `total_kept:`, kb-learning-arxiv in `selected:`.
+    match = re.search(r"(?m)^(?:total_kept|selected):\s*(\d+)\s*$", snapshot_text)
     if not match:
         return 0
     return int(match.group(1))
@@ -173,24 +189,24 @@ def pick_id(data: Any, *keys: str) -> str:
 
 
 def render_packet(date_iso: str, snapshot_text: str) -> str:
-    return f"""# Ежедневный AI research для Vepol — {date_iso}
+    return f"""# Daily AI research for Vepol — {date_iso}
 
-## Контекст
+## Context
 
-Vepol — локальная Markdown-first система памяти и оркестрации агентов: KB, daily/log, backlog, specs, cross-review, runtime safety, digital-clone workflows. Этот источник нужен для русского NotebookLM-пересказа ежедневного arXiv AI snapshot.
+Vepol is a local, Markdown-first system for memory and agent orchestration: KB, daily/log, backlog, specs, cross-review, runtime safety, digital-clone workflows. This source feeds a NotebookLM recap, in {UI_LANG_NAME}, of the daily arXiv AI snapshot.
 
-## Инструкция для NotebookLM
+## Instructions for NotebookLM
 
-Сделай русский аудиообзор как практический research recap для Vepol, не как пересказ списка статей.
+Make an audio overview in {UI_LANG_NAME} as a practical research recap for Vepol, not a walk through the list of papers.
 
-Обязательная структура смысла:
+Required structure of the content:
 
-1. Что нашли: 3–5 главных сигналов дня.
-2. Как применить в Vepol: какие идеи могут улучшить KB, agent runtime, RAG, evaluation, autonomy, safety или UX.
-3. Что не брать: что выглядит модно, но не подходит Vepol сейчас.
-4. Следующие действия: 2–4 конкретных follow-up для backlog/spec/research.
+1. What we found: the 3–5 main signals of the day.
+2. How to apply it in Vepol: which ideas could improve KB, agent runtime, RAG, evaluation, autonomy, safety or UX.
+3. What to skip: what looks trendy but does not fit Vepol right now.
+4. Next steps: 2–4 concrete follow-ups for backlog/spec/research.
 
-Не выдумывай результаты сверх abstract-ов. Если статья релевантна только косвенно, так и скажи.
+Do not invent results beyond the abstracts. If a paper is only indirectly relevant, say so.
 
 ## Source snapshot
 
@@ -274,6 +290,8 @@ def run(date_iso: str, force: bool = False) -> int:
         })
         save_manifest(mpath, manifest)
         log(f"{date_iso}: snapshot missing: {snap}")
+        print(f"kb-arxiv-notebooklm: no arXiv snapshot for {date_iso}: {snap} is missing; "
+              "kb-learning-arxiv writes it when it runs for that date", file=sys.stderr)
         return 2
 
     snapshot_text = snap.read_text(encoding="utf-8")
@@ -341,8 +359,8 @@ def run(date_iso: str, force: bool = False) -> int:
         save_manifest(mpath, manifest)
 
         prompt = (
-            "Сделай короткий русский аудиообзор ежедневного AI research для Vepol: "
-            "что нашли, как применить в Vepol, что не брать, следующие действия."
+            f"Make a short audio overview of the daily AI research for Vepol in {UI_LANG_NAME}: "
+            "what we found, how to apply it in Vepol, what to skip, next steps."
         )
         generated = run_notebooklm(
             [
@@ -357,7 +375,7 @@ def run(date_iso: str, force: bool = False) -> int:
                 "--length",
                 "short",
                 "--language",
-                "ru",
+                UI_LANG,
                 "--wait",
                 "--retry",
                 "2",

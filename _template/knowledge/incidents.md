@@ -1,38 +1,38 @@
 # Incidents — {{PROJECT_NAME}}
 
-Каждая ошибка, сломанный деплой, зависшая интеграция, неожиданное поведение, которое пришлось чинить вручную — **записывается сюда**. После фиксации агент обязан задать себе: «что сделать, чтобы это не повторилось?» — и если ответ не сводится к «быть внимательнее», завести автоматизацию (хук, проверку в CI, cron-скрипт, pre-commit, алерт) или как минимум правило в секции `Prevention rules`.
+Every error, broken deploy, stuck integration, or unexpected behavior that had to be fixed by hand is **recorded here**. After the fix, the agent must ask itself: "what would stop this from happening again?" — and if the answer is more than "be more careful", set up automation (a hook, a CI check, a cron script, a pre-commit, an alert) or at least a rule in the `Prevention rules` section.
 
 ## Ongoing
 
-<!-- Текущие незакрытые инциденты. Формат:
-### [YYYY-MM-DD HH:MM] <короткий заголовок>
-- Симптомы: ...
-- Что уже пробовали: ...
-- Что дальше: ...
+<!-- Current open incidents. Format:
+### [YYYY-MM-DD HH:MM] <short title>
+- Symptoms: ...
+- Tried so far: ...
+- Next: ...
 -->
 
 ## Resolved
 
-<!-- После фиксации:
-### [YYYY-MM-DD] <заголовок>
-- Симптомы: что увидели
-- Root cause: что реально сломалось
-- Фикс: что поменяли
-- Prevention: правило / автоматизация (если есть) или ссылка на Prevention rules ниже
+<!-- After the fix:
+### [YYYY-MM-DD] <title>
+- Symptoms: what we saw
+- Root cause: what actually broke
+- Fix: what we changed
+- Prevention: rule / automation (if any) or a link to Prevention rules below
 -->
 
 ## Prevention rules
 
-Правила, выжатые из инцидентов выше. Короткие императивы. Агент сверяется с ними перед рискованными действиями.
+Rules distilled from the incidents above. Short imperatives. The agent checks them before risky actions.
 
-<!-- Формат:
-- <правило одной строкой> — источник: [YYYY-MM-DD инцидент]
+<!-- Format:
+- <one-line rule> — source: [YYYY-MM-DD incident]
 -->
 
 ## Automated guards
 
-Список автоматизаций (хуков, проверок, скриптов), поднятых из этих инцидентов — чтобы агент знал, что они уже стоят, и не дублировал.
+A list of automations (hooks, checks, scripts) set up from these incidents — so the agent knows they are already in place and does not duplicate them.
 
-<!-- Формат:
-- <что автоматизировано> — где: <путь или система> — от какого инцидента: [YYYY-MM-DD]
+<!-- Format:
+- <what is automated> — where: <path or system> — from incident: [YYYY-MM-DD]
 -->

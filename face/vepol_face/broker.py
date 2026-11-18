@@ -156,6 +156,10 @@ def build_broker_argv(
         "--resume-key", resume_key,
         "--json-status",
         "--run-id", run_id,
+        # A chat turn is the owner's own request in the app, so the Claude lane may edit
+        # files and run commands, as it could before kb-orchestrator-run became read-only
+        # by default (the brief and the retro stay read-only).
+        "--allow-edits",
         prompt,
     ]
 

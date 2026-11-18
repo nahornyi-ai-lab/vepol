@@ -20,9 +20,11 @@ from _kb_multibot.mention import (  # noqa: E402
 
 class ExtractMentionsTests(unittest.TestCase):
     def test_single_mention(self) -> None:
-        self.assertEqual(extract_mentions("@vepol_bot статус?"), ["vepol_bot"])
+        self.assertEqual(extract_mentions("@vepol_bot status?"), ["vepol_bot"])
 
     def test_multiple_in_order(self) -> None:
+        # Russian sentence on purpose: mentions must be found inside
+        # Cyrillic text (the group chat is often in Russian).
         self.assertEqual(
             extract_mentions("@vepol_bot и @kb_mail_bot проверьте"),
             ["vepol_bot", "kb_mail_bot"],

@@ -3,10 +3,14 @@
 #
 # Removed (managed): bin/ symlinks into the seed, orchestrator-seed pointer,
 #   ~/.claude/.vepol/, the VEPOL MANAGED include block in ~/.claude/CLAUDE.md,
-#   installed Claude skills, com.knowledge.* LaunchAgents.
+#   installed Claude skills, the com.knowledge.* LaunchAgents made from this
+#   repo's launchd/ templates (unloaded first; other com.knowledge.* are kept).
 # NEVER removed (user data): your hub itself and everything in it that you own —
 #   raw/, daily/, projects/, personal/, concepts/, sources/, *.md, security/,
 #   install/receipts/. The hub directory is left in place.
+# Left in place and listed at the end with how to remove them: Vepol's hooks
+#   in ~/.claude/settings.json, ~/.claude/statusline-command.sh,
+#   ~/claude-memory-compiler, the local Qwen voice in ~/.local/share/vepol-qwen-tts.
 #
 # Flags:
 #   --dry-run   list what would be removed, change nothing
@@ -28,7 +32,7 @@ for arg in "$@"; do
     --yes|-y)  YES=1 ;;
     --backup-user-data) BACKUP=1 ;;
     -h|--help)
-      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'uninstall.sh: unknown option: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -90,33 +94,60 @@ fi
 [[ -d "$HOME_DIR/.claude/.vepol" ]] && act "$HOME_DIR/.claude/.vepol" rm -rf "$HOME_DIR/.claude/.vepol"
 
 # 4. Strip the VEPOL MANAGED include block from ~/.claude/CLAUDE.md — remove ONLY
-#    the exact 3-line block the installer writes, not arbitrary text between a
-#    stray BEGIN and END that a user may have typed.
+#    a block the installer writes, not arbitrary text between a stray BEGIN and
+#    END that a user may have typed. Recognised: a "<!-- BEGIN VEPOL MANAGED ... -->"
+#    line, then one to three lines that each reference the managed file — the
+#    legacy "<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->" comment or a
+#    Claude Code import line "@<path>/.vepol/CLAUDE.managed.md" — then
+#    "<!-- END VEPOL MANAGED -->". Anything else inside the markers keeps the block.
 CM="$HOME_DIR/.claude/CLAUDE.md"
-INCLUDE_BEGIN="<!-- BEGIN VEPOL MANAGED — do not edit. Source: ~/.claude/.vepol/CLAUDE.managed.md -->"
-INCLUDE_INNER="<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->"
-INCLUDE_END="<!-- END VEPOL MANAGED -->"
 if [[ -f "$CM" ]] && grep -qF "BEGIN VEPOL MANAGED" "$CM"; then
   if [[ "$DRY" -eq 1 ]]; then printf '   would strip the exact VEPOL MANAGED block from: %s\n' "$CM"
   else
-    python3 - "$CM" "$INCLUDE_BEGIN" "$INCLUDE_INNER" "$INCLUDE_END" <<'PY'
-import sys
-p, b, i, e = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    strip_rc=0
+    python3 - "$CM" <<'PY' || strip_rc=$?
+import re, sys
+p = sys.argv[1]
+BEGIN = re.compile(r"^<!-- BEGIN VEPOL MANAGED\b.*-->$")
+END = "<!-- END VEPOL MANAGED -->"
+INNER = (
+    re.compile(r"^<!-- @include ~/\.claude/\.vepol/CLAUDE\.managed\.md -->$"),  # legacy
+    re.compile(r"^@\S*\.vepol/CLAUDE\.managed\.md$"),                         # @import
+)
 lines = open(p, encoding="utf-8").read().split("\n")
+
+def block_end(k):
+    """Index of the END line if a recognised block starts at k, else None."""
+    if not BEGIN.match(lines[k].strip()):
+        return None
+    j = k + 1
+    while j < len(lines) and j <= k + 3 and any(r.match(lines[j].strip()) for r in INNER):
+        j += 1
+    if j > k + 1 and j < len(lines) and lines[j].strip() == END:
+        return j
+    return None
+
 out = []; k = 0; n = len(lines); removed = False
 while k < n:
-    if (not removed and lines[k].strip() == b.strip()
-            and k + 2 < n and lines[k+1].strip() == i.strip()
-            and lines[k+2].strip() == e.strip()):
-        k += 3
+    end = None if removed else block_end(k)
+    if end is not None:
+        k = end + 1
         while k < n and lines[k].strip() == "":  # drop trailing blank lines
             k += 1
         removed = True
         continue
     out.append(lines[k]); k += 1
+if not removed:
+    sys.exit(3)
 open(p, "w", encoding="utf-8").write("\n".join(out))
 PY
-    ok "stripped VEPOL MANAGED block from $CM (your content kept)"
+    if [[ "$strip_rc" -eq 0 ]]; then
+      ok "stripped VEPOL MANAGED block from $CM (your content kept)"
+    elif [[ "$strip_rc" -eq 3 ]]; then
+      warn "$CM has a VEPOL MANAGED marker but not a block uninstall.sh wrote — left unchanged; remove it by hand"
+    else
+      warn "could not edit $CM (python3 exit $strip_rc) — remove the VEPOL MANAGED block by hand"
+    fi
   fi
 fi
 
@@ -136,9 +167,16 @@ if [[ -d "$VEPOL_DIR/claude/skills" ]]; then
   done
 fi
 
-# 6. LaunchAgents.
+# 6. LaunchAgents — every agent made from a launchd/ template in this repo.
+#    install.sh loads tick, planner, orchestrator-cycle and people-review-bot;
+#    channel-telegram and multibot-supervisor are rendered from the same
+#    templates by hand (see docs/multibot-runbook.md). All of them run scripts
+#    from $HUB/bin, and the KeepAlive ones would keep restarting against the
+#    links removed above, so each is unloaded before its plist is deleted.
 LA="$HOME_DIR/Library/LaunchAgents"
-for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle; do
+for name in com.knowledge.tick com.knowledge.planner com.knowledge.orchestrator-cycle \
+            com.knowledge.people-review-bot com.knowledge.channel-telegram \
+            com.knowledge.multibot-supervisor; do
   plist="$LA/$name.plist"
   [[ -f "$plist" ]] || continue
   if [[ "$DRY" -eq 1 ]]; then printf '   would unload+remove: %s\n' "$plist"
@@ -154,7 +192,51 @@ if [[ "$DRY" -eq 1 ]]; then
 else
   ok "Vepol-managed files removed."
 fi
+
+# 7. What stays on purpose: these may carry the user's own settings or large
+#    downloads, so uninstall only names them and says how to remove each one.
+echo
+if [[ "$DRY" -eq 1 ]]; then say "Would be left in place (remove by hand if you want them gone):"
+else say "Left in place on purpose (remove by hand if you want them gone):"; fi
+kept=0
+SJ="$HOME_DIR/.claude/settings.json"
+if [[ -f "$SJ" ]] && grep -qE 'knowledge/bin/kb-(session-start|session-end|pre-compact)' "$SJ"; then
+  echo "  - $SJ: Vepol's Claude Code hooks, which run ~/knowledge/bin scripts this uninstall removes."
+  echo "    Copy the file first, then delete the entries under hooks.SessionStart, hooks.SessionEnd"
+  echo "    and hooks.PreCompact whose command runs ~/knowledge/bin/kb-session-start, kb-session-end"
+  echo "    or kb-pre-compact (they were added by install.sh or kb-claude-hooks)."
+  kept=1
+fi
+if [[ -f "$SJ" ]] && grep -qF '.claude/statusline-command.sh' "$SJ"; then
+  echo "  - $SJ: the \"statusLine\" key that runs ~/.claude/statusline-command.sh; delete it"
+  echo "    before removing that script."
+  kept=1
+fi
+if [[ -f "$HOME_DIR/.claude/statusline-command.sh" ]]; then
+  echo "  - $HOME_DIR/.claude/statusline-command.sh (status line script):"
+  echo "    rm \"$HOME_DIR/.claude/statusline-command.sh\""
+  kept=1
+fi
+if [[ -d "$HOME_DIR/claude-memory-compiler" ]]; then
+  echo "  - $HOME_DIR/claude-memory-compiler (session capture tool):"
+  echo "    rm -rf \"$HOME_DIR/claude-memory-compiler\""
+  kept=1
+fi
+QWEN_DIR="${KB_TTS_HOME:-$HOME_DIR/.local/share/vepol-qwen-tts}"
+if [[ -d "$QWEN_DIR" ]]; then
+  echo "  - $QWEN_DIR (local Qwen voice: Python env and model files):"
+  echo "    rm -rf \"$QWEN_DIR\""
+  kept=1
+fi
+if [[ -d "$HOME_DIR/.claude/channels/telegram" ]]; then
+  echo "  - $HOME_DIR/.claude/channels/telegram/ (Telegram channel scaffold; holds your bot token"
+  echo "    if you added one, and Claude Code's Telegram plugin uses the same folder)"
+  kept=1
+fi
+[[ "$kept" -eq 1 ]] || echo "  (nothing)"
+
 if [[ -d "$HUB" ]]; then
+  echo
   sz="$(du -sh "$HUB" 2>/dev/null | cut -f1 || echo '?')"
   echo "  Your knowledge hub is preserved at $HUB ($sz). Delete it manually if you really want it gone."
 fi

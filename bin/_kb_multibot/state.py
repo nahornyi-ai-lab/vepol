@@ -1,6 +1,6 @@
 """Service state IO — atomic file operations for queues, runs, observer offset, locks.
 
-Concept §7.2: supervisor хранит operational state в `~/.orchestrator/multibot/`:
+Concept §7.2: supervisor keeps operational state in `~/.orchestrator/multibot/`:
   queues/<agent_slug>.json       FIFO per agent
   runs/<run_id>.json             one run per file
   observer/last_seen_msg_id.json per-chat for catchup

@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-gate:
+    name: Release gate (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: brew install bash ripgrep tmux jq
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install -r requirements.txt pytest httpx
+          # The launchd-equivalent check runs with launchd's PATH, where python3 is Homebrew's.
+          if [ -x /opt/homebrew/bin/python3 ]; then
+            /opt/homebrew/bin/python3 -m pip install --break-system-packages -r requirements.txt
+          fi
+          python -m venv face/.venv
+          face/.venv/bin/pip install -r face/requirements.txt pytest httpx
+
+      - name: Add an offline stand-in for Claude Code
+        # The installer requires a `claude` command; the suites never reach a real one.
+        run: |
+          stubs="$RUNNER_TEMP/stubs"
+          mkdir -p "$stubs"
+          printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "2.1.0 (Claude Code)"; exit 0; }\nexit 1\n' > "$stubs/claude"
+          chmod +x "$stubs/claude"
+          echo "$stubs" >> "$GITHUB_PATH"
+
+      - name: Core and daily-routine suites
+        run: HOME="$RUNNER_TEMP/home" bash tests/run-all.sh
+
+      - name: Vepol Desktop suite
+        working-directory: face
+        run: .venv/bin/python -m pytest -q -p no:cacheprovider tests

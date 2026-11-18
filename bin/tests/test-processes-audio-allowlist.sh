@@ -18,6 +18,15 @@ SRC_BIN="${KB_DIGEST_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+
 # ── AC4: config validator — id+command binding ───────────────────────────────
 # check_yaml <expect: valid|invalid> <label> <yaml on stdin>
 check_yaml() {
@@ -335,8 +344,11 @@ mk_hub() { # $1 = dir
   : > "$1/personal/.secrets"
   printf '{"fixture":true}\n' >"$1/tts/install.json"
   printf '## Retro (20:45)\n\nguard-fixture retro.\n' > "$1/briefs/$DAY.md"
+  # kb-morning-digest asks the renderer `--check` before every render; the
+  # fake reports ready without counting as a render.
   cat >"$1/bin/kb-tts-render" <<'SH'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--check" ]]; then echo '{"ready": true, "engine": "qwen"}'; exit 0; fi
 echo "render $*" >>"$AUDIOLOG"
 out=''; while [[ $# -gt 0 ]]; do case "$1" in --out) out="$2"; shift 2;; *) shift;; esac; done
 printf 'ID3-guard-audio' >"$out"

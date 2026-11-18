@@ -10,12 +10,20 @@
 set -uo pipefail
 PASS=0; FAIL=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SRC_BIN="${KB_MAIL_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 HUB="$TMP/hub"; mkdir -p "$HUB/personal"
-ln -s "$SRC_BIN" "$HUB/bin"
+ln -sfn "$SRC_BIN" "$HUB/bin"   # -n: never descend into an existing link
 : > "$HUB/personal/.secrets"   # kb-brief/kb-retro source this unconditionally
 FAKE="$TMP/fake"; mkdir -p "$FAKE"; echo ok > "$FAKE/mode"
 cat > "$FAKE/threads.json" <<'JSON'
@@ -59,21 +67,46 @@ KB_HUB="$HUB" KB_MAIL_FAKE_DIR="$FAKE" "$SRC_BIN/kb-mail-brief" --period morning
 
 # unavailable with a reason code on two consecutive days → plain-words reason
 # sentence plus the streak (scheduler honest failure, spec §B)
-SHUB="$TMP/streak-hub"; mkdir -p "$SHUB/personal"
-KB_MAIL_SRC_BIN="$SRC_BIN" SHUB="$SHUB" python3 - <<'PY'
+# (mail worked before: kb-mail-brief keeps a watermark after a successful read)
+write_unavailable() { # $1 = hub, $2 = reason code, then days
+  KB_MAIL_SRC_BIN="$SRC_BIN" python3 - "$@" <<'PY'
 import os, pathlib, sys
 sys.path.insert(0, os.environ["KB_MAIL_SRC_BIN"])
 from _kb_mail.envelope import unavailable_envelope, write_envelope, brief_path
-hub = pathlib.Path(os.environ["SHUB"])
-for day in ("2026-07-01", "2026-07-02"):
+hub, reason = pathlib.Path(sys.argv[1]), sys.argv[2]
+for day in sys.argv[3:]:
     env = unavailable_envelope(period="morning", day=day, generated_at=day + "T06:15:00+02:00",
                                window={"from": day + "T00:00:00+02:00", "to": day + "T06:15:00+02:00"},
-                               reason="quota")
+                               reason=reason)
     write_envelope(env, brief_path("morning", day, hub))
 PY
+}
+SHUB="$TMP/streak-hub"; mkdir -p "$SHUB/personal/mail"
+printf '{"evening": "2026-06-30T20:30:00+02:00"}\n' > "$SHUB/personal/mail/watermarks.json"
+write_unavailable "$SHUB" quota 2026-07-01 2026-07-02
 SB=$(KB_HUB="$SHUB" "$SRC_BIN/kb-mail-block" --period morning --day 2026-07-02 2>/dev/null)
 [[ "$SB" == *"usage limit"* && "$SB" == *"day 2 in a row"* ]] \
   && ok "block: unavailable quota → reason sentence + 'day 2 in a row'" || fail "block: reason sentence/streak missing"
+
+# 'unavailable' (Codex not found) has its own plain sentence.
+write_unavailable "$SHUB" unavailable 2026-07-03
+SB=$(KB_HUB="$SHUB" "$SRC_BIN/kb-mail-block" --period morning --day 2026-07-03 2>/dev/null)
+[[ "$SB" == *"Reason: the mail reader (Codex) is not available"* && "$SB" != *"not identified"* ]] \
+  && ok "block: 'unavailable' → a real reason sentence" || fail "block: 'unavailable' sentence: $SB"
+
+# Mail never set up (never read successfully): no daily risk, no reason, no streak.
+NHUB="$TMP/never-hub"; mkdir -p "$NHUB/personal"
+write_unavailable "$NHUB" unavailable 2026-07-01 2026-07-02
+NB=$(KB_HUB="$NHUB" "$SRC_BIN/kb-mail-block" --period morning --day 2026-07-02 2>/dev/null)
+[[ "$NB" == *"mail is not set up"* && "$NB" != *"Reason:"* && "$NB" != *"in a row"* ]] \
+  && ok "block: never set up → 'not set up' note, no reason/streak" || fail "block: never-set-up note: $NB"
+NB=$(KB_HUB="$TMP/empty-hub" "$SRC_BIN/kb-mail-block" --period evening --day 2026-07-02 2>/dev/null)
+[[ "$NB" == *"mail is not set up"* ]] && ok "block: no mail files at all → 'not set up'" || fail "block: empty hub: $NB"
+mkdir -p "$TMP/empty-hub/personal"; : > "$TMP/empty-hub/personal/.secrets"
+ln -sfn "$SRC_BIN" "$TMP/empty-hub/bin"
+P=$(KB_HUB="$TMP/empty-hub" KB_BRIEF_PROMPT_ONLY=1 "$SRC_BIN/kb-brief" 2>/dev/null)
+[[ "$P" == *"mail is not set up"*"Leave mail out entirely"* && "$P" == *'not set up ("mail is not set up") → leave mail out'* ]] \
+  && ok "brief prompt: never-set-up mail is left out" || fail "brief prompt lacks the not-set-up rule"
 
 # ── AC4: kb-brief injects the wrapped morning block into its prompt ──────────
 P=$(KB_HUB="$HUB" KB_BRIEF_PROMPT_ONLY=1 "$SRC_BIN/kb-brief" 2>/dev/null)
@@ -92,7 +125,7 @@ if [[ -z "$R" ]]; then
   fail "AC5: kb-retro prompt-only produced no output"
 else
   [[ "$R" == *"<untrusted-source-"* ]] && ok "AC5: evening mail block in retro prompt" || fail "AC5: no mail block in retro prompt"
-  [[ "$R" == *"НЕДОВЕРЕННЫЕ внешние данные"* ]] && ok "AC5: retro marks mail as untrusted" || fail "AC5: missing untrusted instruction"
+  [[ "$R" == *"UNTRUSTED external data"* ]] && ok "AC5: retro marks mail as untrusted" || fail "AC5: missing untrusted instruction"
   leakfree "$R" && ok "AC5: no raw address/body/markup in retro prompt" || fail "AC5: raw content leaked into retro prompt"
 fi
 

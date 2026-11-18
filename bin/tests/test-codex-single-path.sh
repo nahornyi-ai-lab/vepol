@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Canonical Codex launcher contract: one standalone path, one diagnostic/test
-# override, and no production dependence on PATH or desktop app bundles.
+# Codex launcher contract: every production callsite goes through the shared
+# resolver (bin/_kb_codex.py). Lookup order: KB_CODEX_BIN (authoritative when
+# set), ~/.local/bin/codex, codex on PATH, /opt/homebrew/bin/codex,
+# /usr/local/bin/codex; copies inside a macOS app bundle are never picked up
+# from PATH or the fixed fallbacks. Claude follows the same idea
+# (bin/_kb_claude_runner.py claude_bin) so launchd's short PATH still finds it.
 
 set -uo pipefail
 PASS=0; FAIL=0
@@ -21,6 +25,7 @@ import sys
 
 sys.path.insert(0, os.environ["SRC_BIN"])
 try:
+    import _kb_codex
     from _kb_codex import CodexUnavailable, codex_bin
 except Exception as exc:
     print(f"IMPORT_ERROR: {exc}")
@@ -30,8 +35,31 @@ home = pathlib.Path(os.environ["TEST_HOME"])
 cwd = pathlib.Path(os.environ["TEST_CWD"])
 expected = str((home / ".local/bin/codex").resolve())
 
+def fake(path: pathlib.Path, mode: int = 0o755) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(mode)
+    return path
+
+def unavailable(**kwargs) -> bool:
+    try:
+        codex_bin(**kwargs)
+    except CodexUnavailable:
+        return True
+    return False
+
+# The fixed fallbacks point into this sandbox, so the host's own installs
+# (if any) can never leak into the assertions below.
+system = cwd / "system"
+_kb_codex.SYSTEM_CANDIDATES = (str(system / "brew/codex"), str(system / "local/codex"))
+
+on_path = fake(cwd / "pathbin/codex")
+path_env = {"PATH": f"{cwd / 'pathbin'}"}
+
 assert codex_bin(env={}, home=home, cwd=cwd) == expected
 assert codex_bin(env={"PATH": ""}, home=home, cwd=cwd) == expected
+# ~/.local/bin/codex comes before PATH.
+assert codex_bin(env=path_env, home=home, cwd=cwd) == expected
 
 override = cwd / "override-codex"
 override.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -39,23 +67,92 @@ override.chmod(0o755)
 assert codex_bin(env={"KB_CODEX_BIN": "./override-codex"}, home=home, cwd=cwd) == str(override.resolve())
 
 override.chmod(0o644)
-try:
-    codex_bin(env={"KB_CODEX_BIN": str(override)}, home=home, cwd=cwd)
-except CodexUnavailable:
-    pass
-else:
-    raise AssertionError("non-executable override accepted")
+assert unavailable(env={"KB_CODEX_BIN": str(override)}, home=home, cwd=cwd), \
+    "non-executable override accepted"
+# An explicit override is authoritative: a broken one never falls through to
+# ~/.local/bin, PATH or the fixed fallbacks (tests and owners rely on it).
+assert unavailable(env={"KB_CODEX_BIN": str(cwd / "missing"), **path_env}, home=home, cwd=cwd), \
+    "broken override fell through to another copy"
 
 (home / ".local/bin/codex").unlink()
+assert unavailable(env={}, home=home, cwd=cwd), "missing binary accepted with no PATH"
+
+# Homebrew/npm style install found only on PATH.
+assert codex_bin(env=path_env, home=home, cwd=cwd) == str(on_path.resolve())
+
+# Non-executable and relative PATH entries are skipped.
+fake(cwd / "noexec/codex", 0o644)
+fake(cwd / "rel/codex")
+assert codex_bin(env={"PATH": f"{cwd / 'noexec'}:rel:{cwd / 'pathbin'}"}, home=home, cwd=cwd) \
+    == str(on_path.resolve())
+
+# A copy inside a macOS app bundle is skipped, directly or through a symlink.
+app_codex = fake(cwd / "Codex.app/Contents/Resources/codex")
+link_dir = cwd / "linkbin"
+link_dir.mkdir()
+(link_dir / "codex").symlink_to(app_codex)
+assert codex_bin(env={"PATH": f"{app_codex.parent}:{link_dir}:{cwd / 'pathbin'}"},
+                 home=home, cwd=cwd) == str(on_path.resolve())
+assert unavailable(env={"PATH": f"{app_codex.parent}:{link_dir}"}, home=home, cwd=cwd), \
+    "app-bundle codex accepted"
+# ...but an explicit override may still name it (the owner's choice).
+assert codex_bin(env={"KB_CODEX_BIN": str(app_codex)}, home=home, cwd=cwd) == str(app_codex.resolve())
+
+# Fixed fallbacks after PATH, in order.
+local_codex = fake(system / "local/codex")
+assert codex_bin(env={"PATH": ""}, home=home, cwd=cwd) == str(local_codex.resolve())
+brew_codex = fake(system / "brew/codex")
+assert codex_bin(env={"PATH": ""}, home=home, cwd=cwd) == str(brew_codex.resolve())
+assert codex_bin(env=path_env, home=home, cwd=cwd) == str(on_path.resolve())
+
+brew_codex.unlink(); local_codex.unlink(); on_path.unlink()
 try:
-    codex_bin(env={}, home=home, cwd=cwd)
-except CodexUnavailable:
-    pass
+    codex_bin(env=path_env, home=home, cwd=cwd)
+except CodexUnavailable as exc:
+    assert exc.path == (home / ".local/bin/codex").resolve(strict=False), exc.path
+    assert str(exc).startswith("Codex executable unavailable: ") and "PATH" in str(exc), str(exc)
 else:
-    raise AssertionError("missing canonical binary accepted")
+    raise AssertionError("missing codex accepted")
 PY
-[[ $? -eq 0 ]] && ok "resolver uses only canonical standalone path or validated override" \
-  || fail "canonical resolver contract failed"
+[[ $? -eq 0 ]] && ok "resolver order: override, ~/.local/bin, PATH, Homebrew/npm; app bundles skipped" \
+  || fail "codex resolver contract failed"
+
+# Claude lookup: KB_CLAUDE_BIN (if executable), PATH, ~/.local/bin, Homebrew/npm.
+SRC_BIN="$SRC_BIN" TEST_TMP="$TMP" python3 - <<'PY'
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, os.environ["SRC_BIN"])
+import _kb_claude_runner as runner
+
+tmp = pathlib.Path(os.environ["TEST_TMP"]) / "claude-lookup"
+home = tmp / "home"
+runner.CLAUDE_SYSTEM_CANDIDATES = (str(tmp / "system/brew/claude"), str(tmp / "system/local/claude"))
+
+def fake(path: pathlib.Path) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+launchd = {"PATH": "/usr/bin:/bin", "HOME": str(home)}
+assert runner.claude_bin(env=launchd) == "claude", "nothing installed -> bare name (launch fails as before)"
+brew = fake(tmp / "system/brew/claude")
+assert runner.claude_bin(env=launchd) == str(brew)
+native = fake(home / ".local/bin/claude")
+assert runner.claude_bin(env=launchd) == str(native), "~/.local/bin wins over the fixed fallbacks"
+on_path = fake(tmp / "pathbin/claude")
+assert runner.claude_bin(env={**launchd, "PATH": f"{on_path.parent}:/usr/bin:/bin"}) == str(on_path), \
+    "PATH wins over ~/.local/bin"
+pinned = fake(tmp / "pinned/claude")
+assert runner.claude_bin(env={**launchd, "KB_CLAUDE_BIN": str(pinned)}) == str(pinned), \
+    "an executable KB_CLAUDE_BIN wins"
+assert runner.claude_bin(env={**launchd, "KB_CLAUDE_BIN": "/nowhere/claude"}) == str(native), \
+    "a KB_CLAUDE_BIN that is not executable falls through to the lookup"
+PY
+[[ $? -eq 0 ]] && ok "claude lookup: override, PATH, ~/.local/bin, Homebrew/npm" \
+  || fail "claude lookup order failed"
 
 SRC_BIN="$SRC_BIN" python3 - <<'PY'
 import os
@@ -128,16 +225,26 @@ setup = setup_path.read_text(encoding="utf-8")
 
 assert "https://chatgpt.com/codex/install.sh" in offer
 assert "npm install -g @openai/codex" not in offer
-codex_rows = [line for line in registry.splitlines() if line.strip().startswith("codex")]
-assert len(codex_rows) == 1, codex_rows
-assert "path-any" in codex_rows[0] and "$HOME/.local/bin/codex" in codex_rows[0]
-assert ":codex" not in codex_rows[0]
+def row(name):
+    rows = [line for line in registry.splitlines() if line.split("|")[0].strip() == name]
+    assert len(rows) == 1, rows
+    fields = [f.strip() for f in rows[0].split("|")]
+    return fields[1], fields[2].split(":")
+kind, cands = row("codex")
+assert kind == "path-any", kind
+assert cands == ["$HOME/.local/bin/codex", "codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"], cands
+kind, cands = row("claude")
+assert cands == ["claude", "$HOME/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"], cands
+assert ".app/" not in registry
+offer_codex = [l for l in offer.splitlines() if l.strip().startswith('"codex|')]
+assert len(offer_codex) == 1 and "/opt/homebrew/bin/codex" in offer_codex[0], offer_codex
+assert any(l.strip().startswith('"hermes|') for l in offer.splitlines()), "kb-cli-offer lists hermes"
 assert "from _kb_codex import" in doctor and "shutil.which(\"codex\"" not in doctor
 assert "https://chatgpt.com/codex/install.sh" in setup
 assert "npm install -g @openai/codex" not in setup
 PY
-[[ $? -eq 0 ]] && ok "installer, roster, doctor and setup use the canonical standalone contract" \
-  || fail "install/diagnostic surfaces still advertise fallback or npm/PATH Codex"
+[[ $? -eq 0 ]] && ok "installer, roster, doctor and setup use the shared lookup contract" \
+  || fail "install/diagnostic surfaces disagree with the lookup contract"
 
 # Executable boundary checks: a missing Codex degrades one lane, doctor reports
 # the canonical failure, and the managed inventory keeps the shared import.
@@ -253,13 +360,14 @@ PY
   || fail "missing-Codex boundary or managed inventory failed"
 
 # Broker must type the unavailable Codex attempt and continue to Claude without
-# a traceback. The fake is intentionally found only through the test PATH.
+# a traceback. The fake is intentionally found only through the test PATH; an
+# inherited KB_CLAUDE_BIN would win over PATH, so it is dropped here.
 cat > "$TMP/claude" <<'SH'
 #!/bin/sh
 echo CLAUDE_FALLBACK_OK
 SH
 chmod +x "$TMP/claude"
-BROKER_OUT=$(PATH="$TMP:$PATH" KB_CODEX_BIN="$TMP/missing-codex" \
+BROKER_OUT=$(env -u KB_CLAUDE_BIN PATH="$TMP:$PATH" KB_CODEX_BIN="$TMP/missing-codex" \
   KB_ORCHESTRATOR_BACKENDS="codex,claude" \
   KB_ORCHESTRATOR_STATE_DIR="$TMP/state" KB_ORCHESTRATOR_LOG_FILE="$TMP/broker.log" \
   "$SRC_BIN/kb-orchestrator-run" --backend auto --cwd "$TMP/cwd" \
@@ -269,6 +377,63 @@ broker_rc=$?
    && "$(cat "$TMP/broker.err")" != *Traceback* ]] \
   && ok "broker falls through missing Codex to Claude without traceback" \
   || fail "broker missing-Codex fallback failed (rc=$broker_rc)"
+
+# Scheduled jobs run under launchd, whose PATH has no ~/.local/bin. A Claude
+# that the native installer put there must still be found, by the broker and
+# by kb-claude-run, and no model is pinned unless CLAUDE_MODEL is set. env -i
+# keeps the caller's KB_CLAUDE_BIN/CLAUDE_MODEL out; no real agent is reachable.
+PY3="$(command -v python3)"
+LHOME="$TMP/launchd-home"; mkdir -p "$LHOME/.local/bin"
+cat > "$LHOME/.local/bin/claude" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/claude-argv.log"
+echo NATIVE_CLAUDE_OK
+SH
+chmod +x "$LHOME/.local/bin/claude"
+launchd_broker() {  # launchd_broker <state-name> [VAR=value ...]
+  local name="$1"; shift
+  env -i HOME="$LHOME" PATH="/usr/bin:/bin" "$@" \
+    KB_ORCHESTRATOR_STATE_DIR="$TMP/$name" KB_ORCHESTRATOR_LOG_FILE="$TMP/$name.log" \
+    KB_CLAUDE_RUN_ROOT="$TMP/launchd-runs" \
+    "$PY3" "$SRC_BIN/kb-orchestrator-run" --backend auto --cwd "$TMP/cwd" \
+    --timeout 10 "reply with the marker" 2>"$TMP/$name.err"
+}
+OUT=$(launchd_broker ld1 KB_CODEX_BIN="$TMP/missing-codex" KB_ORCHESTRATOR_BACKENDS="codex,claude"); rc=$?
+[[ $rc -eq 0 && "$OUT" == *NATIVE_CLAUDE_OK* ]] \
+  && ok "broker finds Claude in ~/.local/bin with launchd's PATH" \
+  || fail "broker missed ~/.local/bin/claude under a launchd PATH (rc=$rc, err=$(tail -c 200 "$TMP/ld1.err"))"
+[[ -s "$TMP/claude-argv.log" && "$(cat "$TMP/claude-argv.log")" != *--model* ]] \
+  && ok "broker passes no --model when CLAUDE_MODEL is unset" \
+  || fail "broker pinned a Claude model: $(cat "$TMP/claude-argv.log" 2>/dev/null)"
+: > "$TMP/claude-argv.log"
+OUT=$(launchd_broker ld2 KB_CODEX_BIN="$TMP/missing-codex" KB_ORCHESTRATOR_BACKENDS="claude" \
+  CLAUDE_MODEL="claude-test-model"); rc=$?
+[[ $rc -eq 0 && "$(cat "$TMP/claude-argv.log")" == *"--model claude-test-model"* ]] \
+  && ok "CLAUDE_MODEL still selects the Claude model" \
+  || fail "CLAUDE_MODEL was not passed (rc=$rc): $(cat "$TMP/claude-argv.log" 2>/dev/null)"
+OUT=$(env -i HOME="$LHOME" PATH="/usr/bin:/bin" KB_CLAUDE_RUN_ROOT="$TMP/launchd-runs" \
+  "$PY3" "$SRC_BIN/kb-claude-run" --cwd "$TMP/cwd" -- claude -p hi 2>"$TMP/ld3.err"); rc=$?
+[[ $rc -eq 0 && "$OUT" == *NATIVE_CLAUDE_OK* ]] \
+  && ok "kb-claude-run -- claude finds ~/.local/bin/claude with launchd's PATH" \
+  || fail "kb-claude-run missed ~/.local/bin/claude (rc=$rc, err=$(tail -c 200 "$TMP/ld3.err"))"
+
+# A Homebrew/npm Codex that is only on PATH is used by the broker.
+mkdir -p "$TMP/brewbin"
+cat > "$TMP/brewbin/codex" <<'SH'
+#!/bin/sh
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+[ -n "$out" ] && printf 'PATH_CODEX_OK\n' > "$out"
+exit 0
+SH
+chmod +x "$TMP/brewbin/codex"
+OUT=$(env -i HOME="$LHOME" PATH="$TMP/brewbin:/usr/bin:/bin" KB_ORCHESTRATOR_BACKENDS="codex" \
+  KB_ORCHESTRATOR_STATE_DIR="$TMP/ld4" KB_ORCHESTRATOR_LOG_FILE="$TMP/ld4.log" \
+  "$PY3" "$SRC_BIN/kb-orchestrator-run" --backend auto --cwd "$TMP/cwd" \
+  --timeout 10 "reply with the marker" 2>"$TMP/ld4.err"); rc=$?
+[[ $rc -eq 0 && "$OUT" == *PATH_CODEX_OK* ]] \
+  && ok "broker uses a Codex found only on PATH" \
+  || fail "broker ignored the PATH Codex (rc=$rc, err=$(tail -c 200 "$TMP/ld4.err"))"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

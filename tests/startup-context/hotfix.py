@@ -230,6 +230,130 @@ def test_print_mode_does_not_block_and_is_plain_markdown():
     assert "## Agent Card" in r.stdout
 
 
+def test_print_mode_defaults_to_current_directory():
+    """`kb-session-start --print` run in the project folder, with neither --cwd
+    nor CLAUDE_PROJECT_DIR, prints that folder's bundle. Hook mode does not
+    guess: with no cwd in the hook JSON it still emits `{}`."""
+    with tempfile.TemporaryDirectory() as td:
+        project = make_project(Path(td) / "project")
+        env = {**hook_env(), "PWD": str(project)}
+        r = subprocess.run([str(SESSION_START), "--print"], cwd=str(project),
+                           capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.startswith("## Startup Context - read this first"), r.stdout[:300]
+        assert "## Startup Context Manifest" in r.stdout
+        assert "Ready hotfix task" in r.stdout
+        hook = subprocess.run([str(SESSION_START)], cwd=str(project), input="",
+                              capture_output=True, text=True, env=env, timeout=20)
+        assert hook.returncode == 0, hook.stderr
+        assert hook.stdout.strip() == "{}", hook.stdout[:300]
+
+
+def backlog_board(n: int) -> str:
+    tasks = "".join(
+        f"- [ ] Backlog item {i:02d}\n  plan_item_id: pi-bl-{i:02d}\n  priority: P2\n"
+        f"  created: 2026-06-21\n  updated: 2026-06-21\n  acceptance: |\n    Later.\n\n"
+        for i in range(n))
+    return valid_board().replace(
+        "## Backlog\n\n- [ ] Backlog task", "## Backlog\n\n" + tasks + "- [ ] Backlog task")
+
+
+def test_open_backlog_items_reach_active_work():
+    """kb-task puts new tasks under `## Backlog`; the bundle must carry them, after
+    the Ready/In Progress/Blocked/Review items, bounded to 10 plus a `+K more` line."""
+    with tempfile.TemporaryDirectory() as td:
+        project = make_project(Path(td) / "small")
+        ctx = hook_context(project)
+        assert "- Backlog: pi-backlog — Backlog task" in ctx, ctx[-3000:]
+        assert ctx.index("Review hotfix task") < ctx.index("Backlog task")
+        assert "more not listed" not in ctx
+
+        big = make_project(Path(td) / "big")
+        write(big / "knowledge" / "backlog.md", backlog_board(12))  # 13 Backlog items
+        ctx = hook_context(big)
+    listed = re.findall(r"^- Backlog: (pi-[\w-]+) — ", ctx, re.M)
+    assert listed == [f"pi-bl-{i:02d}" for i in range(10)], listed
+    assert "pi-backlog" not in ctx
+    m = re.search(r"^- Backlog: \+(\d+) more not listed; see them with `(.+)`$", ctx, re.M)
+    assert m and m.group(1) == "3", ctx[-2000:]
+    assert "kb-board" in m.group(2) and "--status Backlog" in m.group(2)
+    assert "Ready hotfix task" in ctx and "Review hotfix task" in ctx
+    assert re.search(r"^- active_work: present ", ctx, re.M)
+
+
+def test_hand_written_backlog_items_show_no_none_id():
+    """A hand-added `- [ ] ...` line under `## Backlog` has no plan_item_id. It is
+    listed by title alone, never as `None — <title>`."""
+    with tempfile.TemporaryDirectory() as td:
+        project = make_project(Path(td) / "project")
+        board = project / "knowledge" / "backlog.md"
+        write(board, valid_board().replace(
+            "## Backlog\n\n", "## Backlog\n\n- [ ] Hand-written idea\n\n", 1))
+        ctx = hook_context(project)
+    assert "- Backlog: Hand-written idea" in ctx, ctx[-2000:]
+    assert "None" not in ctx, ctx[-2000:]
+    assert "- Backlog: pi-backlog — Backlog task" in ctx, ctx[-2000:]
+
+
+def test_backlog_items_sorted_by_priority_when_board_reports_it():
+    """When `kb-board list --json` rows carry a priority, P0 comes first; ties keep
+    board order. A stub kb-board stands in for a board that reports priority."""
+    rows = [{"status": "Backlog", "plan_item_id": f"pi-{i:02d}", "title": f"Item {i:02d}",
+             "priority": "P0" if i == 11 else ("P1" if i == 5 else "P3")} for i in range(12)]
+    with tempfile.TemporaryDirectory() as td:
+        hub = Path(td) / "hub"
+        stub = hub / "bin" / "kb-board"
+        write(stub, "#!/usr/bin/env python3\nimport json, sys\n"
+                    f"rows = {json.dumps(rows)}\n"
+                    "status = sys.argv[sys.argv.index('--status') + 1]\n"
+                    "print(json.dumps([r for r in rows if r['status'] == status]))\n")
+        stub.chmod(0o755)
+        project = make_project(Path(td) / "project")
+        ctx = hook_context(project, env_extra={"KB_HUB": str(hub)})
+    listed = re.findall(r"^- Backlog: (pi-\d+) — ", ctx, re.M)
+    assert listed == ["pi-11", "pi-05", "pi-00", "pi-01", "pi-02", "pi-03", "pi-04",
+                      "pi-06", "pi-07", "pi-08"], listed
+    assert re.search(r"^- Backlog: \+2 more not listed", ctx, re.M), ctx[-2000:]
+
+
+def test_kb_task_prints_one_line_and_its_task_reaches_the_session():
+    """The documented path: `kb-task "..." --project my-app` prints one ✓ line with
+    the task id (no raw dict), `--json` prints parseable JSON, and the next
+    session in that project lists the task."""
+    kb_task = SESSION_START.parent / "kb-task"
+    if not kb_task.exists():
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        hub = root / "hub"
+        (hub / "projects").mkdir(parents=True)
+        (hub / "bin").symlink_to(SESSION_START.parent.resolve())
+        write(hub / "backlog.md", "# Backlog\n")
+        project = make_project(root / "my-app")
+        write(project / "knowledge" / "backlog.md", "# Backlog\n")  # canonical empty board
+        (hub / "projects" / "my-app").symlink_to(project / "knowledge")
+        env = {**hook_env(), "KB_HUB": str(hub)}
+
+        r = subprocess.run([str(kb_task), "Ship the landing page", "--project", "my-app"],
+                           capture_output=True, text=True, env=env, timeout=30)
+        assert r.returncode == 0, r.stderr
+        lines = r.stdout.splitlines()
+        assert len(lines) == 1, r.stdout
+        m = re.fullmatch(r"✓ Added to project 'my-app' board \(id: ([0-9a-f-]{36})\)", lines[0])
+        assert m, lines[0]
+        task_id = m.group(1)
+
+        r = subprocess.run([str(kb_task), "Hub chore", "--json"],
+                           capture_output=True, text=True, env=env, timeout=30)
+        assert r.returncode == 0, r.stderr
+        result = json.loads(r.stdout)
+        assert result["ok"] is True and result["status"] == "appended", result
+        assert result["plan_item_id"] in (hub / "backlog.md").read_text(encoding="utf-8")
+
+        ctx = hook_context(project, env_extra={"KB_HUB": str(hub)})
+    assert f"- Backlog: {task_id} — Ship the landing page" in ctx, ctx[-3000:]
+
+
 def test_huge_files_do_not_starve_critical_sections():
     with tempfile.TemporaryDirectory() as td:
         project = make_project(Path(td) / "project", huge=True)
@@ -368,15 +492,66 @@ def test_critical_budget_fixture_marks_clips_honestly():
     assert int(m.group(1)) == len(ctx), "sentinel chars wrong under emergency clip"
 
 
+def test_init_kb_hint_is_english_first():
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "some_repo"
+        (repo / ".git").mkdir(parents=True)
+        ctx = hook_context(repo)
+    assert "## Knowledge Base (not yet initialized)" in ctx, ctx[:1000]
+    line = next(l for l in ctx.splitlines() if l.startswith("**Trigger phrases**"))
+    assert line.index('"set up a wiki"') < line.index("«заведи вику»"), line
+    assert '"I need a wiki"' in line and "Russian" in line, line
+
+
+def test_capture_hooks_skip_quietly_without_memory_compiler():
+    """Session capture declined: no ~/claude-memory-compiler. The SessionEnd and
+    PreCompact hooks must exit 0 silently and never call uv."""
+    bin_dir = SESSION_START.parent
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        home = root / "home"
+        home.mkdir()
+        project = make_project(root / "project")
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        uv_called = root / "uv-called"
+        write(fake_bin / "uv", f"#!/bin/sh\ntouch '{uv_called}'\n")
+        (fake_bin / "uv").chmod(0o755)
+        env = {**hook_env(), "HOME": str(home), "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        for name in ("kb-session-end", "kb-pre-compact"):
+            r = subprocess.run([str(bin_dir / name)], input=json.dumps({"cwd": str(project)}),
+                               capture_output=True, text=True, env=env, timeout=20)
+            assert r.returncode == 0, (name, r.stderr)
+            assert r.stdout == "" and r.stderr == "", (name, r.stdout, r.stderr)
+            assert not uv_called.exists(), f"{name} ran uv without the memory compiler"
+
+        # With the compiler installed, the hook still hands off to uv (the hooks
+        # never run for projects under /tmp, so that half needs another TMPDIR).
+        if str(project.resolve()).startswith(("/tmp/", "/private/tmp/")):
+            return
+        write(home / "claude-memory-compiler" / "hooks" / "session-end.py", "")
+        r = subprocess.run([str(bin_dir / "kb-session-end")], input=json.dumps({"cwd": str(project)}),
+                           capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0, r.stderr
+        assert uv_called.exists(), "kb-session-end skipped uv although the compiler is installed"
+
+
 def main() -> int:
     tests = [
         test_live_project_minimal_bundle,
         test_print_mode_does_not_block_and_is_plain_markdown,
+        test_print_mode_defaults_to_current_directory,
+        test_open_backlog_items_reach_active_work,
+        test_hand_written_backlog_items_show_no_none_id,
+        test_backlog_items_sorted_by_priority_when_board_reports_it,
+        test_kb_task_prints_one_line_and_its_task_reaches_the_session,
         test_huge_files_do_not_starve_critical_sections,
         test_json_safety_when_board_is_malformed_and_hub_tools_missing,
         test_json_safety_failure_matrix,
         test_hub_mode_valid_json,
         test_critical_budget_fixture_marks_clips_honestly,
+        test_init_kb_hint_is_english_first,
+        test_capture_hooks_skip_quietly_without_memory_compiler,
     ]
     for test in tests:
         test()

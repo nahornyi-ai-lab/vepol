@@ -18,12 +18,13 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 
@@ -35,6 +36,43 @@ TERMINAL = {
     "resolved_orphan",
 }
 ACTIVE = {"created", "starting", "running", "claim_degraded"}
+
+# Fixed fallbacks after PATH. Claude Code's native installer uses ~/.local/bin,
+# which launchd's PATH (scheduled jobs) does not include.
+CLAUDE_SYSTEM_CANDIDATES = ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")
+
+
+def claude_bin(
+    *,
+    env: Mapping[str, str] | None = None,
+    home: str | os.PathLike[str] | None = None,
+) -> str:
+    """Return the Claude Code CLI to launch (shared lookup contract).
+
+    Order: ``$KB_CLAUDE_BIN`` when set and executable, then ``claude`` on PATH,
+    then ``~/.local/bin/claude``, ``/opt/homebrew/bin/claude`` and
+    ``/usr/local/bin/claude``; the first executable wins. When nothing is
+    found the bare name ``claude`` comes back, so the launch fails the usual
+    way (rc 127) and callers fail over.
+    """
+    values = os.environ if env is None else env
+    configured = os.path.expanduser(values.get("KB_CLAUDE_BIN", "").strip())
+    if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+        return configured
+    search_path = values.get("PATH")
+    if search_path is None and env is None:
+        search_path = os.defpath
+    if search_path:
+        found = shutil.which("claude", path=search_path)
+        if found:
+            return os.path.abspath(found)
+    if home is None:
+        home = values.get("HOME") or pathlib.Path.home()
+    for candidate in (pathlib.Path(home) / ".local" / "bin" / "claude",
+                      *map(pathlib.Path, CLAUDE_SYSTEM_CANDIDATES)):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "claude"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -266,6 +304,10 @@ def launch_run(
     if not cwd_path.is_dir():
         raise ValueError(f"cwd is not a directory: {cwd_path}")
     command_list = [str(item) for item in command]
+    if command_list[0] == "claude":
+        # A bare name would be looked up on the worker's PATH only; under
+        # launchd that misses ~/.local/bin, where the native installer puts it.
+        command_list[0] = claude_bin(env=env)
     claim_value = _normalise_claim(claim)
     if claim_value is not None:
         _claim_renewal_delay(claim_value)
@@ -857,7 +899,7 @@ def run_claude(
     env: dict[str, str] | None = None,
     claim: dict[str, Any] | None = None,
 ) -> RunResult:
-    binary = os.environ.get("KB_CLAUDE_BIN", "claude")
+    binary = claude_bin(env=env)
     command = [binary, "-p", prompt]
     if model:
         command.extend(["--model", model])

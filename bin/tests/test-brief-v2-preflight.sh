@@ -13,6 +13,14 @@ PASS=0
 FAIL=0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 
 SRC_BIN="${KB_BRIEF_V2_SRC_BIN:-$HOME/knowledge/bin}"
 HELPER="$SRC_BIN/kb-brief-preflight"
@@ -24,6 +32,8 @@ fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 write_registry() {
   local hub="$1" slug="$2" status="$3" project="$4" desc="$5"
+  # Russian column names (status, category, path, description): older
+  # registries use them and the preflight must still parse them.
   cat > "$hub/registry.md" <<EOF
 # Registry fixture
 
@@ -190,6 +200,8 @@ else
 fi
 
 echo "=== B1: kb-brief injects preflight JSON and v2 prompt contract ==="
+# The hub language is ru: the prompt labels and the fake brief output below
+# are the Russian ones.
 HUB=$(make_hub prompt)
 PROJECT="$TMP/prompt/Family"
 make_project "$PROJECT" "2026-06-23" "2026-06-24" \
@@ -261,9 +273,9 @@ grep -q '"child_split_brain_stale_backlog"' <<<"$PROMPT" && ok "B1: prompt inclu
 grep -q '"do_not_surface"' <<<"$PROMPT" && ok "B1: prompt includes do_not_surface hints" || fail "B1: prompt missing do_not_surface"
 grep -q "🆕 Изменилось:" <<<"$PROMPT" && ok "B1: prompt requires changed-since-yesterday section" || fail "B1: missing changed section"
 grep -q "🔥 Главное" <<<"$PROMPT" && ok "B1: prompt requires actions section" || fail "B1: missing actions section"
-grep -q "Готово:" <<<"$PROMPT" && ok "B1: prompt requires localized completion label" || fail "B1: missing Готово label"
-grep -Eqi "1-3|1–3|one to three|не больше тр[её]х|at most three" <<<"$PROMPT" && ok "B1: prompt contains 1-3 action cap" || fail "B1: no 1-3 action cap"
-grep -qiE "backlog.*queue|backlog.*очеред|очеред.*backlog|not factual truth" <<<"$PROMPT" && ok "B1: prompt says backlog is queue, not truth" || fail "B1: no backlog precedence rule"
+grep -q "Готово:" <<<"$PROMPT" && ok "B1: prompt requires localized completion label" || fail "B1: missing localized completion label"
+grep -Eqi "1-3|1–3|one to three|at most three" <<<"$PROMPT" && ok "B1: prompt contains 1-3 action cap" || fail "B1: no 1-3 action cap"
+grep -qiE "backlog.*queue|not factual truth" <<<"$PROMPT" && ok "B1: prompt says backlog is queue, not truth" || fail "B1: no backlog precedence rule"
 grep -q "plan_item_id" <<<"$PROMPT" && grep -q "claim_id" <<<"$PROMPT" && ok "B1: prompt bans raw internal ids" || fail "B1: missing internal-id ban"
 grep -q "дожать договор аренды" <<<"$OUT" && fail "B1: dry-run brief surfaced stale rental task" || ok "B1: dry-run brief does not surface stale rental task"
 grep -q "Готово:" <<<"$OUT" && ok "B1: dry-run brief has localized completion line" || fail "B1: dry-run brief lacks completion line"

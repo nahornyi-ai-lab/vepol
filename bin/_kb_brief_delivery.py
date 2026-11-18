@@ -412,6 +412,9 @@ def _frontmatter_evidence(plan: dict[str, Any]) -> dict[str, Any]:
         "failed": "telegram_failed",
         "pending": "pending",
     }[plan["status"]]
+    if plan["status"] == "failed" and plan.get("not_sent_reason") == "not_configured":
+        # Nothing was tried: Telegram is not set up. Still unsent and retried.
+        delivery = "not_configured"
     values: dict[str, Any] = {
         "delivery": delivery,
         "delivery_parts_total": len(plan["parts"]),
@@ -525,6 +528,7 @@ def command_begin(args: argparse.Namespace) -> int:
         raise DeliveryError("delivery plan has no sendable part")
     chosen["status"] = "sending"
     chosen["message_id"] = None
+    plan.pop("not_sent_reason", None)
     _sync_top_status(plan)
     atomic_json(sidecar, plan)
     reconcile_day(day_path, plan)
@@ -567,9 +571,13 @@ def command_finish(args: argparse.Namespace) -> int:
             return 21
         part["status"] = "sent"
         part["message_id"] = int(args.message_id)
-    elif args.outcome == "known_rejection":
+    elif args.outcome in ("known_rejection", "not_configured"):
+        # Proven unsent, so the part stays retryable. not_configured: the
+        # sender had no Telegram settings and tried nothing.
         part["status"] = "failed"
         part["message_id"] = None
+        if args.outcome == "not_configured":
+            plan["not_sent_reason"] = "not_configured"
     else:
         part["status"] = "ambiguous"
         part["message_id"] = None
@@ -581,7 +589,9 @@ def command_finish(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         pass
     emit({"status": plan["status"], "index": part["index"], "outcome": args.outcome})
-    return 0 if args.outcome == "success" else (20 if args.outcome == "known_rejection" else 21)
+    if args.outcome == "success":
+        return 0
+    return 20 if args.outcome in ("known_rejection", "not_configured") else 21
 
 
 def command_rollback(args: argparse.Namespace) -> int:
@@ -630,7 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
     finish = sub.add_parser("finish")
     finish.add_argument("--day-file", required=True)
     finish.add_argument("--sidecar", required=True)
-    finish.add_argument("--outcome", choices=("success", "known_rejection", "ambiguous"), required=True)
+    finish.add_argument("--outcome", choices=("success", "known_rejection", "not_configured", "ambiguous"),
+                        required=True)
     finish.add_argument("--message-id")
     finish.add_argument("--part-file", required=True)
     finish.set_defaults(handler=command_finish)

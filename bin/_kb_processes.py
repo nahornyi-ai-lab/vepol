@@ -20,7 +20,11 @@ CLOSED (config rejected) — it is never silently ignored.
 `when` semantics (release contract):
   - "HH:MM"            eligible once per day at/after that wall-clock time
   - after:<process_id> eligible on the next tick after <process_id>
-                       succeeded for the same day
+                       succeeded for the same day; if <process_id> is one of
+                       OPTIONAL_INPUT_PARENTS and is disabled, the process
+                       follows <process_id>'s own trigger instead (kb-tick
+                       walks up the chain); any other disabled parent keeps
+                       the process waiting
   - on-demand          never scheduled by the background tick
 
 `outputs` semantics: telegram/people/calendar are user-facing channels;
@@ -76,6 +80,21 @@ SCHEDULED_TELEGRAM_AUDIO_ALLOWED = {
     "evening-digest": "kb-morning-digest --period evening",
 }
 
+# The one place that decides what `after:<parent>` means when <parent> is
+# disabled (kb-tick's eligible()). These parents are OPTIONAL INPUTS: every
+# step that waits on them in the defaults and in kb-digest-migrate also works
+# without their output (the brief and the retro leave mail out; the morning
+# digest skips a missing arXiv or Money Radar block; money-radar does not read
+# the arXiv digest). A disabled optional parent never fires, so its children
+# follow its own trigger instead (walking up the chain): switching mail off
+# does not stop the brief. Any other disabled parent keeps its children
+# waiting, as before: evening-digest needs retro's Retro block, the morning
+# digest needs daily's brief (so a disabled daily also holds learning and
+# everything after it), and entity-rollup comes after people-extract.
+OPTIONAL_INPUT_PARENTS = frozenset({
+    "mail-morning", "mail-evening", "learning", "money-radar",
+})
+
 
 def normalized_run_argv(run: str) -> list[str]:
     """shlex-split a `run` command; argv[0] compares by basename so a bare
@@ -101,6 +120,9 @@ DEFAULT_PROCESSES_YAML = """\
 # Optional sixth field `timeout: <seconds>` (60..7200) overrides kb-tick's
 # per-process cap for heavy processes; absent → the uniform default applies.
 # when: "HH:MM" | after:<process_id> | on-demand (never scheduled).
+# after:<id> waits for <id> to succeed today. If <id> is mail-morning,
+# mail-evening, learning or money-radar and is disabled, the process follows
+# <id>'s own trigger instead; any other disabled <id> keeps it waiting.
 # An invalid file fails closed: kb-tick runs nothing and logs why.
 
 # Nightly state.md refresh: a model proposes point edits from what each project
@@ -125,6 +147,8 @@ DEFAULT_PROCESSES_YAML = """\
 # still run. Connecting your Gmail is the consent step that activates it.
 # mail-morning/mail-evening run one tick before daily/retro so mail is guaranteed
 # to be in the brief and retro (daily/retro then run on the next tick).
+# To switch mail off, set enabled: false on both: daily and retro then run at
+# the mail times (07:15 and 20:30).
 - id: mail-morning
   enabled: true
   when: "07:15"
@@ -220,10 +244,15 @@ DEFAULT_PROCESSES_YAML = """\
   outputs: [people, telegram, file]
 
 # Self-improvement is proposal + eval + review only; never auto-apply.
+# Disabled and on-demand: kb-tick never schedules it. The policy check runs by
+# hand for one proposal at a time:
+#   kb-evolution check-policy <proposal.md> --evaluator <identity>
+# This entry only validates the mutations ledger (create it first with
+# `kb-evolution --knowledge-path ~/knowledge init`).
 - id: process-improve
   enabled: false
   when: on-demand
-  run: kb-evolution check-policy
+  run: kb-evolution --knowledge-path ~/knowledge parse-ledger
   outputs: [file]
 
 # Daily money-opportunity radar. Runs the OS-safe agent core (Codex --sandbox

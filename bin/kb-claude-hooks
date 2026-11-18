@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""kb-claude-hooks — add Vepol's Claude Code hooks to an existing settings.json.
+
+Vepol needs three Claude Code hooks: SessionStart (kb-session-start), SessionEnd
+(kb-session-end) and PreCompact (kb-pre-compact). install.sh writes them only
+when ~/.claude/settings.json does not exist yet. This tool adds them to a file
+you already have and leaves everything else in it as it was.
+
+Usage:
+  kb-claude-hooks --check [--settings PATH]
+      exit 0 if all three hooks are present, 1 if any is missing (names them)
+  kb-claude-hooks --apply [--settings PATH]
+      write a timestamped backup next to the file (PATH.bak-YYYY-MM-DD-HHMMSS),
+      then add only the missing hooks; running it again changes nothing.
+      Without a settings file it creates one that holds only the hooks.
+
+PATH defaults to ~/.claude/settings.json. The hook entries are copied from
+claude/settings.json.template in the Vepol repo, with __HOME__ replaced by
+$HOME. A hook counts as present when any command under that event runs a
+script with the expected name (the same rule as kb-doctor install-health).
+The file is rewritten as JSON with two-space indent: keys, values and their
+order are kept, whitespace may change.
+
+Exit codes: 0 ok; 1 hooks missing (--check); 2 usage error, unreadable
+template, or a settings file that is not a valid JSON object (nothing written).
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import datetime as _dt
+import json
+import os
+import pathlib
+import shlex
+import shutil
+import sys
+import tempfile
+
+PROG = "kb-claude-hooks"
+
+# Event -> the script its Vepol hook runs. Keep in sync with
+# claude/settings.json.template and kb-doctor's INSTALL_HEALTH_REQUIRED_HOOKS.
+REQUIRED_HOOKS = {
+    "SessionStart": "kb-session-start",
+    "SessionEnd": "kb-session-end",
+    "PreCompact": "kb-pre-compact",
+}
+
+
+class Refused(Exception):
+    """A condition under which nothing may be written."""
+
+
+def _home() -> str:
+    return os.environ.get("HOME") or str(pathlib.Path.home())
+
+
+def _template_path() -> pathlib.Path:
+    # bin/kb-claude-hooks -> <repo>/claude/settings.json.template, also when
+    # called through the ~/knowledge/bin symlink. A hub whose bin/ holds copies
+    # instead of links finds the repo through install.sh's orchestrator-seed pointer.
+    rel = pathlib.Path("claude") / "settings.json.template"
+    candidates = [
+        pathlib.Path(__file__).resolve().parent.parent / rel,
+        pathlib.Path(_home()) / "knowledge" / "orchestrator-seed" / rel,
+    ]
+    return next((c for c in candidates if c.is_file()), candidates[0])
+
+
+def _render(value, home: str):
+    if isinstance(value, str):
+        return value.replace("__HOME__", home)
+    if isinstance(value, list):
+        return [_render(v, home) for v in value]
+    if isinstance(value, dict):
+        return {k: _render(v, home) for k, v in value.items()}
+    return value
+
+
+def runs_script(configs, script: str) -> bool:
+    """True if any hook command under `configs` runs a file named `script`."""
+    if not configs:
+        return False
+    if isinstance(configs, list):
+        return any(runs_script(item, script) for item in configs)
+    if not isinstance(configs, dict):
+        return False
+    if "hooks" in configs:
+        return runs_script(configs["hooks"], script)
+    cmd = configs.get("command")
+    if not isinstance(cmd, str) or not cmd:
+        return False
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    # Also look inside quoted wrappers such as `bash -lc "/path/kb-x --flag"`.
+    return any(pathlib.PurePosixPath(sub).name == script
+               for tok in tokens for sub in tok.split())
+
+
+def load_template_hooks(home: str) -> dict:
+    tpl = _template_path()
+    try:
+        data = json.loads(tpl.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refused(f"cannot read the hook template {tpl}: {exc}") from exc
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    out = {}
+    for event, script in REQUIRED_HOOKS.items():
+        entries = (hooks or {}).get(event)
+        if not isinstance(entries, list) or not runs_script(entries, script):
+            raise Refused(f"the template {tpl} has no {event} hook running {script}")
+        out[event] = _render(entries, home)
+    return out
+
+
+def read_settings(path: pathlib.Path) -> dict | None:
+    """Return the parsed settings, None if the file does not exist."""
+    if path.is_symlink() and not path.exists():
+        raise Refused(f"{path} is a broken symlink")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise Refused(f"{path} is not a regular file")
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Refused(f"cannot read {path}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise Refused(f"{path} is not valid JSON ({exc}); fix it first, nothing was changed") from exc
+    if not isinstance(data, dict):
+        raise Refused(f"{path} does not hold a JSON object; nothing was changed")
+    hooks = data.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        raise Refused(f'"hooks" in {path} is not an object; nothing was changed')
+    for event in REQUIRED_HOOKS:
+        if hooks and hooks.get(event) is not None and not isinstance(hooks[event], list):
+            raise Refused(f'"hooks.{event}" in {path} is not a list; nothing was changed')
+    return data
+
+
+def missing_hooks(data: dict | None) -> list[str]:
+    hooks = (data or {}).get("hooks") or {}
+    return [event for event, script in REQUIRED_HOOKS.items()
+            if not runs_script(hooks.get(event), script)]
+
+
+def _backup_path(path: pathlib.Path) -> pathlib.Path:
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    candidate = path.with_name(f"{path.name}.bak-{stamp}")
+    n = 1
+    while candidate.exists() or candidate.is_symlink():
+        candidate = path.with_name(f"{path.name}.bak-{stamp}-{n}")
+        n += 1
+    return candidate
+
+
+def _write_json(target: pathlib.Path, data: dict, mode: int | None) -> None:
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_check(path: pathlib.Path) -> int:
+    data = read_settings(path)
+    missing = missing_hooks(data)
+    if data is None:
+        print(f"{path} does not exist; missing hooks: {', '.join(missing)}")
+        return 1
+    if missing:
+        print(f"missing hooks in {path}: {', '.join(missing)}")
+        print(f"add them with: ~/knowledge/bin/{PROG} --apply"
+              + ("" if path == _default_settings() else f" --settings {shlex.quote(str(path))}"))
+        return 1
+    print(f"all Vepol hooks present in {path}")
+    return 0
+
+
+def cmd_apply(path: pathlib.Path) -> int:
+    data = read_settings(path)
+    missing = missing_hooks(data)
+    if not missing:
+        print(f"all Vepol hooks already present in {path}; nothing changed")
+        return 0
+    template = load_template_hooks(_home())
+    if data is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, {"hooks": {e: copy.deepcopy(template[e]) for e in missing}}, None)
+        print(f"created {path} with hooks: {', '.join(missing)}")
+        return 0
+    real = path.resolve()  # write through a symlinked settings.json, keep the link
+    backup = _backup_path(path)
+    shutil.copy2(str(real), str(backup))
+    if data.get("hooks") is None:
+        data["hooks"] = {}
+    hooks = data["hooks"]
+    for event in missing:
+        if hooks.get(event) is None:
+            hooks[event] = []
+        hooks[event].extend(copy.deepcopy(template[event]))
+    _write_json(real, data, real.stat().st_mode & 0o7777)
+    print(f"added hooks to {path}: {', '.join(missing)}")
+    print(f"backup: {backup}")
+    return 0
+
+
+def _default_settings() -> pathlib.Path:
+    return pathlib.Path(_home()) / ".claude" / "settings.json"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Check or add Vepol's SessionStart, SessionEnd and PreCompact "
+                    "hooks in a Claude Code settings.json, changing nothing else.",
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="exit 0 if all three hooks are present, 1 if any is missing")
+    mode.add_argument("--apply", action="store_true",
+                      help="back up the file and add only the missing hooks")
+    parser.add_argument("--settings", metavar="PATH",
+                        help="settings file (default: ~/.claude/settings.json)")
+    args = parser.parse_args(argv)
+    path = pathlib.Path(os.path.expanduser(args.settings)) if args.settings else _default_settings()
+    try:
+        return cmd_check(path) if args.check else cmd_apply(path)
+    except Refused as exc:
+        print(f"{PROG}: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"{PROG}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

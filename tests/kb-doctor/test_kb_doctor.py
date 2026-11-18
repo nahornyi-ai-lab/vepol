@@ -13,6 +13,8 @@ import os
 import pathlib
 import subprocess
 
+import pytest
+
 
 HUB = pathlib.Path(__file__).resolve().parents[2]
 DOCTOR = HUB / "bin" / "kb-doctor"
@@ -28,7 +30,7 @@ def registry(rows: list[tuple[str, str, pathlib.Path]]) -> str:
     body = [
         "# Registry",
         "",
-        "| slug | статус | путь | описание |",
+        "| slug | status | path | description |",
         "|---|---|---|---|",
     ]
     for slug, status, path in rows:
@@ -55,7 +57,7 @@ def create_project(
     files = {
         "README.md": f"# {slug}\n",
         "index.md": "# index\n",
-        "state.md": state or f"# {slug} — текущее состояние\n\n## Одной строкой\n\nActive.\n\n## Последнее обновление\n\n{TODAY}\n",
+        "state.md": state or f"# {slug} — current state\n\n## Current Snapshot\n\nActive.\n\n## Last Updated\n\n{TODAY}\n",
         "log.md": log or f"# log\n\n## [{TODAY}] init | {slug} | test\n",
         "backlog.md": backlog or "# Backlog\n\n## Open\n\n## In progress\n\n## Done\n",
         "escalations.md": "# Escalations\n\n## Open\n\n## Resolved\n",
@@ -139,6 +141,47 @@ def test_coordination_core_file_missing_required_headings_is_p1(tmp_path):
     assert "P1" in severities(items)
 
 
+@pytest.mark.parametrize("backlog", [
+    # What new-wiki renders from _template/knowledge/backlog.md: an empty board.
+    "# Backlog — app\n",
+    # A kb-board with its own status sections.
+    "# Backlog — app\n\n## Backlog\n\n- [ ] Write the spec\n\n## In Progress\n\n- [>] Ship it\n",
+], ids=["empty-board", "board-sections"])
+def test_kb_board_backlog_needs_no_legacy_headings(tmp_path, backlog):
+    root = tmp_path / "projects-root"
+    hub = make_hub(tmp_path, [("app", "live", root / "app")])
+    create_project(root, hub, "app", backlog=backlog)
+
+    items = findings(hub)
+
+    assert not any(item["id"].startswith("core-structure:app:backlog.md") for item in items), items
+
+
+def test_new_wiki_template_backlog_passes_core_structure(tmp_path):
+    # A project registered right after new-wiki must not get a P1 for the
+    # backlog.md the template ships.
+    template = (HUB / "_template" / "knowledge" / "backlog.md").read_text(encoding="utf-8")
+    root = tmp_path / "projects-root"
+    hub = make_hub(tmp_path, [("app", "seeded", root / "app")])
+    create_project(root, hub, "app", status="seeded", backlog=template.replace("{{PROJECT_NAME}}", "app"))
+
+    items = findings(hub)
+
+    assert not any(item["id"].startswith("core-structure:app:backlog.md") for item in items), items
+
+
+def test_legacy_backlog_with_partial_sections_is_still_p1(tmp_path):
+    root = tmp_path / "projects-root"
+    hub = make_hub(tmp_path, [("app", "live", root / "app")])
+    create_project(root, hub, "app", backlog="# Backlog\n\n## Open\n\n- [ ] legacy task\n")
+
+    items = findings(hub)
+
+    hits = [item for item in items if item["id"].startswith("core-structure:app:backlog.md")]
+    assert hits and hits[0]["severity"] == "P1"
+    assert "## In progress" in hits[0]["evidence"] and "## Done" in hits[0]["evidence"]
+
+
 def test_state_stale_uses_internal_dates(tmp_path):
     root = tmp_path / "projects-root"
     hub = make_hub(tmp_path, [("app", "live", root / "app")])
@@ -146,7 +189,7 @@ def test_state_stale_uses_internal_dates(tmp_path):
         root,
         hub,
         "app",
-        state="# app — текущее состояние\n\n## Последнее обновление\n\n2026-04-10\n",
+        state="# app — current state\n\n## Last Updated\n\n2026-04-10\n",
         log="# log\n\n## [2026-04-20] update | app | newer activity\n",
     )
 
@@ -163,7 +206,7 @@ def test_state_freshness_uses_iso_datetimes(tmp_path):
         root,
         hub,
         "app",
-        state="# app — текущее состояние\n\nlast_updated: 2026-04-10T09:30:00+02:00\n",
+        state="# app — current state\n\nlast_updated: 2026-04-10T09:30:00+02:00\n",
         log="# log\n\n## [2026-04-20 08:00] update | app | activity\n",
     )
 
@@ -183,7 +226,7 @@ def test_log_body_future_dates_do_not_drive_activity_date(tmp_path):
         hub,
         "app",
         status="seeded",
-        state="# app — текущее состояние\n\n## Последнее обновление\n\n2026-04-10\n",
+        state="# app — current state\n\n## Last Updated\n\n2026-04-10\n",
         log="# log\n\n## [2026-04-20] update | app | real activity\nMention future maintenance window 2027-05-18 in body.\n",
     )
 
@@ -193,7 +236,23 @@ def test_log_body_future_dates_do_not_drive_activity_date(tmp_path):
     assert any(item["id"].startswith("state-stale:app") and "log_date=2026-04-20" in item["evidence"] for item in items)
 
 
-def test_seeded_skeleton_without_activity_is_info(tmp_path):
+# A fresh state.md rendered from the current English template.
+EN_SKELETON_STATE = (
+    "# {slug} — current state\n\n## Current Snapshot\n\n"
+    "_(One current statement. Replace it when reality changes. Do not append history.)_\n\n"
+    "## Next Actions\n\n_(3-7 current actions. Done items leave state and go to `log.md`.)_\n\n"
+    "## Last Updated\n\n2026-04-19 — initialized.\n"
+)
+# The same, from the older Russian template that existing hubs still carry.
+RU_SKELETON_STATE = (
+    "# {slug} — текущее состояние\n\n## Одной строкой\n\n"
+    "_(что это и в каком состоянии — буквально одно предложение)_\n\n"
+    "## Последнее обновление\n\n2026-04-19\n"
+)
+
+
+@pytest.mark.parametrize("template", [EN_SKELETON_STATE, RU_SKELETON_STATE], ids=["en", "ru-legacy"])
+def test_seeded_skeleton_without_activity_is_info(tmp_path, template):
     root = tmp_path / "projects-root"
     hub = make_hub(tmp_path, [("seed", "seeded", root / "seed")])
     create_project(
@@ -201,7 +260,7 @@ def test_seeded_skeleton_without_activity_is_info(tmp_path):
         hub,
         "seed",
         status="seeded",
-        state="# seed — текущее состояние\n\n## Одной строкой\n\n_(что это и в каком состоянии — буквально одно предложение)_\n\n## Последнее обновление\n\n2026-04-19\n",
+        state=template.format(slug="seed"),
         log="# log\n",
     )
 
@@ -212,14 +271,15 @@ def test_seeded_skeleton_without_activity_is_info(tmp_path):
     assert "P1" not in severities(items)
 
 
-def test_live_skeleton_state_is_p1(tmp_path):
+@pytest.mark.parametrize("template", [EN_SKELETON_STATE, RU_SKELETON_STATE], ids=["en", "ru-legacy"])
+def test_live_skeleton_state_is_p1(tmp_path, template):
     root = tmp_path / "projects-root"
     hub = make_hub(tmp_path, [("liveapp", "live", root / "liveapp")])
     create_project(
         root,
         hub,
         "liveapp",
-        state="# liveapp — текущее состояние\n\n## Одной строкой\n\n_(что это и в каком состоянии — буквально одно предложение)_\n\n## Последнее обновление\n\n2026-04-19\n",
+        state=template.format(slug="liveapp"),
     )
 
     items = findings(hub)
@@ -235,7 +295,7 @@ def test_open_incident_older_than_threshold_is_p1(tmp_path):
         root,
         hub,
         "app",
-        incidents="# Incidents\n\n## Ongoing\n\n### [2026-04-10] old breakage\n- Симптомы: broken\n\n## Resolved\n",
+        incidents="# Incidents\n\n## Ongoing\n\n### [2026-04-10] old breakage\n- Symptoms: broken\n\n## Resolved\n",
     )
 
     items = findings(hub)

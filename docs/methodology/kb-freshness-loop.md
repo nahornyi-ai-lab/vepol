@@ -46,8 +46,8 @@ The freshness loop has three pieces that work together:
 
 ```
   ┌─────────────────────────────────────┐
-  │  1. Doctor scan (daily)             │
-  │     Auto-finds drift signals        │
+  │  1. Doctor scan (regular)           │
+  │     Finds drift signals             │
   └────────────┬────────────────────────┘
                ▼
   ┌─────────────────────────────────────┐
@@ -66,28 +66,34 @@ The freshness loop has three pieces that work together:
 
 ### 1. Doctor scan
 
-A scheduled scan (daily, low-priority background task) goes through
-the knowledge base looking for drift signals. Vepol's `kb-doctor`
-runs the following audits:
+`kb-doctor` goes through the knowledge base looking for drift
+signals. Vepol does not schedule it: run it yourself, or ask your
+agent to run it. Plain `kb-doctor` checks every active project in
+the hub registry:
 
-- **Stale state files.** A `state.md` whose `Last updated:` line
-  is more than 14 days old, in a project marked `live` in the
-  registry. Either the project isn't live anymore (move to
-  `seeded` or `archived`), or the state file needs an update.
-- **Aging incidents.** An open incident with no action in 30+
-  days. Flag for either resolution or escalation.
-- **Backlog hygiene.** Items in `## Open` that are more than 60
-  days old without movement. Either bump priority, defer
-  explicitly, or close as "won't do."
-- **Coordination headers.** Required sections (`## Open`,
-  `## Done`, etc.) missing or malformed.
-- **Wikilink graph health.** Pages that are referenced but don't
-  exist; pages with no incoming references (orphans); cycles.
-- **Real-slug-in-doc.** Real project names appearing in documents
-  that should use placeholders (`<slug-a>`).
-- **Coordination-triad symmetry.** Every project should have all
-  three triad files (`backlog.md`, `escalations.md`,
-  `incidents.md`); missing files get flagged.
+- **Stale state files.** A `live` project's `state.md` whose newest
+  date is more than 14 days old (P2) or more than 30 days old (P1).
+  In any active project, a `state.md` that trails the newest
+  `log.md` entry by more than three days (P1 when `live`, P2
+  otherwise).
+  Either the project isn't live anymore (move to `seeded` or
+  `archived`), or the state file needs an update.
+- **Aging incidents.** An incident under `## Ongoing` in
+  `incidents.md` that was opened more than 7 days ago (P1). Flag
+  for either resolution or escalation.
+- **Backlog hygiene.** In a one-line backlog, an open item whose
+  `due:` date has passed (P0) and an item that has been in
+  progress for more than two days (P1). Either bump priority,
+  defer explicitly, or close as "won't do."
+- **Core files and headers.** A project missing one of its core
+  files (`README.md`, `index.md`, `state.md`, `log.md`, and the
+  triad `backlog.md`, `escalations.md`, `incidents.md`) (P0), or a
+  triad file missing a required section such as `## Ongoing` in
+  `incidents.md` (P1).
+
+`kb-doctor graph-audit` checks **wikilink graph health**: links to
+pages that don't exist, links that match more than one page, and
+pages with no incoming links (orphans).
 
 Each finding gets a severity:
 
@@ -97,26 +103,29 @@ Each finding gets a severity:
 
 ### 2. Pending-curation queue
 
-Findings from the doctor scan get written to a structured file
-(`pending-curation.md`) in the hub. This file is the human-readable
+`kb-doctor --write` writes the findings to
+`~/knowledge/pending-curation.md`. This file is the human-readable
 queue of things that need attention.
 
-Format:
+Format (shortened):
 
 ```
-## P1 findings — fix soon
+## Automated freshness audit
 
-- [ ] [project-foo] state.md last updated 2026-03-12 (43 days ago)
-- [ ] [project-bar] incident "X failed" open since 2026-02-08
+<!-- managed by kb-doctor; do not edit inside block -->
+Generated: 2026-04-24
 
-## P2 findings — advisory
+- [ ] P1 project-foo: live project state.md has no recent internal date — detected 2026-04-24 — evidence: state_date=2026-03-12 age_days=43 — file: `…/state.md` — doctor-id: …
+- [ ] P1 project-bar: open incident is older than 7 days — detected 2026-04-24 — evidence: opened=2026-02-08 … — file: `…/incidents.md` — doctor-id: …
 
-- [ ] hub registry: project Z marked `live` but no log entries in 90 days
+<!-- /managed by kb-doctor -->
 ```
 
-The queue is **append-only**: the doctor adds findings, the human
-or agent removes items only after they've been actually addressed.
-Items don't disappear silently because they're "old."
+Each `--write` run replaces only this block, from the latest scan,
+and leaves the rest of the file alone. A problem stays in the queue
+for as long as the doctor still sees it, however old it is. It
+drops out on the first run after it is actually fixed, or after you
+tick it off (`- [x]`).
 
 ### 3. Curation pass
 
@@ -127,8 +136,12 @@ the queue:
 - Visit the page in question
 - Either: update the page to reflect current reality, or: change
   the project's metadata (e.g., move from `live` to `archived`),
-  or: explicitly mark the finding as a known-and-accepted state
-- Remove the item from the queue
+  or: tick the line (`- [x]`) to accept the finding as known. The
+  next `--write` moves ticked lines to a resolved list and keeps that
+  finding out of the queue for as long as its evidence stays the
+  same. Findings that carry an age in their evidence come back the
+  next day, so for those, fix the page.
+- Run `kb-doctor --write` again; fixed items leave the queue
 
 The cadence depends on the size of the knowledge base. For small
 KBs (under 50 pages), once a month. For larger ones, weekly. The
@@ -138,8 +151,8 @@ sign of drift in the freshness loop.
 
 ## The agents help, but the human decides
 
-An AI agent can do the doctor scan automatically (the loop runs
-unattended). For the curation pass:
+An AI agent can run the doctor scan for you and read the queue.
+For the curation pass:
 
 - The agent can propose updates ("here's what I think state.md
   should now say")
@@ -160,14 +173,14 @@ A page is **fresh** when:
 - Its references all resolve
 - It is connected to the rest of the knowledge graph (not
   orphaned)
-- Its `Last updated:` date is recent enough relative to the
+- Its newest date is recent enough relative to the
   page's volatility (a `goals.md` page can stay 6 months old; a
   client `state.md` should be days, not weeks)
 
-Different pages have different volatility. The doctor scan
-parameters are tunable per-page-class. The default thresholds
-above (14 days for `state.md`, 30 days for incidents, 60 days for
-backlog items) are reasonable starting points.
+Different pages have different volatility. Today the thresholds
+are fixed in `kb-doctor`: 14 and 30 days for a live project's
+`state.md`, 7 days for an open incident, two days for an item in
+progress.
 
 ## Why this is a loop, not a one-time clean-up
 
@@ -178,11 +191,12 @@ again. Six months later, you're back to where you started.
 The loop is **not** a clean-up event. It's an ongoing low-amplitude
 process:
 
-- Daily: drift signals get auto-detected (zero human cost)
+- Regularly: `kb-doctor --write` collects drift signals (a few
+  seconds of your time)
 - Weekly: the human spends 30-60 minutes on the curation pass
 - The result: drift never accumulates beyond a manageable buffer
 
-The trick is to make the daily scan low-cost (so it actually runs)
+The trick is to make the regular scan low-cost (so it actually runs)
 and the curation pass focused (so it actually gets done). The
 pending-curation queue is the buffer between them — drift waits
 there for human attention, but doesn't get lost or forgotten.
@@ -193,9 +207,11 @@ When someone (you, an agent, a teammate) reads a page in the
 knowledge base, they want to know if the page is fresh enough to
 trust. Vepol's pages provide three signals:
 
-1. **`Last updated:`** at the top of state-like files
+1. **The newest date in a state-like file.** `kb-doctor` reads the
+   latest date it finds in `state.md`, and falls back to the file's
+   modification time
 2. **Frontmatter `status:`** for concept and methodology pages
-   (`stable` / `draft` / `pending-review` / `retired`)
+   (`draft` until the work is verified, then `stable`)
 3. **The wider freshness loop status** — if there's an unresolved
    item about this page in `pending-curation.md`, the curation
    queue is the place to check before relying on the page
@@ -224,16 +240,16 @@ verification.
   hides drift instead of catching it. The right move is to do a
   bigger curation pass once, and then keep the threshold.
 - **Not running the doctor at all.** The most common failure mode
-  is "I'll set up the doctor later." Then never do. The doctor
-  must be wired up at install time and running from day one. The
-  cost of starting late is high.
+  is "I'll set up the doctor later." Then never do. The installer
+  only checks that the install is healthy; the freshness audit is
+  yours to run, from day one. The cost of starting late is high.
 
 ## In summary
 
 Freshness is a property of the knowledge base, not a one-time
 attribute of any page. It is maintained by:
 
-- A scheduled drift-detection scan (the doctor)
+- A regular drift-detection scan (`kb-doctor`)
 - A queue of pending fixes (the curation queue)
 - A regular curation pass (human + agent collaboration)
 

@@ -22,6 +22,7 @@ Environment:
   KB_CALENDAR_DISABLE=1  fail closed: approve refuses, makes no connector call
   KB_CALENDAR_FAKE_DIR   tests: route writes through the fake backend
   KB_ACTOR               who is acting (default: agent)
+  KB_TZ                  default for --tz (else the Mac's own time zone, else UTC)
 """
 from __future__ import annotations
 

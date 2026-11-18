@@ -26,6 +26,8 @@ mkdir -p "$HOME/.vepol"
 rm -rf "$copy"
 cp -R "$repo/demo/workspace" "$copy"
 ln -s "$repo/bin" "$copy/knowledge/bin"
+# «Add project…» runs new-wiki, which renders the hub's _template/.
+ln -s "$repo/_template" "$copy/knowledge/_template"
 
 if [ ! -d "$app" ]; then
   echo "Build the app first: see face/README.md" >&2

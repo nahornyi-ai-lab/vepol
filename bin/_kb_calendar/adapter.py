@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .dateparse import local_tz_name
 from .errors import (
     CalendarDisabled,
     CalendarUnavailable,
@@ -382,7 +383,7 @@ class ProductionBackend:
             f"- summary: [Vepol] {proposal.get('summary','')}\n"
             f"- start: {proposal.get('start')}\n"
             f"- end: {proposal.get('end')}\n"
-            f"- timezone: {proposal.get('timezone', 'Europe/Madrid')}\n"
+            f"- timezone: {proposal.get('timezone') or local_tz_name()}\n"
             "- transparency: transparent\n"
             "- reminder: popup 0 minutes before\n"
             f"- description: Vepol follow-up {proposal.get('id')} "

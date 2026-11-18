@@ -15,6 +15,15 @@ DIGEST="$SRC_BIN/kb-morning-digest"
 NOVEPOL="$TMP/no-vepol"
 mkdir -p "$NOVEPOL"
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 ok() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
@@ -30,7 +39,7 @@ make_hub() {
   cat >"$hub/bin/kb-idea" <<'SH'
 #!/usr/bin/env bash
 [[ -n "${KB_FAKE_GATHER_LOG:-}" ]] && echo idea >>"$KB_FAKE_GATHER_LOG"
-if [[ -s "${KB_HUB:?}/idea.txt" ]]; then cat "$KB_HUB/idea.txt"; else echo '(нет идей)'; fi
+if [[ -s "${KB_HUB:?}/idea.txt" ]]; then cat "$KB_HUB/idea.txt"; else echo '(no ideas)'; fi
 SH
   # D6 (morning-digest-inputs-rebalance-2026-07-11): the board block now calls
   # `kb-board list <board> --all --json`. This fake emits a valid JSON array whose
@@ -45,7 +54,7 @@ if [[ "$*" == *"--json"* ]]; then
     echo '[]'
   fi
 else
-  if [[ -s "${KB_HUB:?}/board.txt" ]]; then cat "$KB_HUB/board.txt"; else echo '(нет задач)'; fi
+  if [[ -s "${KB_HUB:?}/board.txt" ]]; then cat "$KB_HUB/board.txt"; else echo '(no tasks)'; fi
 fi
 SH
   cat >"$hub/bin/kb-mail-block" <<'SH'
@@ -57,17 +66,17 @@ SH
 prompt="${2:-}"
 marker=$(printf '%s' "$prompt" | grep -o 'SNAPSHOT_[A-Z0-9_]*' | tail -1 || true)
 cat <<EOF
-## Утро: коротко о главном
+## Morning: the main points in brief
 
-Это тестовая синтезированная сводка для проверки снимка входных данных. Она намеренно длиннее двухсот символов, чтобы пройти минимальный контракт синтезатора без обращения к реальной модели.
+This is a test synthesized summary for checking the input snapshot. It is deliberately longer than two hundred characters so it passes the minimum synthesizer contract without calling a real model.
 
-## Деньги и возможности
+## Money and opportunities
 
-Последний наблюдаемый маркер источника: ${marker:-SNAPSHOT_EMPTY}. Все остальные предложения являются стабильной тестовой рамкой и не меняются между запусками.
+Last observed source marker: ${marker:-SNAPSHOT_EMPTY}. Every other sentence is a stable test frame and does not change between runs.
 
-## Что предлагаю сделать сегодня
+## What I suggest doing today
 
-Проверить, что новый вход создаёт ровно одну новую доставку, а неизменившийся вход не вызывает повторную отправку.
+Check that new input creates exactly one new delivery and that unchanged input does not trigger a resend.
 EOF
 SH
   cat >"$hub/bin/kb-tts-render" <<'SH'
@@ -114,6 +123,10 @@ case "${KB_FAKE_SEND_MODE:-success}" in
     echo '{"outcome":"ambiguous","error":"fixture disconnect"}'
     exit 21
     ;;
+  notconfigured)
+    echo 'telegram not configured' >&2
+    exit 3
+    ;;
   success)
     echo '{"outcome":"success","message_id":9001,"audio":{"file_id":"f1","file_unique_id":"u1","duration":23,"file_name":"digest.mp3","mime_type":"audio/mpeg","file_size":77}}'
     ;;
@@ -136,6 +149,7 @@ case "$1 ${2:-}" in
       empty) echo '{}' ;;
       malformed) echo 'not-json' ;;
       reject) echo 'fixture auth/rejection' >&2; exit 8 ;;
+      hang) exec sleep 30 ;;
       kill)
         kill -KILL "$PPID"
         sleep 1
@@ -201,6 +215,8 @@ PY
   then ok "$label"; else bad "$label"; fi
 }
 
+# Russian body on purpose: Cyrillic digest text (the owner's daily use) must
+# survive the Markdown-to-speech cleanup unchanged.
 BODY="$TMP/body.md"
 cat >"$BODY" <<'EOF'
 ## Главное
@@ -237,14 +253,22 @@ assert hashlib.sha256(audio.read_bytes()).hexdigest() == m["audio_sha256"]
 assert stat.S_IMODE((h / ".orchestrator" / f"morning-digest-{day}.json").stat().st_mode) == 0o600
 PY
 SPEECH=$(cat "$H/reports/morning-digest-$D.txt" 2>/dev/null)
+# The report's sources appendix is headed "Sources" (en) or "Источники" (ru);
+# neither may reach the speech text.
 [[ "$SPEECH" == *"Главное"* && "$SPEECH" == *"Сегодня готово"* && "$SPEECH" == *"Сделать один конкретный шаг"* \
-   && "$SPEECH" != *"NotebookLM"* && "$SPEECH" != *"Источники"* && "$SPEECH" != *"https://"* \
+   && "$SPEECH" != *"NotebookLM"* && "$SPEECH" != *"Sources"* && "$SPEECH" != *"Источники"* \
+   && "$SPEECH" != *"https://"* \
    && "$SPEECH" != *"**"* && "$SPEECH" != *"##"* && "$SPEECH" != *"knowledge/"* \
    && "$SPEECH" != *".md"* && "$SPEECH" != *"[["* && "$SPEECH" == *"План"* \
    && "$SPEECH" == *"secret note"* && "$SPEECH" == *"локальную заметку"* ]] \
   && ok "speech is deterministic body-only plain text" || bad "speech contains markup/source appendix or lost body"
 [[ $(wc -l <"$H/render.log" 2>/dev/null) -eq 1 && $(wc -l <"$H/send.log" 2>/dev/null) -eq 1 ]] \
   && ok "happy path invokes renderer and sender exactly once" || bad "unexpected happy-path call count"
+grep -q "|Morning digest — $D|" "$H/send.log" \
+  && grep -qx "# Vepol morning digest — $D (Saturday)" "$H/reports/morning-digest-$D.md" \
+  && grep -q '^- Morning brief (finalized) — ' "$H/reports/morning-digest-$D.md" \
+  && ok "default en profile gets an English caption, report title and sources list" \
+  || bad "default en profile caption/report title/sources list is not English"
 [[ ! -s "$H/notebooklm.log" ]] && ok "happy path makes zero NotebookLM calls" || bad "NotebookLM was called"
 
 # Completed rerun is a pre-gather no-op and preserves all frozen artifacts.
@@ -521,6 +545,56 @@ M="$H/.orchestrator/morning-digest-$D.json"
   && ok "missing local runtime keeps report/speech and sends nothing" || bad "optional-runtime degradation is wrong"
 json_check "$M" 'd["status"] == "unavailable" and d["retry_disposition"] == "terminal" and "kb-tts-install" in d["error"]' "missing runtime records actionable install guidance"
 
+# The REAL renderer's --check gates the route: without kb-tts-install the day
+# is unavailable (no render, no send) and the one alert names real commands.
+for LANG_CASE in en ru; do
+  H="$TMP/real-check-$LANG_CASE"; D=2026-07-22; make_hub "$H"
+  echo "language: $LANG_CASE" >"$H/personal/profile.yaml"
+  ln -sf "$SRC_BIN/kb-tts-render" "$H/bin/kb-tts-render"
+  cat >"$H/bin/kb-channel-send" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$2" >>"$H/alert.log"
+SH
+  chmod +x "$H/bin/kb-channel-send"
+  KB_HUB="$H" KB_VEPOL_DEV="$NOVEPOL" KB_TTS_HOME="$H/not-installed" \
+  KB_FAKE_SEND_LOG="$H/send.log" KB_FAKE_GATHER_LOG="$H/gather.log" \
+    "$DIGEST" --date "$D" --digest-file "$BODY" >/dev/null 2>&1; RC=$?
+  M="$H/.orchestrator/morning-digest-$D.json"
+  [[ $RC -eq 0 && ! -s "$H/send.log" && -s "$H/reports/morning-digest-$D.txt" ]] \
+    && ok "[$LANG_CASE] real --check without an install keeps text, sends no audio" \
+    || bad "[$LANG_CASE] real --check gate is wrong (rc=$RC)"
+  json_check "$M" 'd["status"] == "unavailable" and d["failed_stage"] == "tts" and "kb-tts-install" in d["error"]' \
+    "[$LANG_CASE] real --check reason reaches the manifest"
+  ALERT=$(cat "$H/alert.log" 2>/dev/null)
+  [[ $(wc -l <"$H/alert.log" 2>/dev/null) -eq 1 && "$ALERT" == *"kb-tts-install"* \
+     && "$ALERT" == *"kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend notebooklm"* \
+     && "$ALERT" == *"kb-morning-digest --force"* && "$ALERT" != *"kb-tts-engine"* ]] \
+    && ok "[$LANG_CASE] TTS alert points to real commands only" \
+    || bad "[$LANG_CASE] TTS alert text is wrong: $ALERT"
+done
+grep -q '^Digest narration failed (qwen)' "$TMP/real-check-en/alert.log" \
+  && grep -q '^Озвучка дайджеста упала (qwen)' "$TMP/real-check-ru/alert.log" \
+  && ok "TTS alert follows the profile language (en default, ru kept)" \
+  || bad "TTS alert language is wrong"
+
+# Telegram not configured (kb-channel-send-audio exit 3): not an error. The
+# report, speech and MP3 stay, the run exits 0, and reruns stay quiet.
+H="$TMP/telegram-not-configured"; D=2026-07-29; make_hub "$H"
+KB_FAKE_SEND_MODE=notconfigured run_digest "$H" --date "$D" --digest-file "$BODY" >/dev/null 2>&1; RC=$?
+M="$H/.orchestrator/morning-digest-$D.json"
+[[ $RC -eq 0 && -s "$H/reports/morning-digest-$D.md" && -s "$H/reports/morning-digest-$D.txt" \
+   && -s "$H/reports/morning-digest-$D.mp3" ]] \
+  && ok "telegram not configured: exit 0 and every file is kept" \
+  || bad "telegram not configured: rc=$RC or files missing"
+json_check "$M" 'd["status"] == "unavailable" and d["failed_stage"] == "telegram" and d["retry_disposition"] == "terminal" and "telegram not configured" in d["error"]' \
+  "telegram not configured is a terminal, explained state"
+grep -q "telegram not configured" "$H/logs/morning-digest.log" \
+  && ok "telegram not configured is logged" || bad "telegram not configured left no log line"
+: >"$H/render.log"; : >"$H/send.log"
+KB_FAKE_SEND_MODE=notconfigured run_digest "$H" --date "$D" >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && ! -s "$H/render.log" && ! -s "$H/send.log" ]] \
+  && ok "telegram not configured: rerun makes zero calls" || bad "telegram not configured: rerun retried"
+
 H="$TMP/fallback"; D=2026-07-19; make_hub "$H"
 run_digest "$H" --date "$D" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/morning-digest-$D.json"
@@ -530,6 +604,7 @@ json_check "$M" 'd["failed_stage"] == "build" and d["retry_disposition"] == "ret
 
 H="$TMP/private-content"; D=2026-07-20; make_hub "$H"
 PRIV="$TMP/private-body.md"
+# Russian on purpose: trusted Cyrillic private text must pass through unfiltered.
 printf '%s\n' '## Главное' 'Письмо от raw.person@example.com.' 'План personal/goals и личный бюджет — озвучить.' >"$PRIV"
 run_digest "$H" --date "$D" --digest-file "$PRIV" >/dev/null 2>&1; RC=$?
 M="$H/.orchestrator/morning-digest-$D.json"
@@ -543,6 +618,7 @@ json_check "$M" 'd["status"] == "completed" and d["failed_stage"] is None' "priv
 
 # ── 7. Evening path: trusted Retro block only, no second synthesis ─────────
 H="$TMP/evening"; D=2026-07-21; make_hub "$H"
+# The Retro line is Russian on purpose: Cyrillic retro text must be spoken verbatim.
 cat >"$H/briefs/$D.md" <<'EOF'
 ## Morning brief
 old morning topic must not be spoken
@@ -917,6 +993,22 @@ for CASE in empty malformed reject; do
     "d['status'] == 'failed' and d['retry_disposition'] == 'force_required' and d['local_delivery_status'] == 'not_acknowledged'" \
     "NotebookLM/$CASE: force-required tombstone persists"
 done
+
+# A stuck NotebookLM CLI fails the attempt after the per-call timeout instead
+# of holding the scheduler tick until kb-tick's 1800 s cap.
+HT="$TMP/notebooklm-timeout"; make_hub "$HT"
+D=$(date +%F)
+write_finalized_inputs "$HT" "$D" SNAPSHOT_TIMEOUT
+T_START=$(date +%s)
+KB_MORNING_NOTEBOOKLM_TIMEOUT=2 KB_FAKE_NOTEBOOKLM_ACK_KIND=hang \
+  run_scheduled_notebooklm_synth "$HT" >/dev/null 2>&1; TRC=$?
+T_ELAPSED=$(( $(date +%s) - T_START ))
+[[ $TRC -eq 0 && $T_ELAPSED -lt 20 ]] \
+  && ok "NotebookLM/timeout: a hung CLI is cut off quickly (${T_ELAPSED}s)" \
+  || bad "NotebookLM/timeout: rc=$TRC after ${T_ELAPSED}s"
+json_check "$HT/.orchestrator/morning-digest-$D-notebooklm.json" \
+  "d['status'] == 'failed' and 'timed out after 2s' in d['error'] and d['retry_disposition'] == 'force_required'" \
+  "NotebookLM/timeout: the timeout is recorded as a terminal attempt"
 
 HK="$TMP/notebooklm-kill-force"; make_hub "$HK"
 D=$(date +%F)

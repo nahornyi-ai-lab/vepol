@@ -1,15 +1,15 @@
 # Escalations — {{PROJECT_NAME}}
 
-Вопросы и блокеры, которые проект поднимает наверх — хабу или владельцу. Проектный агент дописывает сюда строку, когда не может двигаться дальше без решения вне своего скоупа. Хаб сканирует эти файлы регулярно.
+Questions and blockers this project raises upward — to the hub or the owner. The project agent appends a line here when it cannot move forward without a decision outside its scope. The hub scans these files regularly.
 
 ## Open
 
-<!-- Формат:
-- [ ] <короткий ask / блокер> — opened YYYY-MM-DD — нужно: <что именно> — контекст: <1 строка>
+<!-- Format:
+- [ ] <short ask / blocker> — opened YYYY-MM-DD — needs: <what exactly> — context: <1 line>
 -->
 
 ## Resolved
 
-<!-- Когда решение принято:
-- [x] <ask> — opened YYYY-MM-DD — closed YYYY-MM-DD — решение: <1 строка>
+<!-- Once a decision is made:
+- [x] <ask> — opened YYYY-MM-DD — closed YYYY-MM-DD — decision: <1 line>
 -->

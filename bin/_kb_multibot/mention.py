@@ -39,7 +39,7 @@ def extract_mentions(text: str) -> list[str]:
     usernames. Validation of "is this a real bot we know" happens against
     the agent registry, not here.
 
-    >>> extract_mentions("@vepol_bot статус? @kb_mail_bot тоже")
+    >>> extract_mentions("@vepol_bot status? @kb_mail_bot too")
     ['vepol_bot', 'kb_mail_bot']
     >>> extract_mentions("@Vepol_Bot @vepol_bot")
     ['vepol_bot']
@@ -80,7 +80,8 @@ def has_stop_command(text: str) -> bool:
     """Detect /stop command in text.
 
     Used together with reply context (mention.py is text-only; caller passes
-    Telegram reply_to_message_id resolution separately) — see kill_switch.py.
+    Telegram reply_to_message_id resolution separately) — see
+    Supervisor._handle_stop_command in supervisor.py.
 
     >>> has_stop_command("/stop @vepol_bot")
     True

@@ -21,6 +21,14 @@
 set -uo pipefail
 PASS=0; FAIL=0
 ROOT_TMP=$(mktemp -d); trap 'rm -rf "$ROOT_TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$ROOT_TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SRC_BIN="${KB_MAIL_SRC_BIN:-$HOME/knowledge/bin}"
 CYCLE="$SRC_BIN/kb-orchestrator-cycle"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
@@ -33,7 +41,7 @@ NOW="2026-07-01T20:45:00+02:00"    # kb-mail-brief "now" (same day)
 mk_hub() {
   local hub="$ROOT_TMP/$1"
   mkdir -p "$hub/personal"
-  ln -s "$SRC_BIN" "$hub/bin"
+  ln -sfn "$SRC_BIN" "$hub/bin"   # -n: never descend into an existing link
   : > "$hub/personal/.secrets"
   cat > "$hub/hierarchy.yaml" <<YAML
 root: hub

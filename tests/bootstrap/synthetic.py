@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -195,7 +196,7 @@ def write_stub_broker(hub: pathlib.Path):
             f"---\\nreport_id: {slug}-{date}\\nslug: {slug}\\ndate: {date}\\n"
             f"cycle: evening\\nparent: hub\\nchildren_rolled_up: []\\n"
             f"status: done\\nrun_id: {rid}\\n---\\n\\n"
-            f"## Что сделано сегодня\\n- stub work for {slug}\\n\\n"
+            f"## What was done today\\n- stub work for {slug}\\n\\n"
             f"## Candidates\\n\\n## Escalations\\n",
             encoding='utf-8',
         )
@@ -246,6 +247,17 @@ def main():
     assert_(proc.returncode == 0,
             f"kb-rebuild-registry apply succeeds (rc={proc.returncode}, stderr={proc.stderr[-300:]})")
     assert_((hub / "hierarchy.yaml").is_file(), "hierarchy.yaml created")
+    assert_("(3 eligible)" in proc.stdout and "expected" not in proc.stdout,
+            f"apply reports the real eligible count (got: {proc.stdout.splitlines()[:1]})")
+    registry_text = (hub / "registry.md").read_text(encoding="utf-8")
+    assert_("2026-04-25;" not in registry_text,
+            "registry.md carries no fixed maintainer date")
+    proc = subprocess.run(
+        [str(hub / "bin" / "kb-rebuild-registry"), "check",
+         "--migration", str(hub / f"migration-{today}.yaml")],
+        env=sandbox_env(hub), capture_output=True, text=True,
+    )
+    assert_(proc.returncode == 0, f"check is clean right after apply (rc={proc.returncode}, {proc.stdout})")
 
     # Run the cycle
     proc = subprocess.run(
@@ -277,7 +289,78 @@ def main():
 
     # Cleanup (everything's under hub since _projects is inside)
     shutil.rmtree(hub)
+
+    registry_bootstrap_checks()
     print("\nPhase 6 bootstrap PASSED")
+
+
+def registry_bootstrap_checks():
+    """kb-rebuild-registry on a fresh hub: a clear error without registry.md,
+    then bootstrap + apply with the real date and no `owner: <user>` placeholder."""
+    print("\nkb-rebuild-registry on a fresh hub")
+    tool = SEED_BIN / "kb-rebuild-registry"
+    root = pathlib.Path(tempfile.mkdtemp(prefix="kb-registry-"))
+    hub = root / "knowledge"
+    (hub / "projects").mkdir(parents=True)
+    knowledge = root / "proj-solo" / "knowledge"
+    knowledge.mkdir(parents=True)
+    os.symlink(str(knowledge), str(hub / "projects" / "solo"))
+    env = {**os.environ, "KB_HUB": str(hub)}
+    run = lambda *argv: subprocess.run([str(tool), *argv], env=env, capture_output=True, text=True)
+
+    proc = run("bootstrap")
+    assert_(proc.returncode == 2 and "registry.md" in proc.stderr and "Traceback" not in proc.stderr,
+            f"bootstrap without registry.md fails with a clear message (rc={proc.returncode}, {proc.stderr[-300:]})")
+
+    side = root / "side-project"
+    side.mkdir()
+    (hub / "registry.md").write_text(
+        "# Project registry\n\n## pet — PetProjects\n\n"
+        "| slug | status | path | description |\n|---|---|---|---|\n"
+        f"| side | no-wiki | `{side}` | Side project without a wiki |\n",
+        encoding="utf-8",
+    )
+    proc = run("bootstrap")
+    assert_(proc.returncode == 0, f"bootstrap succeeds once registry.md exists ({proc.stderr[-300:]})")
+    today = dt.date.today().isoformat()
+    migration = (hub / "migration-2026-04-25.yaml").read_text(encoding="utf-8")
+    assert_(f"generated: {today}" in migration, "migration table records today's date")
+    proc = run("apply")
+    assert_(proc.returncode == 0 and "(1 eligible)" in proc.stdout and "2 entries" in proc.stdout,
+            f"apply succeeds and counts eligible projects ({proc.stdout} {proc.stderr[-300:]})")
+    seeded = (knowledge / ".orchestration.yaml").read_text(encoding="utf-8")
+    assert_("owner" not in seeded, "seeded .orchestration.yaml has no owner placeholder")
+    hierarchy = (hub / "hierarchy.yaml").read_text(encoding="utf-8")
+    assert_("owner:" not in hierarchy and f"generated: {today}" in hierarchy,
+            "hierarchy.yaml has no owner placeholder and carries the bootstrap date")
+    registry = (hub / "registry.md").read_text(encoding="utf-8")
+    assert_(f"<!-- generated {today}; 1 eligible projects -->" in registry,
+            "registry.md carries the bootstrap date")
+    proc = run("check")
+    assert_(proc.returncode == 0, f"check is clean after apply ({proc.stdout})")
+
+    # A hierarchy.yaml written before the placeholder was dropped is not drift.
+    legacy = re.sub(r"(    sla_report_timeout_sec: \d+\n)", r"\1    owner: <user>\n", hierarchy)
+    assert_(legacy != hierarchy, "legacy hierarchy fixture differs")
+    (hub / "hierarchy.yaml").write_text(legacy, encoding="utf-8")
+    proc = run("check")
+    assert_(proc.returncode == 0, f"check accepts the legacy owner placeholder ({proc.stdout})")
+
+    # kb-spawn-project reads the path column by header: 6 columns in the
+    # derived table apply writes, 4 in the hub-managed one.
+    stub = hub / "bin" / "kb-orchestrator-run"
+    stub.parent.mkdir()
+    stub.write_text('#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do\n'
+                    '  [[ "$1" == "--cwd" ]] && { echo "CWD=$2"; exit 0; }\n  shift\ndone\nexit 1\n',
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    for slug, expected in (("solo", knowledge.parent), ("side", side)):
+        proc = subprocess.run([str(SEED_BIN / "kb-spawn-project"), slug, "ping"],
+                              env=env, capture_output=True, text=True)
+        assert_(proc.returncode == 0 and proc.stdout.strip() == f"CWD={expected}",
+                f"kb-spawn-project resolves {slug} to its folder (rc={proc.returncode}, "
+                f"out={proc.stdout.strip()}, err={proc.stderr.strip()[-200:]})")
+    shutil.rmtree(root)
 
 
 if __name__ == "__main__":

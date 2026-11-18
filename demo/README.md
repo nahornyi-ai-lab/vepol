@@ -1,72 +1,106 @@
-# Vepol Demo Wiki
+# Vepol demo
 
-This is a **synthetic, fully fictional** Vepol knowledge base. Every name,
-project, person, company, and event in here is invented to demonstrate how
-Vepol's structures look when populated. Use it to:
+Two invented workspaces you can explore without touching your own data. Every
+person, company, project and event in them is made up.
 
-- See what `kb-brief`, `kb-retro`, `kb-search`, and `kb-task` produce when
-  there's actual content to work against
-- Browse the file conventions (triad, log format, project layout) before
-  starting your own
-- Test installations — running commands against `demo/knowledge/` doesn't
-  touch your real `~/knowledge/`
+- [`knowledge/`](knowledge/) is a personal hub with five life areas. Use it to
+  try Vepol's commands with `kb-demo`.
+- [`workspace/`](workspace/) is a small software company with three code
+  projects. Use it to try Vepol Desktop with `face/demo.sh`.
 
-## How to use
+## Try the commands on `knowledge/`
 
-```bash
-# From the repo root, point any Vepol command at the demo:
-KB_HUB=$(pwd)/demo/knowledge bin/kb-brief
-KB_HUB=$(pwd)/demo/knowledge bin/kb-search "client renewal"
-KB_HUB=$(pwd)/demo/knowledge bin/kb-backlog --open
+From the root of your Vepol checkout:
+
+```sh
+bin/kb-demo search "client renewal"   # search the whole demo hub
+bin/kb-demo backlog --open            # every open task, grouped by project
+bin/kb-demo task "Call the accountant" # add a task to the demo's board
+bin/kb-demo path                      # print where the demo copy lives
+bin/kb-demo reset                     # start the demo over
 ```
 
-Or use the wrapper:
+`kb-demo` copies `demo/knowledge` to `~/.vepol/demo-knowledge` the first time
+you use it and runs the matching `kb-*` command with that copy as its hub. So
+nothing reaches your `~/knowledge`, and your Vepol checkout stays unchanged.
+It also switches the calendar off, so no command reads or writes your real
+calendar, and prints the brief and the retro instead of sending them.
 
-```bash
-bin/kb-demo brief        # equivalent to KB_HUB=demo/knowledge kb-brief
-bin/kb-demo search "..."
-bin/kb-demo backlog --open
+To see the morning brief Vepol would write for this invented person:
+
+```sh
+bin/kb-demo brief
 ```
 
-## What's in here
+This makes a real model call. It needs a logged-in Claude Code or Codex and
+can take a few minutes. `kb-demo` prints the brief instead of sending it, and
+saves it in the demo copy's `briefs/` folder.
 
-Five archetypal project areas chosen to cover the most common use of a
-personal Vepol setup:
+To see only the prompt the brief would send, with no model call:
 
-- **`projects/family/`** — household coordination, kids' school, planning a
-  weekend. Shows how Vepol is useful for life that isn't your "work
-  projects."
-- **`projects/work/`** — typical small-business work: client deliverables,
-  meetings, invoicing. Shows the registry/log/triad pattern in action.
-- **`projects/health/`** — exercise, nutrition, sleep, doctor visits. Shows
-  how Vepol can hold long-running personal data with privacy.
-- **`projects/finance/`** — monthly review, savings goals, expense
-  tracking. Shows recurring tasks and goal-tracking.
-- **`projects/learning/`** — book notes, courses, certifications. Shows
-  long-form ingestion of source material.
+```sh
+KB_BRIEF_PROMPT_ONLY=1 bin/kb-demo brief
+```
 
-Plus the hub-level files (`registry.md`, `log.md`, `index.md`, `state.md`,
-`backlog.md`, `escalations.md`, `incidents.md`, `strategies.md`) populated
-to show what an active multi-project hub looks like, and a few example
-pages under `concepts/`, `people/`, and `companies/` showing how
-cross-project knowledge is captured.
+`bin/kb-demo` with no arguments lists more commands.
 
-## Reading order for a first-time user
+## What's in `knowledge/`
 
-1. **`knowledge/state.md`** — the current snapshot. What's the state of the
-   demo "user" right now?
-2. **`knowledge/index.md`** — the topical map of the whole knowledge base.
-3. **`knowledge/log.md`** — the chronological event log. Read the last
-   30-50 lines for a sense of the pace.
-4. **`knowledge/backlog.md`** — what's open vs done across the whole hub.
-5. **`projects/family/`** or any other archetype — drill into one project
-   to see how the same conventions look at the project level.
+A personal hub for one invented consultant with a family, and five projects:
 
-## Why these archetypes (not real projects)
+- `projects/work/`: three clients, a renewal negotiation, invoices and a
+  pricing decision in `decisions/`.
+- `projects/family/`: school, a summer trip and weekly routines.
+- `projects/health/`: strength training, sleep, lab results and check-ups.
+- `projects/finance/`: the monthly review, savings goals and a subscription
+  audit.
+- `projects/learning/`: books in progress, an online course and book notes in
+  `sources/`.
 
-Vepol's value is the *system*, not any particular project. Choosing real
-project names would make the demo feel like a portfolio review. Choosing
-abstract names like "Project A" would make it feel like a unit test.
-Generic life-domain archetypes (family, work, health, finance, learning)
-are immediately legible to anyone — you can see how the system would map
-to *your* life, not to ours.
+The hub itself holds `state.md` (where everything stands), `index.md` (a map
+of the hub), `log.md` (what happened, by date), `registry.md` (the project
+list) and `backlog.md` (open tasks). Next to them are `escalations.md` (what
+waits for your call), `incidents.md` (what broke and the rule that prevents it
+next time) and `strategies.md` (how Vepol should help here). One example page
+each in `people/`, `companies/` and `concepts/` shows knowledge shared across
+projects. `personal/.secrets` holds empty placeholders only.
+
+In a real hub, each entry in `projects/` is a link to that project's own
+`knowledge/` folder. Here they are plain folders, so the whole demo fits in
+one place.
+
+A good first read:
+
+1. `knowledge/state.md`: what is going on right now.
+2. `knowledge/index.md`: the map of the hub.
+3. `knowledge/log.md`: the latest entries show the pace.
+4. `knowledge/backlog.md`: what is open across the hub.
+5. Any folder in `knowledge/projects/`: the same files, one project deep.
+
+## Try Vepol Desktop on `workspace/`
+
+`workspace/` is an invented software company. Its hub is in
+`workspace/knowledge/`. Three code projects sit in `workspace/code/`:
+`acme-web`, `design-system` and `billing-api`. Each has a little code and its
+own `knowledge/` folder with state, log, tasks, decisions and lessons.
+`workspace/knowledge/projects/` links to those folders, the same way a real
+hub links your projects.
+
+After you build Vepol Desktop (see
+[Build and open](../face/README.md#build-and-open)), run this from `face/`:
+
+```sh
+./demo.sh
+```
+
+It copies the sample to `~/.vepol/demo-workspace/` and opens the app on that
+copy, with its own port, app state and `tmux` server. The Desktop guide lists
+[what the demo keeps apart and what it still shares](../face/README.md#try-it-on-the-sample-workspace)
+with your own setup.
+
+## Why everyday life areas
+
+Vepol's value is the system, not any one project. Real project names would
+read like a portfolio, and "Project A" would read like a test. Work, family,
+health, money and learning are areas everyone has, so you can picture how
+Vepol would map onto your own life.

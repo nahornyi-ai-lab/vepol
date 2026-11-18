@@ -30,7 +30,7 @@ specifically for advisory work, not productized SaaS.
 
 Lifted to `~/knowledge/concepts/anchor-first-pricing.md` (will be added
 to hub level on next sweep). Currently being tested as the Acme renewal
-hypothesis — see [`projects/work/strategies.md`](../strategies.md) H2.
+hypothesis — see [`projects/work/strategies.md`](../../work/strategies.md) H2.
 
 ### 2. Three options always beat one recommendation
 
@@ -43,7 +43,7 @@ they chose it.
 
 Applied to: Acme renewal SOW v2 will present three pricing tiers (hold,
 +10%, +18%) with explicit scope changes per tier. Per
-[`projects/work/decisions/0003-acme-renewal-pricing.md`](../decisions/0003-acme-renewal-pricing.md),
+[`projects/work/decisions/0003-acme-renewal-pricing.md`](../../work/decisions/0003-acme-renewal-pricing.md),
 we've already chosen +18% internally — the SOW lets Sarah arrive there.
 
 ### 3. Free work is a pricing signal, not a kindness

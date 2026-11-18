@@ -811,7 +811,7 @@ class Listener:
         # a crash after this point reconciles on the next startup, and
         # kb-contact enrich itself enforces search-once on the card.
         # The search may ONLY start from `approved` — a stale/replayed
-        # pn:e must never override an explicit «без поиска» (closed) or
+        # pn:e must never override an explicit "skip search" (closed) or
         # any other terminal state. Decide under the lock, answer AFTER
         # releasing it — no Telegram I/O while holding .cards.lock.
         with locks.cards_lock():

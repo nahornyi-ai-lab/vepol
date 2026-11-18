@@ -30,7 +30,7 @@ specific numbers, dates, statuses, eligibility rules, recent
 decisions, or current product state.
 
 Meanwhile, the empty project-context skeleton (`state.md`,
-`strategies.md`, `templates/`, `index.md`) tempts the agent to
+`strategies.md`, `index.md`) tempts the agent to
 immediately fill files that *structurally look canonical* — as if
 they had been approved as project policy.
 
@@ -133,7 +133,7 @@ deduplicate pages.
 ### R8. Durable guardrails live in shared knowledge, not session memory
 
 Lessons at the level of "how the agent should behave when populating
-a KB" (this page itself) live in shared `~/knowledge/concepts/` or
+a KB" (rules like the ones on this page) live in shared `~/knowledge/concepts/` or
 `~/knowledge/solutions/`, so all agents read the same source.
 Per-agent session memory may carry a summary or a pointer, but it
 must not be the only place — otherwise a second agent acts without
@@ -160,8 +160,8 @@ the guardrail.
    application X by date Y," "start raising capital," "rule out
    program Z").
 6. **Durable lessons about agent behavior** go in
-   `~/knowledge/concepts/` (this page), not into per-project or
-   per-agent artifacts.
+   `~/knowledge/concepts/`, not into per-project or per-agent
+   artifacts.
 
 ## Why these rules exist
 

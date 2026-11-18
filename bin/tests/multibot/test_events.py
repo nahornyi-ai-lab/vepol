@@ -37,6 +37,8 @@ class TelegramEventTests(unittest.TestCase):
             from_=EventFrom(
                 user_id=1234567890, username="demo", is_bot=False, bot_slug=None
             ),
+            # Cyrillic on purpose: test_roundtrip_via_json checks that
+            # non-ASCII text survives ensure_ascii=False serialization.
             text="@vepol_bot статус релиза?",
             reply_to_message_id=None,
             message_thread_id=None,

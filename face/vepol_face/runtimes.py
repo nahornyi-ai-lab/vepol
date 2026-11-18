@@ -22,6 +22,15 @@ CLI_TSV = pathlib.Path(os.path.expanduser("~/knowledge/.orchestrator/cli-tools.t
 # Success older than this stops counting as evidence of "right now".
 STALE_AFTER = dt.timedelta(hours=24)
 
+# The hub scripts' lookup order for the two brokered agents (bin/_kb_claude_runner.py
+# claude_bin, bin/_kb_codex.py codex_bin). Tried after the roster's own candidates,
+# so a hub roster copied before these rows were widened still finds a Homebrew,
+# npm or native-installer copy.
+LOOKUP_FALLBACKS = {
+    "claude": ("claude", "$HOME/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"),
+    "codex": ("$HOME/.local/bin/codex", "codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"),
+}
+
 
 @dataclass
 class Availability:
@@ -122,8 +131,10 @@ def _read_roster(roster: pathlib.Path | None) -> dict[str, dict]:
         if len(parts) < 4:
             continue
         name, kind, candidates, when = parts[0], parts[1], parts[2], parts[3]
+        cands = candidates.split(":")
+        cands += [c for c in LOOKUP_FALLBACKS.get(name, ()) if c not in cands]
         found = False
-        for cand in candidates.split(":"):
+        for cand in cands:
             cand = os.path.expandvars(cand.replace("$HOME", os.path.expanduser("~")))
             if os.path.isabs(cand):
                 found = os.path.isfile(cand) and os.access(cand, os.X_OK)

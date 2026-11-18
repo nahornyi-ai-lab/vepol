@@ -8,25 +8,35 @@
 # Env required (read from $KB_HUB/personal/.secrets if not already set):
 #   TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN as a backwards-compat alias)
 #   TELEGRAM_CHAT_ID
+# KB_TG_API_BASE overrides the API base for tests (default https://api.telegram.org).
 #
 # Exit codes:
-#   0 — message accepted by Telegram (HTTP 200, ok=true)
-#   1 — bad args
-#   2 — missing credentials
-#   3 — network/HTTP failure (or Telegram returned non-ok)
+#   0 — every part accepted by Telegram (HTTP 200, ok=true)
+#   1 — bad args (or an empty message)
+#   3 — Telegram is not configured: the token or the chat id is empty or
+#       missing in the environment and in .secrets. Prints one line
+#       "telegram not configured" to stderr and makes no network call.
+#       Callers that also save their output to a file treat this as
+#       "not delivered, not an error".
+#   4 — send failure: network/HTTP error or Telegram returned non-ok
 #
 # Behavior:
-#   - Single message ≤ 4096 chars sent verbatim. Longer messages get split
-#     on a paragraph boundary and sent as 2 parts; very long messages are
-#     truncated to the second part with a "[truncated]" tail.
-#   - `<message_type>` is recorded as a one-line prefix in stderr logs and
-#     made visible to user-side filters via the `Message-Type` HTTP form
-#     field equivalent (we put it in stderr so it doesn't muddle the user's
-#     chat). Channel module callers can use the type to discriminate routing
-#     in future versions; for now it's labelling only.
+#   - A message of at most 4096 UTF-16 units (Telegram's limit) is sent
+#     verbatim as one message. A longer one is split on line boundaries into
+#     as many parts as needed (a single line longer than the limit is cut)
+#     and the parts are sent in order. The first failed part stops the send
+#     with exit 4; the parts after it are not sent. There is no retry here:
+#     the caller (kb-tick on its next tick) runs the whole send again, which
+#     re-sends parts that already went out.
+#   - The bot token never appears on a command line (ps): curl reads the
+#     request URL from a config on stdin.
+#   - `<message_type>` is recorded as a one-line prefix in stderr logs (we put
+#     it in stderr so it doesn't muddle the user's chat). Channel module
+#     callers can use the type to discriminate routing in future versions;
+#     for now it's labelling only.
 #
 # Why a wrapper rather than ad-hoc curl in each caller:
-#   - Centralises the auth + retry + truncation rules.
+#   - Centralises the auth + splitting rules.
 #   - Lets us swap Telegram for a different surface (or add a second one)
 #     without touching every caller. The `<message_type>` argument is the
 #     contract that survives such a swap.
@@ -42,6 +52,8 @@ MESSAGE_TYPE="$1"
 MESSAGE="$2"
 KB_HUB="${KB_HUB:-$HOME/knowledge}"
 SECRETS="$KB_HUB/personal/.secrets"
+API_BASE="${KB_TG_API_BASE:-https://api.telegram.org}"
+API_BASE="${API_BASE%/}"
 
 # Resolve credentials: ENV always wins per-variable, secrets fills gaps.
 # We do NOT `source` the file (that would overwrite already-set env
@@ -68,26 +80,35 @@ if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
 fi
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-  echo "kb-channel-send: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (env or $SECRETS)" >&2
-  exit 2
+  echo "telegram not configured" >&2
+  exit 3
+fi
+if [[ "$TELEGRAM_BOT_TOKEN" =~ [[:space:]] ]]; then
+  echo "kb-channel-send: TELEGRAM_BOT_TOKEN contains whitespace; fix it in $SECRETS" >&2
+  exit 4
 fi
 
 ts="$(date -Iseconds 2>/dev/null || date)"
 echo "[$ts] kb-channel-send type=$MESSAGE_TYPE bytes=${#MESSAGE}" >&2
 
-# Telegram message limit is 4096 chars. Split on a paragraph boundary if
-# possible, else on a sentence boundary, else hard-cut with truncation tag.
+# Telegram message limit, in UTF-16 units (how Telegram counts).
 TELEGRAM_MAX=4096
 
+# The curl config line carrying the token, escaped for a quoted config value.
+_token_conf=${TELEGRAM_BOT_TOKEN//\\/\\\\}
+_token_conf=${_token_conf//\"/\\\"}
+
 send_one() {
-  local body="$1"
-  local code
-  code=$(curl -s -o /tmp/.kb-channel-send.$$ -w "%{http_code}" \
-    -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" \
-    --data-urlencode "text=$body" || true)
-  ok=$(grep -q '"ok":true' /tmp/.kb-channel-send.$$ 2>/dev/null && echo 1 || echo 0)
-  rm -f /tmp/.kb-channel-send.$$
+  local body="$1" code ok resp
+  resp="$(mktemp "${TMPDIR:-/tmp}/kb-channel-send.XXXXXX")"
+  # printf is a shell builtin, so the token reaches curl only through stdin.
+  code=$(printf 'url = "%s/bot%s/sendMessage"\n' "$API_BASE" "$_token_conf" \
+    | curl -s -K - --connect-timeout 10 --max-time 30 -o "$resp" -w "%{http_code}" \
+        -X POST \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=$body" || true)
+  ok=$(grep -q '"ok": *true' "$resp" 2>/dev/null && echo 1 || echo 0)
+  rm -f "$resp"
   if [[ "$code" != "200" || "$ok" != "1" ]]; then
     echo "[$ts] kb-channel-send: send failed (http=$code, ok=$ok)" >&2
     return 1
@@ -95,27 +116,69 @@ send_one() {
   return 0
 }
 
-if (( ${#MESSAGE} <= TELEGRAM_MAX )); then
-  send_one "$MESSAGE" || exit 3
-  exit 0
+# Split into parts of at most TELEGRAM_MAX UTF-16 units, on line boundaries.
+# A message that fits is one part, byte for byte. Parts are NUL-separated.
+split_message() {
+  python3 -c '
+import sys
+limit = int(sys.argv[1])
+text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+
+def units(s):
+    return len(s.encode("utf-16-le")) // 2
+
+if units(text) <= limit:
+    parts = [text]
+else:
+    parts, cur, cur_units = [], "", 0
+    lines = [line + "\n" for line in text.split("\n")]
+    lines[-1] = lines[-1][:-1]
+    for line in lines:
+        n = units(line)
+        if cur_units + n <= limit:
+            cur, cur_units = cur + line, cur_units + n
+            continue
+        if cur:
+            parts.append(cur)
+        cur, cur_units = "", 0
+        while n > limit:  # one line longer than the limit: cut it
+            size = cut = 0
+            while size + units(line[cut]) <= limit:
+                size += units(line[cut])
+                cut += 1
+            parts.append(line[:cut])
+            line = line[cut:]
+            n = units(line)
+        cur, cur_units = line, n
+    if cur:
+        parts.append(cur)
+    parts = [p.strip("\n") for p in parts]
+parts = [p for p in parts if p.strip()]
+sys.stdout.buffer.write("".join(p + "\0" for p in parts).encode("utf-8"))  # any locale
+' "$TELEGRAM_MAX"
+}
+
+parts_file="$(mktemp "${TMPDIR:-/tmp}/kb-channel-send-parts.XXXXXX")"
+trap 'rm -f "$parts_file"' EXIT
+if ! printf '%s' "$MESSAGE" | split_message > "$parts_file"; then
+  echo "[$ts] kb-channel-send: could not split the message" >&2
+  exit 4
+fi
+PARTS=()
+while IFS= read -r -d '' part; do
+  PARTS+=("$part")
+done < "$parts_file"
+if (( ${#PARTS[@]} == 0 )); then
+  echo "kb-channel-send: empty message" >&2
+  exit 1
 fi
 
-# Split: try paragraph break before TELEGRAM_MAX
-split_at=$TELEGRAM_MAX
-prefix="${MESSAGE:0:$TELEGRAM_MAX}"
-last_para=$(printf '%s' "$prefix" | awk 'BEGIN{RS=""; ORS=""} {print length}' 2>/dev/null || echo 0)
-# Simple heuristic: cut at last \n\n if found in first 4000 chars
-boundary=$(printf '%s' "${MESSAGE:0:4000}" | awk -v RS='\n\n' '{p+=length+2; print p}' | tail -1)
-if [[ -n "$boundary" && "$boundary" -gt 0 && "$boundary" -lt $TELEGRAM_MAX ]]; then
-  split_at="$boundary"
-fi
-
-part1="${MESSAGE:0:$split_at}"
-part2="${MESSAGE:$split_at}"
-if (( ${#part2} > TELEGRAM_MAX )); then
-  part2="${part2:0:$((TELEGRAM_MAX - 14))}…[truncated]"
-fi
-
-send_one "$part1" || exit 3
-send_one "$part2" || exit 3
+i=0
+for part in "${PARTS[@]}"; do
+  i=$((i + 1))
+  if ! send_one "$part"; then
+    (( ${#PARTS[@]} > 1 )) && echo "[$ts] kb-channel-send: stopped at part $i of ${#PARTS[@]}" >&2
+    exit 4
+  fi
+done
 exit 0

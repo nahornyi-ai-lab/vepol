@@ -26,6 +26,22 @@ TODAY=$(date +%Y-%m-%d)
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+# Scenarios that need an agent pass their own fake explicitly.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+
+# The runner selects papers newer than its since-last-seen watermark, capped
+# at 48 hours back, so fixture papers are dated relative to now.
+ago() { # hours → UTC ISO timestamp that many hours before now
+  $PY -c 'import datetime, sys; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=float(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+
 if [[ ! -f "$RUNNER" ]]; then
   fail "kb-learning-arxiv exists in $SRC_BIN"
   echo
@@ -71,39 +87,39 @@ E=$TMP/entries; mkdir -p "$E"
 atom_entry "2606.10001" \
   "Agentic Planning with Tool Use for LLM Agents" \
   "We study the problem of long-horizon planning for autonomous agents. We propose a framework combining tool use and MCP-style function calling. We show our method achieves 87% accuracy on the AgentBench benchmark and outperforms baselines. Code is available as open-source." \
-  "2026-06-11T10:00:00Z" "Alice Researcher" "Bob Scholar" > "$E/p1.xml"
+  "$(ago 2)" "Alice Researcher" "Bob Scholar" > "$E/p1.xml"
 
 atom_entry "2606.10002" \
   "Memory-Augmented Retrieval for Knowledge-Base Agents" \
   "We investigate persistent memory and retrieval-augmented generation for agent knowledge bases. We introduce a hierarchical RAG index. Results show a 12% improvement in retrieval accuracy. We release our code for local deployment." \
-  "2026-06-11T09:00:00Z" "Carol Author" > "$E/p2.xml"
+  "$(ago 3)" "Carol Author" > "$E/p2.xml"
 
 atom_entry "2606.10003" \
   "Evaluating Chain-of-Thought Reasoning in Small Local Models" \
   "We study chain-of-thought reasoning quality under quantization for on-device inference. We present an evaluation benchmark. Our method improves reasoning score by 9 points while staying efficient for local deployment." \
-  "2026-06-11T08:00:00Z" "Dave Writer" "Eve Coauthor" > "$E/p3.xml"
+  "$(ago 4)" "Dave Writer" "Eve Coauthor" > "$E/p3.xml"
 
 # Near-duplicate of p1 (same topic words, slightly lower signal) — the
 # diversity rule must not select both.
 atom_entry "2606.10004" \
   "Agentic Planning with Tool Use for LLM Agents: An Extended Study" \
   "We study the problem of long-horizon planning for autonomous agents. We propose a framework combining tool use and MCP-style function calling. We show our method achieves strong accuracy on the AgentBench benchmark and outperforms baselines." \
-  "2026-06-10T10:00:00Z" "Alice Researcher" > "$E/p4.xml"
+  "$(ago 26)" "Alice Researcher" > "$E/p4.xml"
 
 atom_entry "2606.10005" \
   "Safety Alignment for Multi-Agent Systems" \
   "We investigate alignment and safety challenges in multi-agent settings. We propose a safety evaluation protocol. Results show improved robustness." \
-  "2026-06-10T09:00:00Z" "Frank Safety" > "$E/p5.xml"
+  "$(ago 27)" "Frank Safety" > "$E/p5.xml"
 
 atom_entry "2606.20001" \
   "Protein Folding Dynamics in Cold Plasma" \
   "We analyze protein folding pathways using molecular dynamics. Our simulations reveal new folding intermediates in plasma conditions." \
-  "2026-06-11T07:00:00Z" "Grace Bio" > "$E/x1.xml"
+  "$(ago 5)" "Grace Bio" > "$E/x1.xml"
 
 atom_entry "2606.20002" \
   "A Survey of Cloud Formation Models for Weather Prediction" \
   "We survey numerical weather prediction models with a focus on cloud microphysics parameterizations." \
-  "2026-06-11T06:00:00Z" "Heidi Meteo" > "$E/x2.xml"
+  "$(ago 6)" "Heidi Meteo" > "$E/x2.xml"
 
 FIXTURE5=$TMP/arxiv-5rel.xml
 write_atom "$FIXTURE5" "$E/p1.xml" "$E/p2.xml" "$E/p3.xml" "$E/p4.xml" "$E/p5.xml" "$E/x1.xml" "$E/x2.xml"
@@ -118,9 +134,9 @@ write_atom "$FIXTURE0" "$E/x1.xml" "$E/x2.xml"
 LONG_ABS=$($PY -c "
 base='We study the problem of agent planning with tool use and retrieval. We propose a method. We show results that outperform baselines on the benchmark with 93% accuracy. '
 print((base*30).strip())")
-atom_entry "2606.30001" "Agents and Planning: $(printf 'Very Long Title Words %.0s' {1..20})" "$LONG_ABS" "2026-06-11T05:00:00Z" "Long One" > "$E/L1.xml"
-atom_entry "2606.30002" "Memory Retrieval RAG Knowledge: $(printf 'Extended Naming Chain %.0s' {1..20})" "$LONG_ABS" "2026-06-11T04:00:00Z" "Long Two" > "$E/L2.xml"
-atom_entry "2606.30003" "Reasoning Evaluation Benchmark: $(printf 'Elaborate Heading Tokens %.0s' {1..20})" "$LONG_ABS" "2026-06-11T03:00:00Z" "Long Three" > "$E/L3.xml"
+atom_entry "2606.30001" "Agents and Planning: $(printf 'Very Long Title Words %.0s' {1..20})" "$LONG_ABS" "$(ago 7)" "Long One" > "$E/L1.xml"
+atom_entry "2606.30002" "Memory Retrieval RAG Knowledge: $(printf 'Extended Naming Chain %.0s' {1..20})" "$LONG_ABS" "$(ago 8)" "Long Two" > "$E/L2.xml"
+atom_entry "2606.30003" "Reasoning Evaluation Benchmark: $(printf 'Elaborate Heading Tokens %.0s' {1..20})" "$LONG_ABS" "$(ago 9)" "Long Three" > "$E/L3.xml"
 FIXTURELONG=$TMP/arxiv-long.xml
 write_atom "$FIXTURELONG" "$E/L1.xml" "$E/L2.xml" "$E/L3.xml"
 
@@ -166,12 +182,22 @@ new_hub() { # name [lang] → prints hub dir
   if [[ -f "$SRC_BIN/_kb_profile.py" ]]; then
     cp "$SRC_BIN/_kb_profile.py" "$d/bin/_kb_profile.py"
   fi
-  # channel-send shim: records every send, rc from marker file
+  # channel-send shim: logs every send attempt; a DELIVERED message (rc 0) is
+  # appended to all-digest.txt (one delivery = header + one message per
+  # paper), saved as msgs/<n>.txt and as last-digest.txt. rc comes from
+  # channel-rc: 1 = a real send failure, 3 = Telegram not configured.
+  mkdir -p "$d/msgs"
   cat > "$d/bin/kb-channel-send" <<EOF
 #!/usr/bin/env bash
 echo "\$1" >> "$d/channel-calls.log"
-printf '%s' "\$2" > "$d/last-digest.txt"
-exit \$(cat "$d/channel-rc" 2>/dev/null || echo 0)
+rc=\$(cat "$d/channel-rc" 2>/dev/null || echo 0)
+if [[ "\$rc" == "0" ]]; then
+  printf '%s\n\n' "\$2" >> "$d/all-digest.txt"
+  printf '%s' "\$2" > "$d/last-digest.txt"
+  n=\$(ls "$d/msgs" | wc -l | tr -d ' ')
+  printf '%s' "\$2" > "$d/msgs/\$((n+1)).txt"
+fi
+exit \$rc
 EOF
   chmod +x "$d/bin/kb-channel-send"
   # notebooklm canary — any invocation is a failure
@@ -192,6 +218,7 @@ write_grok() { # hub json-body rc   (social-only fixture: x/reddit/evidence/prio
 #!/usr/bin/env bash
 N=\$(cat "$d/grok-calls" 2>/dev/null || echo 0)
 echo \$((N+1)) > "$d/grok-calls"
+printf '%s\n' "\$@" > "$d/grok-argv.txt"
 if [[ "$rc" != "0" ]]; then echo "grok exploded" >&2; exit $rc; fi
 cat <<'JSON'
 $body
@@ -249,8 +276,16 @@ GROK_FULL='{"papers":[
  {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Квантизация и reasoning обсуждались поверхностно."}
 ]}'
 
-# Translation-only Codex fixture (*_loc fields), matching FIXTURE5 ids.
+# Translation-only Codex fixture (*_loc fields, current contract), matching FIXTURE5 ids.
 CODEX_FULL='{"papers":[
+ {"id":"2606.10001","title_loc":"Агентное планирование с tool use для LLM-агентов","abstract_loc":"Статья изучает долгосрочное планирование автономных агентов с LLM (large language model, большая языковая модель), tool use (использование инструментов) и MCP (Model Context Protocol, протокол контекста модели). Метод достигает 87% точности на AgentBench (бенчмарк агентных задач).","studied_loc":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","method_loc":"Предложенный фреймворк проверяли на AgentBench, сравнивая точность с базовыми подходами.","found_loc":"Метод достигает 87% точности на AgentBench и обходит базовые подходы.","why_selected_loc":"Статья попала в подборку, потому что она про планирование агентов с инструментами. Готовый паттерн планирования стоит проверить в своём оркестраторе задач.","terms":[{"term":"LLM","def":"Большая языковая модель, которая генерирует текст."},{"term":"MCP","def":"Протокол контекста модели для вызова инструментов."},{"term":"AgentBench","def":"Набор задач для проверки агентов."}]},
+ {"id":"2606.10002","title_loc":"Память с retrieval для агентных баз знаний","abstract_loc":"Авторы изучают persistent memory (персистентную память) и RAG (retrieval-augmented generation, генерацию с поисковым дополнением) для агентных баз знаний. Иерархический RAG-индекс даёт +12% к точности retrieval (поискового извлечения).","studied_loc":"Изучали персистентную память и RAG для агентных баз знаний.","method_loc":"Собрали иерархический RAG-индекс и оценивали его по точности retrieval.","found_loc":"Иерархический RAG-индекс даёт +12% к точности retrieval.","why_selected_loc":"Статья выбрана как работа про память агентов и RAG. Иерархический индекс стоит примерить к своей базе знаний.","terms":[{"term":"RAG","def":"Генерация ответа с опорой на найденные документы."},{"term":"retrieval","def":"Поиск нужных фрагментов в базе знаний."},{"term":"KB","def":"База знаний, из которой агент берёт факты."}]},
+ {"id":"2606.10003","title_loc":"Оценка chain-of-thought в малых локальных моделях","abstract_loc":"Работа проверяет chain-of-thought (цепочку рассуждений) в малых локальных моделях при quantization (квантизации) для on-device inference (вывода на устройстве). Метод улучшает reasoning score (оценку рассуждения) на 9 пунктов.","studied_loc":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","method_loc":"Сравнивали reasoning score на benchmark для локального on-device inference после квантизации.","found_loc":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности.","why_selected_loc":"Статья выбрана как работа про рассуждения малых локальных моделей. Стоит проверить квантизацию на своих локальных моделях.","terms":[{"term":"chain-of-thought","def":"Пошаговая цепочка рассуждений модели."},{"term":"quantization","def":"Сжатие весов модели для быстрой работы."},{"term":"on-device","def":"Запуск модели прямо на своём устройстве."}]}
+]}'
+
+# Core-fields-only Codex fixture (no why_selected_loc / glossary): an accepted
+# attempt whose enrichment fell back, i.e. translate_check=partial.
+CODEX_NO_ENRICH='{"papers":[
  {"id":"2606.10001","title_loc":"Агентное планирование с tool use для LLM-агентов","abstract_loc":"Статья изучает долгосрочное планирование автономных агентов с LLM (large language model, большая языковая модель), tool use (использование инструментов) и MCP (Model Context Protocol, протокол контекста модели). Метод достигает 87% точности на AgentBench (бенчмарк агентных задач).","studied_loc":"Исследовали долгосрочное планирование автономных агентов с tool use и MCP-вызовами.","method_loc":"Предложенный фреймворк проверяли на AgentBench, сравнивая точность с базовыми подходами.","found_loc":"Метод достигает 87% точности на AgentBench и обходит базовые подходы.","why_loc":"Готовый паттерн планирования для твоего оркестратора задач."},
  {"id":"2606.10002","title_loc":"Память с retrieval для агентных баз знаний","abstract_loc":"Авторы изучают persistent memory (персистентную память) и RAG (retrieval-augmented generation, генерацию с поисковым дополнением) для агентных баз знаний. Иерархический RAG-индекс даёт +12% к точности retrieval (поискового извлечения).","studied_loc":"Изучали персистентную память и RAG для агентных баз знаний.","method_loc":"Собрали иерархический RAG-индекс и оценивали его по точности retrieval.","found_loc":"Иерархический RAG-индекс даёт +12% к точности retrieval.","why_loc":"Прямо про архитектуру знаний Vepol."},
  {"id":"2606.10003","title_loc":"Оценка chain-of-thought в малых локальных моделях","abstract_loc":"Работа проверяет chain-of-thought (цепочку рассуждений) в малых локальных моделях при quantization (квантизации) для on-device inference (вывода на устройстве). Метод улучшает reasoning score (оценку рассуждения) на 9 пунктов.","studied_loc":"Проверяли качество chain-of-thought под квантизацией на on-device моделях.","method_loc":"Сравнивали reasoning score на benchmark для локального on-device inference после квантизации.","found_loc":"Их метод улучшает reasoning на 9 пунктов при сохранении эффективности.","why_loc":"Полезно для выбора локальных моделей."}
@@ -270,19 +305,22 @@ EOF
 )
 CODEX_LONG=$(cat <<EOF
 {"papers":[
- {"id":"2606.30001","title_loc":"Длинная статья про агентов","abstract_loc":"$LONG_LOC","studied_loc":"Изучали планирование агентов.","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_loc":"Полезно для проверки лимита digest."},
- {"id":"2606.30002","title_loc":"Длинная статья про память","abstract_loc":"$LONG_LOC","studied_loc":"Изучали память агентов.","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_loc":"Полезно для проверки лимита digest."},
- {"id":"2606.30003","title_loc":"Длинная статья про reasoning","abstract_loc":"$LONG_LOC","studied_loc":"Изучали reasoning (рассуждение).","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_loc":"Полезно для проверки лимита digest."}
+ {"id":"2606.30001","title_loc":"Длинная статья про агентов","abstract_loc":"$LONG_LOC","studied_loc":"Изучали планирование агентов.","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_selected_loc":"Статья выбрана для проверки размера сообщений. Стоит проверить разбивку на части.","terms":[{"term":"LLM","def":"Большая языковая модель."},{"term":"RAG","def":"Генерация с поиском."},{"term":"MCP","def":"Протокол контекста модели."}]},
+ {"id":"2606.30002","title_loc":"Длинная статья про память","abstract_loc":"$LONG_LOC","studied_loc":"Изучали память агентов.","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_selected_loc":"Статья выбрана для проверки размера сообщений. Стоит проверить разбивку на части.","terms":[{"term":"LLM","def":"Большая языковая модель."},{"term":"RAG","def":"Генерация с поиском."},{"term":"MCP","def":"Протокол контекста модели."}]},
+ {"id":"2606.30003","title_loc":"Длинная статья про reasoning","abstract_loc":"$LONG_LOC","studied_loc":"Изучали reasoning (рассуждение).","method_loc":"Проверяли метод на benchmark (бенчмарке), указанном в abstract.","found_loc":"Показали результат на benchmark (бенчмарке).","why_selected_loc":"Статья выбрана для проверки размера сообщений. Стоит проверить разбивку на части.","terms":[{"term":"LLM","def":"Большая языковая модель."},{"term":"RAG","def":"Генерация с поиском."},{"term":"MCP","def":"Протокол контекста модели."}]}
 ]}
 EOF
 )
 
 run_runner() { # hub fixture extra-env...
+  # The analysis chain defaults to claude,codex; these scenarios drive the
+  # Codex fake directly (the Claude lane is covered in-process below).
   local d="$1" fixture="$2"; shift 2
   KB_HUB="$d" \
   KB_LEARNING_ARXIV_DISABLE_NETWORK=1 \
   KB_LEARNING_ARXIV_FIXTURE="$fixture" \
   KB_LEARNING_ARXIV_GROK_BIN="$d/bin/grok-fake" \
+  KB_LEARNING_ARXIV_TRANSLATE_AGENTS=codex \
   KB_CODEX_BIN="$d/bin/codex-fake" \
   KB_LEARNING_ARXIV_FULLTEXT_FIXTURE_DIR="$FULLTEXT_DIR" \
   KB_PROCESS_OUTPUTS="telegram,file" \
@@ -291,6 +329,10 @@ run_runner() { # hub fixture extra-env...
 }
 
 manifest() { echo "$1/.orchestrator/learning-arxiv-$TODAY.json"; }
+# Deliveries = header messages actually delivered (one per digest).
+deliveries() { local n; n=$(grep -c '^🧪 arXiv learning —' "$1/all-digest.txt" 2>/dev/null); echo "${n:-0}"; }
+# Send attempts (delivered or not), one per message.
+sends() { if [[ -f "$1/channel-calls.log" ]]; then wc -l < "$1/channel-calls.log" | tr -d ' '; else echo 0; fi; }
 mget() { # hub jq-ish python expr
   local d="$1" expr="$2"
   $PY -c "
@@ -346,7 +388,8 @@ AS=$(mget "$HUB" "m['selected_papers'][0]['scores'].get('author_signal')")
 [[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "S1: default-off makes zero Grok calls" || fail "S1: grok calls=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)"
 [[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "S1: manifest social_check=skipped" || fail "S1: social_check=$(mget "$HUB" "m.get('social_check')")"
 [[ "$(mget "$HUB" "m.get('grok_rc')")" == "None" ]] && ok "S1: grok_rc=null when skipped" || fail "S1: grok_rc=$(mget "$HUB" "m.get('grok_rc')")"
-[[ "$(mget "$HUB" "m.get('manifest_version')")" == "4" ]] && ok "S1: manifest_version=4 stamped" || fail "S1: manifest_version"
+[[ "$(mget "$HUB" "m.get('manifest_version')")" == "6" ]] && ok "S1: manifest_version=6 stamped" || fail "S1: manifest_version=$(mget "$HUB" "m.get('manifest_version')")"
+[[ "$(mget "$HUB" "m.get('translate_check')")" == "ok" ]] && ok "S1: translate_check=ok (full contract incl. why_selected_loc + glossary)" || fail "S1: translate_check=$(mget "$HUB" "m.get('translate_check')")"
 
 echo "=== S1b: missing full-text fixture + disabled network → abstract_fallback ==="
 HUB=$(new_hub fulltext-fallback)
@@ -365,7 +408,9 @@ else
 fi
 
 echo "=== S2: digest content (arXiv links only, Russian, statuses split) ==="
-DIGEST=$(cat "$HUB/last-digest.txt" 2>/dev/null || echo "")
+# One delivery = a header message + one message per paper (full-paper messages).
+DIGEST=$(cat "$HUB/all-digest.txt" 2>/dev/null || echo "")
+REPORT_S2="$HUB/reports/learning-arxiv-summary-$TODAY.md"
 LINKS=$(grep -o "arxiv.org/abs/[0-9.]*" <<<"$DIGEST" | sort -u | wc -l | tr -d ' ')
 [[ "$LINKS" == "3" ]] && ok "S2: digest has 3 distinct arXiv links" || fail "S2: digest arXiv links=$LINKS"
 if grep -qiE "openai\.com|blog\.google|news\.ycombinator|github\.com" <<<"$DIGEST"; then
@@ -373,15 +418,17 @@ if grep -qiE "openai\.com|blog\.google|news\.ycombinator|github\.com" <<<"$DIGES
 else
   ok "S2: no OpenAI/Google/HN/GitHub links in digest"
 fi
-grep -q "Аннотация" <<<"$DIGEST" && ok "S2: digest has translated abstract line" || fail "S2: no abstract line"
-grep -q "LLM (large language model, большая языковая модель)" <<<"$DIGEST" \
-  && ok "S2: digest expands LLM inline" || fail "S2: LLM not expanded inline"
-grep -q "MCP (Model Context Protocol, протокол контекста модели)" <<<"$DIGEST" \
-  && ok "S2: digest expands MCP inline" || fail "S2: MCP not expanded inline"
-# Summary CONTENT must be Russian (codex bounded translation), not just labels
-RU_CONTENT=$(grep -c "Аннотация: [^ ]*[А-Яа-я]" <<<"$DIGEST" || true)
-[[ "$RU_CONTENT" == "3" ]] && ok "S2: all 3 abstract lines have Russian content (not just labels)" \
+grep -q "Аннотация (перевод)" "$REPORT_S2" && ok "S2: report has the translated abstract" || fail "S2: no abstract in report"
+grep -q "LLM (large language model, большая языковая модель)" "$REPORT_S2" \
+  && ok "S2: report expands LLM inline" || fail "S2: LLM not expanded inline"
+grep -q "MCP (Model Context Protocol, протокол контекста модели)" "$REPORT_S2" \
+  && ok "S2: report expands MCP inline" || fail "S2: MCP not expanded inline"
+# Summary CONTENT must be Russian (bounded translation), not just labels
+RU_CONTENT=$(grep -c "^\*\*Аннотация (перевод):\*\* [^ ]*[А-Яа-я]" "$REPORT_S2" || true)
+[[ "$RU_CONTENT" == "3" ]] && ok "S2: all 3 abstracts have Russian content (not just labels)" \
   || fail "S2: Russian abstract content lines=$RU_CONTENT (expected 3)"
+PAPER_MSGS=$(grep -c "^[0-9]/3 · " <<<"$DIGEST" || true)
+[[ "$PAPER_MSGS" == "3" ]] && ok "S2: one message per paper (3)" || fail "S2: paper messages=$PAPER_MSGS"
 SRC_OK=$(mget "$HUB" "all(p.get('summary_source')=='codex' for p in m['selected_papers'])")
 [[ "$SRC_OK" == "True" ]] && ok "S2: summary_source=codex for all papers" || fail "S2: summary_source"
 METH_OK=$(mget "$HUB" "all(p.get('method_loc') for p in m['selected_papers'])")
@@ -399,8 +446,10 @@ else
   ok "S2: no X/Reddit status lines in default-off digest"
 fi
 grep -q "Агентное планирование" <<<"$DIGEST" && ok "S2: Russian title from codex rendered" || fail "S2: title_loc not used"
-grep -q "Готовый паттерн планирования" <<<"$DIGEST" && ok "S2: per-paper why_loc from codex rendered" || fail "S2: why_loc not used"
-grep -q "Зачем тебе" <<<"$DIGEST" && ok "S2: digest has 'Зачем тебе'" || fail "S2: no 'Зачем тебе'"
+grep -q "Почему выбрана: Статья попала в подборку" <<<"$DIGEST" && grep -q "Готовый паттерн планирования" <<<"$DIGEST" \
+  && ok "S2: per-paper why_selected_loc rendered under 'Почему выбрана'" || fail "S2: why_selected_loc not used"
+grep -q "^Термины:" <<<"$DIGEST" && grep -q "^- MCP: Протокол контекста модели" <<<"$DIGEST" \
+  && ok "S2: digest carries the glossary" || fail "S2: no glossary in digest"
 METHODS=$(grep -c "Как исследовали:" <<<"$DIGEST" || true)
 [[ "$METHODS" == "3" ]] && ok "S2: digest has per-paper method/setup line (3)" || fail "S2: method lines=$METHODS"
 grep -q "Предложенный фреймворк проверяли на AgentBench" <<<"$DIGEST" \
@@ -437,8 +486,9 @@ if grep -q "Аннотация (EN)" "$HUB/reports/learning-arxiv-summary-$TODAY
 else
   ok "S2: report no longer uses EN abstract heading"
 fi
-CALLS=$(wc -l < "$HUB/channel-calls.log" 2>/dev/null | tr -d ' ')
-[[ "$CALLS" == "1" ]] && ok "S2: exactly one telegram send" || fail "S2: sends=$CALLS"
+[[ "$(deliveries "$HUB")" == "1" && "$(sends "$HUB")" == "4" ]] \
+  && ok "S2: exactly one delivery (header + 3 paper messages)" \
+  || fail "S2: deliveries=$(deliveries "$HUB") sends=$(sends "$HUB")"
 [[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "S2: digest_delivered=true" || fail "S2: digest_delivered"
 
 echo "=== S3: grok fixture merged per paper ==="
@@ -456,6 +506,10 @@ grep -q "не найдено\|not_found" "$HUB/reports/learning-arxiv-summary-$T
   && ok "S3: report carries social statuses" || fail "S3: report missing social statuses"
 grep -q "abstract_loc\\|studied_loc\\|method_loc\\|why_loc" "$HUB/.orchestrator/learning-arxiv-grok-prompt-$TODAY.md" \
   && fail "S3: grok prompt asks for translation fields (split incomplete)" || ok "S3: opt-in grok prompt is social-only"
+DENIES=$(tr '\n' ' ' < "$HUB/grok-argv.txt" 2>/dev/null)
+[[ "$DENIES" == *"--deny write --deny edit --deny bash"* ]] \
+  && ok "S3: grok runs with write/edit/bash denied (same as Money Radar)" \
+  || fail "S3: grok argv lacks the read-only deny flags: $DENIES"
 
 echo "=== S3b: unknown social_check value disables social with warning ==="
 HUB=$(new_hub social-typo)
@@ -490,9 +544,9 @@ SRC_OK=$(mget "$HUB" "all(p.get('summary_source')=='codex' for p in m['selected_
 ABS_OK=$(mget "$HUB" "all(p.get('abstract_source')=='codex' for p in m['selected_papers'])")
 [[ "$ABS_OK" == "True" ]] && ok "S4: abstract_source=codex despite grok down" || fail "S4: abstract_source not codex"
 [[ "$(mget "$HUB" "m['translate_check']")" == "ok" ]] && ok "S4: translate_check=ok" || fail "S4: translate_check"
-grep -q "сбой проверки" "$HUB/last-digest.txt" && ok "S4: degraded social rendered in Russian" \
+grep -q "сбой проверки" "$HUB/all-digest.txt" && ok "S4: degraded social rendered in Russian" \
   || fail "S4: degraded status not Russian"
-if grep -q "Перевод abstract недоступен" "$HUB/last-digest.txt"; then
+if grep -q "Перевод abstract недоступен" "$HUB/reports/learning-arxiv-summary-$TODAY.md"; then
   fail "S4: abstract wrongly marked unavailable when Codex succeeded"
 else
   ok "S4: translated abstract present (no false unavailable note)"
@@ -551,20 +605,21 @@ write_codex "$HUB" "$CODEX_FULL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
-CALLS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
-[[ "$RC" == "0" && "$CALLS" == "1" ]] && ok "S8: rerun rc=0, no duplicate send" || fail "S8: rc=$RC calls=$CALLS"
+CALLS=$(sends "$HUB")
+[[ "$RC" == "0" && "$CALLS" == "4" && "$(deliveries "$HUB")" == "1" ]] \
+  && ok "S8: rerun rc=0, no duplicate send" || fail "S8: rc=$RC calls=$CALLS"
 KB_HUB="$HUB" KB_LEARNING_ARXIV_DISABLE_NETWORK=1 KB_LEARNING_ARXIV_FIXTURE="$FIXTURE5" \
-  KB_LEARNING_ARXIV_GROK_BIN="$HUB/bin/grok-fake" \
+  KB_LEARNING_ARXIV_GROK_BIN="$HUB/bin/grok-fake" KB_LEARNING_ARXIV_TRANSLATE_AGENTS=codex \
   KB_CODEX_BIN="$HUB/bin/codex-fake" KB_PROCESS_OUTPUTS="telegram,file" \
   "$PY" "$RUNNER" --text-only --date "$TODAY" --force >/dev/null 2>&1
-CALLS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
-[[ "$CALLS" == "2" ]] && ok "S8: --force resends" || fail "S8: force calls=$CALLS"
+CALLS=$(sends "$HUB")
+[[ "$CALLS" -gt 4 ]] && ok "S8: --force resends" || fail "S8: force calls=$CALLS"
 
 echo "=== S9: telegram failure → rc!=0; recovery delivers exactly once from stage cache ==="
 HUB=$(new_hub tg-fail)
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
 [[ "$RC" != "0" ]] && ok "S9: rc!=0 when telegram fails" || fail "S9: rc=0 on failed delivery"
@@ -580,14 +635,16 @@ DELIVERED=$(mget "$HUB" "m['digest_delivered']")
 [[ "$DELIVERED" == "True" ]] && ok "S9: recovery delivered" || fail "S9: recovery not delivered"
 GROK_CALLS_AFTER=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
 [[ "$GROK_CALLS_AFTER" == "$GROK_CALLS_BEFORE" ]] && ok "S9: grok not re-invoked on recovery" || fail "S9: grok re-invoked (${GROK_CALLS_BEFORE} -> ${GROK_CALLS_AFTER})"
-SENDS=$(wc -l < "$HUB/channel-calls.log" | tr -d ' ')
-[[ "$SENDS" == "2" ]] && ok "S9: exactly one successful delivery after recovery (2 attempts total)" || fail "S9: sends=$SENDS"
+SENDS=$(sends "$HUB")
+[[ "$SENDS" == "5" && "$(deliveries "$HUB")" == "1" ]] \
+  && ok "S9: exactly one successful delivery after recovery (1 failed + 4 sent)" \
+  || fail "S9: sends=$SENDS deliveries=$(deliveries "$HUB")"
 
 echo "=== S9b: skipped-cache is invalid after social_check flips to grok ==="
 HUB=$(new_hub toggle-social)
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
 [[ "$RC" != "0" ]] && ok "S9b: first default-off delivery fails and leaves cache" || fail "S9b: first rc=$RC"
@@ -613,7 +670,7 @@ run_runner "$HUB" "$FIXTURE2" >/dev/null 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "S10: rc=0 with 2 papers" || fail "S10: rc=$RC"
 [[ "$(mget "$HUB" "len(m['selected_papers'])")" == "2" ]] && ok "S10: 2 papers selected" || fail "S10: selected"
-grep -q "только 2" "$HUB/last-digest.txt" && ok "S10: digest notes 'только 2'" || fail "S10: no explicit note"
+grep -q "только 2" "$HUB/all-digest.txt" && ok "S10: digest notes 'только 2'" || fail "S10: no explicit note"
 HUB=$(new_hub zero)
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
@@ -623,16 +680,17 @@ RC=$?
 grep -q "релевантных статей сегодня нет" "$HUB/last-digest.txt" \
   && ok "S10: zero-papers digest says so explicitly" || fail "S10: zero-papers note missing"
 
-echo "=== S11: digest length budget ≤ 3900 (single Telegram message) ==="
+echo "=== S11: long papers — every Telegram message fits 4096 characters ==="
 HUB=$(new_hub long)
 write_grok "$HUB" "$GROK_LONG" 0
 write_codex "$HUB" "$CODEX_LONG" 0
 run_runner "$HUB" "$FIXTURELONG" >/dev/null 2>&1
-LEN=$($PY -c "print(len(open('$HUB/last-digest.txt',encoding='utf-8').read()))" 2>/dev/null || echo 99999)
-[[ "$LEN" -le 3900 ]] && ok "S11: digest length $LEN ≤ 3900" || fail "S11: digest length $LEN > 3900"
-LINKS=$(grep -o "arxiv.org/abs/[0-9.]*" "$HUB/last-digest.txt" | sort -u | wc -l | tr -d ' ')
+LEN=$($PY -c "import glob; print(max((len(open(f, encoding='utf-8').read()) for f in glob.glob('$HUB/msgs/*.txt')), default=99999))")
+[[ "$LEN" -le 4096 ]] && ok "S11: longest message $LEN ≤ 4096" || fail "S11: a message has $LEN > 4096 characters"
+LINKS=$(grep -o "arxiv.org/abs/[0-9.]*" "$HUB/all-digest.txt" | sort -u | wc -l | tr -d ' ')
 [[ "$LINKS" == "3" ]] && ok "S11: all 3 papers still present" || fail "S11: links=$LINKS"
-grep -q "Аннотация" "$HUB/last-digest.txt" && ok "S11: abstract line present under budget" || fail "S11: abstract line dropped"
+METHODS=$(grep -c "^Как исследовали:" "$HUB/all-digest.txt" || true)
+[[ "$METHODS" == "3" ]] && ok "S11: every paper keeps its method section" || fail "S11: method sections=$METHODS"
 
 echo "=== S12: zero NotebookLM calls in background mode (all hubs) ==="
 NB_MARKERS=$(find "$TMP" -name "notebooklm-called.marker" | wc -l | tr -d ' ')
@@ -672,7 +730,7 @@ echo "=== S16: zero-papers day recovers from stage cache after telegram failure 
 HUB=$(new_hub zerocache)
 write_grok "$HUB" '{"papers":[]}' 0
 write_codex "$HUB" '{"papers":[]}' 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE0" >/dev/null 2>&1
 RC=$?
 [[ "$RC" != "0" ]] && ok "S16: zero-papers + telegram fail → rc!=0" || fail "S16: rc=0"
@@ -741,9 +799,9 @@ GROK_EN_LOC='{"papers":[
  {"id":"2606.10003","x_status":"weak","reddit_status":"not_found","evidence":"","prior_context":"Quantization and reasoning were discussed in passing."}
 ]}'
 CODEX_EN_LOC='{"papers":[
- {"id":"2606.10001","title_loc":"Agentic Planning with Tool Use for LLM Agents","abstract_loc":"The paper studies LLM (large language model) agents that plan over long horizons and use MCP (Model Context Protocol) calls. The method reaches 87% accuracy on AgentBench.","studied_loc":"They studied long-horizon planning for autonomous agents with tool use and MCP calls.","method_loc":"They evaluated the proposed framework on AgentBench against baseline approaches.","found_loc":"The method reaches 87% accuracy on AgentBench and beats the baselines.","why_loc":"A ready planning pattern for your task orchestrator."},
- {"id":"2606.10002","title_loc":"Memory-Augmented Retrieval for KB Agents","abstract_loc":"The paper studies persistent memory and RAG (retrieval-augmented generation) for agent knowledge bases. A hierarchical RAG index gives +12% retrieval accuracy.","studied_loc":"They studied persistent memory and RAG for agent knowledge bases.","method_loc":"They built a hierarchical RAG index and evaluated retrieval accuracy.","found_loc":"A hierarchical RAG index gives +12% retrieval accuracy.","why_loc":"Directly applicable to the KB architecture."},
- {"id":"2606.10003","title_loc":"Evaluating CoT in Small Local Models","abstract_loc":"The paper evaluates CoT (chain-of-thought) quality under quantization for on-device inference. Their method improves reasoning by 9 points while staying efficient.","studied_loc":"They evaluated chain-of-thought quality under quantization on-device.","method_loc":"They compared reasoning scores on an on-device inference benchmark after quantization.","found_loc":"Their method improves reasoning by 9 points while staying efficient.","why_loc":"Useful for local model choices."}
+ {"id":"2606.10001","title_loc":"Agentic Planning with Tool Use for LLM Agents","abstract_loc":"The paper studies LLM (large language model) agents that plan over long horizons and use MCP (Model Context Protocol) calls. The method reaches 87% accuracy on AgentBench.","studied_loc":"They studied long-horizon planning for autonomous agents with tool use and MCP calls.","method_loc":"They evaluated the proposed framework on AgentBench against baseline approaches.","found_loc":"The method reaches 87% accuracy on AgentBench and beats the baselines.","why_selected_loc":"It made the cut as a paper on agent planning with tools. Try its planning pattern in your own task orchestrator.","terms":[{"term":"LLM","def":"A large language model that generates text."},{"term":"MCP","def":"Model Context Protocol, a standard for tool calls."},{"term":"AgentBench","def":"A benchmark of agent tasks."}]},
+ {"id":"2606.10002","title_loc":"Memory-Augmented Retrieval for KB Agents","abstract_loc":"The paper studies persistent memory and RAG (retrieval-augmented generation) for agent knowledge bases. A hierarchical RAG index gives +12% retrieval accuracy.","studied_loc":"They studied persistent memory and RAG for agent knowledge bases.","method_loc":"They built a hierarchical RAG index and evaluated retrieval accuracy.","found_loc":"A hierarchical RAG index gives +12% retrieval accuracy.","why_selected_loc":"It was picked as a paper on agent memory and RAG. Check its hierarchical index against your own knowledge base.","terms":[{"term":"RAG","def":"Answer generation grounded in retrieved documents."},{"term":"retrieval","def":"Finding the relevant passages in a knowledge base."},{"term":"KB","def":"A knowledge base the agent reads facts from."}]},
+ {"id":"2606.10003","title_loc":"Evaluating CoT in Small Local Models","abstract_loc":"The paper evaluates CoT (chain-of-thought) quality under quantization for on-device inference. Their method improves reasoning by 9 points while staying efficient.","studied_loc":"They evaluated chain-of-thought quality under quantization on-device.","method_loc":"They compared reasoning scores on an on-device inference benchmark after quantization.","found_loc":"Their method improves reasoning by 9 points while staying efficient.","why_selected_loc":"It was picked as a paper on reasoning in small local models. Check quantization on the local models you run.","terms":[{"term":"CoT","def":"Chain-of-thought, step-by-step reasoning."},{"term":"quantization","def":"Compressing model weights to run faster."},{"term":"on-device","def":"Running a model on your own machine."}]}
 ]}'
 HUB=$(new_hub lang-en en)
 write_grok "$HUB" "$GROK_EN_LOC" 0
@@ -751,10 +809,10 @@ write_codex "$HUB" "$CODEX_EN_LOC" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "S19: rc=0 with en profile" || fail "S19: rc=$RC"
-DIGEST_EN=$(cat "$HUB/last-digest.txt" 2>/dev/null || echo "")
+DIGEST_EN=$(cat "$HUB/all-digest.txt" 2>/dev/null || echo "")
 grep -q "Scanned .* fresh arXiv papers" <<<"$DIGEST_EN" && ok "S19: English stats line" || fail "S19: stats line"
 grep -q "Why selected:" <<<"$DIGEST_EN" && ok "S19: English reason label" || fail "S19: reason label"
-grep -q "Abstract:" <<<"$DIGEST_EN" && ok "S19: English abstract label" || fail "S19: abstract label"
+grep -q "^\*\*Abstract:\*\*" "$HUB/reports/learning-arxiv-summary-$TODAY.md" && ok "S19: English abstract label (report)" || fail "S19: abstract label"
 if grep -qE "(^|[[:space:]])(X|Reddit):" <<<"$DIGEST_EN"; then
   fail "S19: social status line leaked into default-off en digest"
 else
@@ -785,7 +843,7 @@ write_codex "$HUB" "$CODEX_EN_LOC" 0
 run_runner "$HUB" "$FIXTURE5" KB_LANG=sr >/dev/null 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "S20: rc=0 with KB_LANG=sr" || fail "S20: rc=$RC"
-grep -q "Why selected:" "$HUB/last-digest.txt" && ok "S20: English labels for unmapped code" || fail "S20: labels"
+grep -q "Why selected:" "$HUB/all-digest.txt" && ok "S20: English labels for unmapped code" || fail "S20: labels"
 grep -q "ISO 639 code 'sr'" "$HUB/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" \
   && ok "S20: ISO-safe directive in codex prompt" || fail "S20: directive"
 
@@ -794,7 +852,7 @@ HUB=$(new_hub lang-gate)
 enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1   # ru run, delivery fails, cache filled
 G1=$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)
 C1=$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)
@@ -808,7 +866,7 @@ C2=$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)
 [[ "$RC" == "0" ]] && ok "S21: en recovery rc=0" || fail "S21: rc=$RC"
 [[ "$G2" -gt "$G1" ]] && ok "S21: language mismatch re-invoked grok (no stale cache)" || fail "S21: stale cache reused (${G1} -> ${G2})"
 [[ "$C2" -gt "$C1" ]] && ok "S21: language mismatch re-invoked codex too" || fail "S21: codex not re-invoked (${C1} -> ${C2})"
-if grep -q "[А-Яа-я]" "$HUB/last-digest.txt"; then
+if grep -q "[А-Яа-я]" "$HUB/all-digest.txt"; then
   fail "S21: Russian leaked into en digest from ru cache"
 else
   ok "S21: no Cyrillic after language switch"
@@ -818,7 +876,7 @@ HUB=$(new_hub lang-gate-ru)
 enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
 echo 0 > "$HUB/channel-rc"
 run_runner "$HUB" "$TMP/removed-again.xml" >/dev/null 2>&1
@@ -830,7 +888,7 @@ HUB=$(new_hub lang-switch-fail)
 enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_FULL" 0
-echo 3 > "$HUB/channel-rc"
+echo 1 > "$HUB/channel-rc"
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1            # ru cache filled, delivery failed
 echo 0 > "$HUB/channel-rc"
 run_runner "$HUB" "$TMP/gone.xml" KB_LANG=en >/dev/null 2>&1   # switch to en, fetch FAILS
@@ -841,7 +899,7 @@ write_codex "$HUB" "$CODEX_EN_LOC" 0
 run_runner "$HUB" "$FIXTURE5" KB_LANG=en >/dev/null 2>&1       # retry with fixture back
 RC=$?
 [[ "$RC" == "0" ]] && ok "S22: en retry rc=0" || fail "S22: retry rc=$RC"
-if grep -q "[А-Яа-я]" "$HUB/last-digest.txt"; then
+if grep -q "[А-Яа-я]" "$HUB/all-digest.txt"; then
   fail "S22: stale ru cache resurrected after failed re-fetch"
 else
   ok "S22: no stale-language content after failed re-fetch + retry"
@@ -872,7 +930,7 @@ RC=$?
 [[ "$RC" == "0" ]] && ok "T11: rc=0" || fail "T11: rc=$RC"
 [[ "$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)" -ge 1 ]] && ok "T11: Codex invoked (stale v1 cache bypassed)" || fail "T11: Codex skipped — stale cache reused"
 [[ "$(cat "$HUB/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "T11: default-off skips Grok while bypassing stale v1 cache" || fail "T11: unexpected grok call"
-[[ "$(mget "$HUB" "m.get('manifest_version')")" == "4" ]] && ok "T11: manifest rewritten to v4" || fail "T11: manifest_version not 4"
+[[ "$(mget "$HUB" "m.get('manifest_version')")" == "6" ]] && ok "T11: manifest rewritten to v6" || fail "T11: manifest_version not 6"
 [[ -n "$(mget "$HUB" "m.get('translate_check')")" ]] && ok "T11: translate_check present after migration" || fail "T11: translate_check missing"
 [[ "$(mget "$HUB" "m.get('social_check')")" == "skipped" ]] && ok "T11: migrated default-off manifest social_check=skipped" || fail "T11: social_check"
 ABS_C=$(mget "$HUB" "all(p.get('abstract_source')=='codex' for p in m['selected_papers'])")
@@ -904,7 +962,7 @@ run_runner "$HUB3" "$FIXTURE5" >/dev/null 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "T11b: v2 no-method rc=0" || fail "T11b: rc=$RC"
 [[ "$(cat "$HUB3/codex-calls" 2>/dev/null || echo 0)" -ge 1 ]] && ok "T11b: stale v2 cache bypassed (Codex invoked)" || fail "T11b: stale v2 cache reused"
-[[ "$(mget "$HUB3" "m.get('manifest_version')")" == "4" ]] && ok "T11b: v2 rewritten to v4" || fail "T11b: manifest_version"
+[[ "$(mget "$HUB3" "m.get('manifest_version')")" == "6" ]] && ok "T11b: v2 rewritten to v6" || fail "T11b: manifest_version"
 [[ "$(cat "$HUB3/grok-calls" 2>/dev/null || echo 0)" == "0" ]] && ok "T11b: default-off skips Grok after v2 migration" || fail "T11b: unexpected grok call"
 [[ "$(mget "$HUB3" "m.get('social_check')")" == "skipped" ]] && ok "T11b: social_check=skipped after v2 migration" || fail "T11b: social_check"
 METH3=$(mget "$HUB3" "all(p.get('method_loc') for p in m['selected_papers'])")
@@ -966,18 +1024,22 @@ RC=$?
 [[ "$RC" == "0" ]] && ok "T13a: rc=0" || fail "T13a: rc=$RC"
 [[ "$(mget "$HUB" "m['translate_check']")" == "degraded" ]] && ok "T13a: translate_check=degraded" || fail "T13a: translate_check"
 [[ "$(mget "$HUB" "m['social_check']")" == "ok" ]] && ok "T13a: social_check=ok (grok unaffected)" || fail "T13a: social_check"
-[[ "$(mget "$HUB" "m['codex_rc']")" == "5" ]] && ok "T13a: codex_rc=5 recorded" || fail "T13a: codex_rc"
+[[ "$(mget "$HUB" "m['translate_attempts'][0]['rc']")" == "5" ]] && ok "T13a: codex rc=5 recorded in translate_attempts" || fail "T13a: codex rc"
 AB=$(mget "$HUB" "all(p.get('abstract_source')=='unavailable' for p in m['selected_papers'])")
 [[ "$AB" == "True" ]] && ok "T13a: abstract_source=unavailable" || fail "T13a: abstract_source"
-grep -q "Перевод abstract недоступен" "$HUB/last-digest.txt" && ok "T13a: honest unavailable note present" || fail "T13a: note missing"
-if grep -qi "Grok" "$HUB/last-digest.txt"; then
+grep -q "Перевод abstract недоступен" "$HUB/reports/learning-arxiv-summary-$TODAY.md" \
+  && grep -q "⚠️ перевод недоступен" "$HUB/all-digest.txt" \
+  && ok "T13a: honest unavailable note present" || fail "T13a: note missing"
+if grep -qi "Grok" "$HUB/all-digest.txt"; then
   fail "T13a: digest names Grok for a Codex-owned translation failure"
 else
   ok "T13a: degraded note is engine-neutral (no Grok blame)"
 fi
 X1=$(mget "$HUB" "[p['social']['x_status'] for p in m['selected_papers'] if p['id']=='2606.10001'][0]")
 [[ "$X1" == "found" ]] && ok "T13a: social signal intact despite codex failure" || fail "T13a: social lost ($X1)"
-# 13b: partial Codex — 2 good Russian, 1 valid-JSON English-passthrough → partial
+# 13b: one English-passthrough paper makes the WHOLE attempt fail its
+# semantic gate (spec D1: every selected paper needs every core field in the
+# user's language) → no agent left → degraded, all papers fallback_en.
 CODEX_PARTIAL='{"papers":[
  {"id":"2606.10001","title_loc":"Хорошо","abstract_loc":"Нормальный перевод про агентов и planning.","studied_loc":"Изучали агентов.","method_loc":"Проверяли на benchmark.","found_loc":"Достигли 87%.","why_loc":"Полезно."},
  {"id":"2606.10002","title_loc":"Хорошо два","abstract_loc":"Нормальный перевод про память и RAG.","studied_loc":"Изучали память.","method_loc":"Проверяли retrieval accuracy.","found_loc":"Плюс 12%.","why_loc":"Полезно."},
@@ -988,12 +1050,23 @@ enable_grok "$HUB"
 write_grok "$HUB" "$GROK_FULL" 0
 write_codex "$HUB" "$CODEX_PARTIAL" 0
 run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
-[[ "$(mget "$HUB" "m['translate_check']")" == "partial" ]] && ok "T13b: translate_check=partial (mixed)" || fail "T13b: translate_check=$(mget "$HUB" "m['translate_check']")"
-G=$(mget "$HUB" "[p.get('summary_source') for p in m['selected_papers'] if p['id']=='2606.10001'][0]")
-B=$(mget "$HUB" "[p.get('summary_source') for p in m['selected_papers'] if p['id']=='2606.10003'][0]")
-[[ "$G" == "codex" ]] && ok "T13b: good paper → codex" || fail "T13b: good paper source=$G"
-[[ "$B" == "fallback_en" ]] && ok "T13b: English-passthrough paper → fallback_en" || fail "T13b: bad paper source=$B"
-[[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "T13b: digest delivered despite partial" || fail "T13b: not delivered"
+[[ "$(mget "$HUB" "m['translate_check']")" == "degraded" ]] && ok "T13b: translate_check=degraded (attempt rejected)" || fail "T13b: translate_check=$(mget "$HUB" "m['translate_check']")"
+[[ "$(mget "$HUB" "m['translate_attempts'][0]['reason']")" == "language_rejected" ]] \
+  && ok "T13b: rejection reason recorded (language_rejected)" || fail "T13b: reason=$(mget "$HUB" "m['translate_attempts'][0]['reason']")"
+ALL_FB=$(mget "$HUB" "all(p.get('summary_source')=='fallback_en' for p in m['selected_papers'])")
+[[ "$ALL_FB" == "True" ]] && ok "T13b: no half-applied translation (every paper fallback_en)" || fail "T13b: half-applied translation"
+[[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "T13b: digest delivered despite the rejected attempt" || fail "T13b: not delivered"
+# 13c: core fields accepted but the enrichment (why_selected_loc + glossary)
+# missing → partial: translated summaries, template "why", warning shown.
+HUB=$(new_hub codex-no-enrich)
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_NO_ENRICH" 0
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+[[ "$(mget "$HUB" "m['translate_check']")" == "partial" ]] && ok "T13c: missing enrichment → translate_check=partial" || fail "T13c: translate_check=$(mget "$HUB" "m['translate_check']")"
+SRC_C=$(mget "$HUB" "all(p.get('summary_source')=='codex' and not p.get('terms') for p in m['selected_papers'])")
+[[ "$SRC_C" == "True" ]] && ok "T13c: core translation kept, no glossary" || fail "T13c: provenance wrong"
+grep -q "⚠️ перевод получился не для всех статей" "$HUB/all-digest.txt" \
+  && ok "T13c: partial warning in the digest header" || fail "T13c: partial warning missing"
 
 echo "=== T14: BOTH fail (Codex rc!=0 AND Grok rc!=0) → all degraded, honest, digest still sent ==="
 HUB=$(new_hub both-fail)
@@ -1011,9 +1084,192 @@ NF=$(mget "$HUB" "any('not_found' in (p['social']['x_status'],p['social']['reddi
 [[ "$NF" == "False" ]] && ok "T14: no invented not_found" || fail "T14: invented not_found"
 ABS=$(mget "$HUB" "all(p.get('abstract_source')=='unavailable' and p.get('summary_source')=='fallback_en' for p in m['selected_papers'])")
 [[ "$ABS" == "True" ]] && ok "T14: translation all unavailable/fallback_en" || fail "T14: translation provenance"
-grep -q "Перевод abstract недоступен" "$HUB/last-digest.txt" && ok "T14: honest unavailable note" || fail "T14: note missing"
-grep -q "сбой проверки" "$HUB/last-digest.txt" && ok "T14: degraded social rendered" || fail "T14: social note missing"
+grep -q "Перевод abstract недоступен" "$HUB/reports/learning-arxiv-summary-$TODAY.md" \
+  && grep -q "⚠️ перевод недоступен" "$HUB/all-digest.txt" \
+  && ok "T14: honest unavailable note" || fail "T14: note missing"
+grep -q "сбой проверки" "$HUB/all-digest.txt" && ok "T14: degraded social rendered" || fail "T14: social note missing"
 [[ "$(mget "$HUB" "m['digest_delivered']")" == "True" ]] && ok "T14: digest still delivered" || fail "T14: not delivered"
+
+echo "=== T15: translate warning + continuation label follow the user language (ru unchanged) ==="
+t15() { # lang [extra env...] → warning lines + continuation head
+  local lang="$1"; shift
+  local d="$TMP/t15-hub-$lang"
+  mkdir -p "$d/personal" "$d/logs"
+  echo "language: $lang" > "$d/personal/profile.yaml"
+  env KB_HUB="$d" "$@" $PY - "$RUNNER" "$SRC_BIN" <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+runner, src_bin = sys.argv[1], sys.argv[2]
+sys.path.insert(0, src_bin)
+loader = SourceFileLoader('arxrunner', runner)
+spec = importlib.util.spec_from_loader('arxrunner', loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+print(mod.translate_warning('degraded'))
+print(mod.translate_warning('partial'))
+print('ok-empty' if mod.translate_warning('ok') == '' else 'ok-not-empty')
+print(mod.continuation_head({'id': 'x', 'title': 'T', 'authors': []}, 1, 3))
+PYEOF
+}
+# ru must keep exactly the strings ru users saw before.
+EXP_RU=$'⚠️ перевод недоступен — ниже английские выдержки\n⚠️ перевод получился не для всех статей — часть на английском\nok-empty\n1/3 · T (продолжение)'
+[[ "$(t15 ru)" == "$EXP_RU" ]] && ok "T15: ru warnings + continuation unchanged" || fail "T15: ru strings changed: $(t15 ru)"
+OUT_EN=$(t15 en)
+if LC_ALL=en_US.UTF-8 grep -q "[А-Яа-я]" <<<"$OUT_EN"; then
+  fail "T15: Cyrillic in en warnings: $OUT_EN"
+else
+  ok "T15: en warnings have no Cyrillic"
+fi
+grep -q "translation unavailable" <<<"$OUT_EN" && grep -q "1/3 · T (continued)" <<<"$OUT_EN" \
+  && ok "T15: en warning + continuation label are English" || fail "T15: en strings wrong: $OUT_EN"
+[[ "$(t15 en KB_LANG=sr)" == "$OUT_EN" ]] && ok "T15: unknown language falls back to en" || fail "T15: sr fallback: $(t15 en KB_LANG=sr)"
+
+echo "=== U1: Telegram not configured (kb-channel-send exit 3) → files kept, rc=0 ==="
+HUB=$(new_hub tg-not-configured)
+write_grok "$HUB" "$GROK_FULL" 0
+write_codex "$HUB" "$CODEX_FULL" 0
+echo 3 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" ]] && ok "U1: rc=0 so later routines still run" || fail "U1: rc=$RC"
+[[ "$(mget "$HUB" "m['status']")" == "completed" && "$(mget "$HUB" "m['digest_delivered']")" == "False" \
+   && "$(mget "$HUB" "m.get('telegram')")" == "not_configured" ]] \
+  && ok "U1: manifest completed, not delivered, telegram=not_configured" \
+  || fail "U1: manifest status=$(mget "$HUB" "m['status']") telegram=$(mget "$HUB" "m.get('telegram')")"
+[[ -s "$HUB/reports/learning-arxiv-summary-$TODAY.md" && -s "$HUB/sources/arxiv-learning-snapshot-$TODAY.md" ]] \
+  && ok "U1: report and snapshot kept" || fail "U1: files missing"
+[[ "$(grep -c 'telegram not configured' "$HUB/logs/learning-arxiv.log")" == "1" ]] \
+  && ok "U1: one log line" || fail "U1: log lines=$(grep -c 'telegram not configured' "$HUB/logs/learning-arxiv.log")"
+[[ "$(sends "$HUB")" == "1" ]] && ok "U1: stops after the first refused send" || fail "U1: sends=$(sends "$HUB")"
+# Once Telegram is set up, a rerun delivers the stored messages (stage cache).
+echo 0 > "$HUB/channel-rc"
+C_BEFORE=$(cat "$HUB/codex-calls" 2>/dev/null || echo 0)
+run_runner "$HUB" "$TMP/removed-for-u1.xml" >/dev/null 2>&1
+RC=$?
+[[ "$RC" == "0" && "$(mget "$HUB" "m['digest_delivered']")" == "True" && "$(deliveries "$HUB")" == "1" \
+   && "$(cat "$HUB/codex-calls")" == "$C_BEFORE" ]] \
+  && ok "U1: rerun after setup delivers from the cache without re-analysis" \
+  || fail "U1: rerun rc=$RC delivered=$(mget "$HUB" "m['digest_delivered']")"
+# A real send failure (exit 1) still fails so kb-tick retries.
+HUB=$(new_hub tg-real-failure)
+write_codex "$HUB" "$CODEX_FULL" 0
+echo 1 > "$HUB/channel-rc"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+RC=$?
+[[ "$RC" != "0" && "$(mget "$HUB" "m['status']")" == "failed" ]] \
+  && ok "U1: a real send failure still returns rc!=0" || fail "U1: real failure rc=$RC"
+
+echo "=== U2: 'why it matters' is about the user's work unless a focus is configured ==="
+prompt_of() { cat "$1/.orchestrator/learning-arxiv-codex-prompt-$TODAY.md" 2>/dev/null; }
+HUB=$(new_hub focus-none)
+write_codex "$HUB" "$CODEX_FULL" 0
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+P=$(prompt_of "$HUB")
+[[ "$P" == *"No focus project is configured"* && "$P" != *"(Vepol)"* && "$P" != *"Focus project:"* ]] \
+  && ok "U2: no config → generic framing, no Vepol" || fail "U2: default prompt still frames Vepol"
+HUB=$(new_hub focus-registry)
+write_codex "$HUB" "$CODEX_FULL" 0
+printf '%s\n' '| slug | status | path | description |' '|---|---|---|---|' \
+  '| alpha-shop | live | `projects/alpha-shop` | shop |' \
+  '| old-thing | archived | `projects/old-thing` | old |' \
+  '| beta-blog | live | `projects/beta-blog` | blog |' > "$HUB/registry.md"
+printf 'max_papers: 3\n' > "$HUB/personal/daily-research.yaml"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+P=$(prompt_of "$HUB")
+[[ "$P" == *"No focus project is configured"* && "$P" == *"active projects (from their registry): alpha-shop, beta-blog;"* \
+   && "$P" != *"old-thing"* && "$P" != *"(Vepol)"* ]] \
+  && ok "U2: no focus keys → generic framing naming live registry projects" \
+  || fail "U2: registry projects not named or Vepol framing kept"
+# An existing file seeded by older kb-daily-research runs ("focus_project:
+# auto") keeps the prompt those setups already get.
+HUB=$(new_hub focus-auto)
+write_codex "$HUB" "$CODEX_FULL" 0
+printf 'focus_project: auto\nmode: ai_agents_radar\n' > "$HUB/personal/daily-research.yaml"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+P=$(prompt_of "$HUB")
+[[ "$P" == *"(Vepol)."* && "$P" == *"Focus project: auto."* && "$P" != *"No focus project is configured"* ]] \
+  && ok "U2: seeded focus_project=auto keeps the existing framing" \
+  || fail "U2: seeded focus_project=auto changed the existing framing"
+HUB=$(new_hub focus-set)
+write_codex "$HUB" "$CODEX_FULL" 0
+printf 'focus_project: vepol\nfocus_context: shipping the morning audio\n' > "$HUB/personal/daily-research.yaml"
+run_runner "$HUB" "$FIXTURE5" >/dev/null 2>&1
+P=$(prompt_of "$HUB")
+[[ "$P" == *"(Vepol)."* && "$P" == *"Focus project: vepol."* && "$P" == *"Current focus: shipping the morning audio."* \
+   && "$P" != *"No focus project is configured"* ]] \
+  && ok "U2: configured focus keeps the project framing unchanged" || fail "U2: configured framing changed"
+why_template() { # hub → the degraded-mode "why" text for an agents paper
+  KB_HUB="$1" $PY - "$RUNNER" "$SRC_BIN" <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+sys.path.insert(0, sys.argv[2])
+loader = SourceFileLoader('arxwhy', sys.argv[1])
+spec = importlib.util.spec_from_loader('arxwhy', loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+print(mod.why_selected_text({'_groups': ['agents']}))
+PYEOF
+}
+W_NONE=$(why_template "$TMP/hub-focus-none")
+W_SET=$(why_template "$TMP/hub-focus-set")
+[[ -n "$W_NONE" && "$W_NONE" != *"Vepol"* && "$W_SET" == "напрямую про агентные системы — ядро Vepol." ]] \
+  && ok "U2: fallback 'why' is generic without a focus, unchanged with one" \
+  || fail "U2: fallback why wrong: none='$W_NONE' set='$W_SET'"
+
+echo "=== U3: Claude CLI lookup follows the shared contract ==="
+CB="$TMP/claude-lookup"; mkdir -p "$CB/env" "$CB/path" "$CB/home/.local/bin" "$CB/empty"
+for f in "$CB/env/claude" "$CB/path/claude" "$CB/home/.local/bin/claude"; do printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; done
+printf '#!/bin/sh\nexit 0\n' > "$CB/env/not-exec"
+claude_lookup() { # env assignments... → claude_bin()
+  env -i HOME="$CB/home" KB_HUB="$TMP/hub-focus-none" "$@" "$(command -v $PY)" - "$RUNNER" "$SRC_BIN" <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+sys.path.insert(0, sys.argv[2])
+loader = SourceFileLoader('arxclaude', sys.argv[1])
+spec = importlib.util.spec_from_loader('arxclaude', loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+print(mod.claude_bin())
+PYEOF
+}
+[[ "$(claude_lookup PATH="$CB/path" KB_CLAUDE_BIN="$CB/env/claude")" == "$CB/env/claude" ]] \
+  && ok "U3: KB_CLAUDE_BIN wins" || fail "U3: KB_CLAUDE_BIN ignored"
+[[ "$(claude_lookup PATH="$CB/path" KB_CLAUDE_BIN="$CB/env/not-exec")" == "$CB/path/claude" ]] \
+  && ok "U3: a non-executable KB_CLAUDE_BIN falls through to PATH" || fail "U3: non-executable override used"
+[[ "$(claude_lookup PATH="$CB/empty")" == "$CB/home/.local/bin/claude" ]] \
+  && ok "U3: launchd-style PATH still finds ~/.local/bin/claude" || fail "U3: ~/.local/bin fallback missing"
+EXPECT_NONE=claude
+for c in /opt/homebrew/bin/claude /usr/local/bin/claude; do
+  [[ -x "$c" ]] && { EXPECT_NONE="$c"; break; }
+done
+rm "$CB/home/.local/bin/claude"
+[[ "$(claude_lookup PATH="$CB/empty")" == "$EXPECT_NONE" ]] \
+  && ok "U3: then /opt/homebrew/bin, /usr/local/bin, else bare 'claude'" || fail "U3: final fallback wrong"
+
+echo "=== U4: kb-arxiv-notebooklm reads the snapshot kb-learning-arxiv writes ==="
+NB="$TMP/nb-fake"; mkdir -p "$NB"
+cat > "$NB/notebooklm" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$NB/calls.log"
+case "\$1 \${2:-}" in
+  "list --json") echo '{"notebooks": []}' ;;
+  "create "*) echo '{"id": "nb-1"}' ;;
+  "source add") echo '{"source_id": "src-1"}' ;;
+  "source wait") echo '{"status": "ready"}' ;;
+  "generate audio") echo '{"artifact_id": "art-1"}' ;;
+  *) echo '{}' ;;
+esac
+EOF
+chmod +x "$NB/notebooklm"
+HUB="$TMP/hub-select"
+KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$NB/notebooklm" $PY "$SRC_BIN/kb-arxiv-notebooklm" --date "$TODAY" >/dev/null 2>&1
+RC=$?
+PACKET="$HUB/reports/arxiv-ai-research-notebooklm-brief-$TODAY.md"
+[[ "$RC" == "0" ]] && grep -q "Agentic Planning with Tool Use" "$PACKET" 2>/dev/null \
+  && grep -q "^source add $PACKET" "$NB/calls.log" \
+  && ok "U4: learning snapshot becomes the NotebookLM packet" || fail "U4: rc=$RC or packet missing"
+EMPTY_HUB=$(new_hub nb-no-snapshot)
+ERR=$(KB_HUB="$EMPTY_HUB" KB_NOTEBOOKLM_BIN="$NB/notebooklm" $PY "$SRC_BIN/kb-arxiv-notebooklm" --date "$TODAY" 2>&1 >/dev/null)
+RC=$?
+[[ "$RC" == "2" && "$ERR" == *"arxiv-learning-snapshot-$TODAY.md is missing"* && "$ERR" == *"kb-learning-arxiv"* ]] \
+  && ok "U4: a missing snapshot fails with one clear message" || fail "U4: rc=$RC err=$ERR"
 
 echo
 echo "=== kb-learning-arxiv tests: $PASS passed, $FAIL failed ==="

@@ -11,6 +11,14 @@
 set -uo pipefail
 PASS=0; FAIL=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SRC_BIN="${KB_DIGEST_SRC_BIN:-$HOME/knowledge/bin}"
 ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
@@ -60,19 +68,28 @@ PROMPT=$(run_prompt)
 if [[ -z "$PROMPT" ]]; then
   fail "v0.5.1 AC1: kb-retro prompt-only produced no output"
 else
-  [[ "$PROMPT" == *"утренний бриф — это план"* \
-     && "$PROMPT" == *"исторический контекст"* ]] \
+  [[ "$PROMPT" == *"the morning brief is the plan"* \
+     && "$PROMPT" == *"historical context"* ]] \
     && ok "v0.5.1 AC1: prompt frames the morning brief as plan/history" \
     || fail "v0.5.1 AC1: prompt does not frame the morning brief as plan/history"
-  [[ "$PROMPT" == *"Текущее состояние почты бери только из вечернего"* \
-     && "$PROMPT" == *"вечерние блоки побеждают утренний бриф"* ]] \
+  [[ "$PROMPT" == *"Take the current mail state only from the evening"* \
+     && "$PROMPT" == *"the evening blocks win over the morning brief"* ]] \
     && ok "v0.5.1 AC1: prompt gives evening mail/current-state precedence" \
     || fail "v0.5.1 AC1: prompt lacks evening mail/current-state precedence"
-  [[ "$PROMPT" == *"Не смешивай отсутствие daily-inbox"* \
-     && "$PROMPT" == *"не поломка mail briefing"* ]] \
+  [[ "$PROMPT" == *"Do not confuse a missing daily-inbox"* \
+     && "$PROMPT" == *"not a mail briefing failure"* ]] \
     && ok "v0.5.1 source-health: daily-inbox gaps are not mail-briefing breakage" \
     || fail "v0.5.1 source-health: prompt can still label daily-inbox gaps as mail breakage"
+  [[ "$PROMPT" == *"✅ Closed today"* && "$PROMPT" == *"☀️ Brief reflection:"* ]] \
+    && ok "language: en prompt carries the English section samples" \
+    || fail "language: en prompt lacks the English section samples"
 fi
+# A ru user keeps the existing Russian section names (ru table entries).
+RU_PROMPT=$(KB_LANG=ru run_prompt)
+[[ "$RU_PROMPT" == *"✅ Что закрыто сегодня"* && "$RU_PROMPT" == *"☀️ Брифинг-рефлексия:"* \
+   && "$RU_PROMPT" == *"на что не ответил / что ждёт"* ]] \
+  && ok "language: ru prompt keeps the Russian section samples" \
+  || fail "language: ru prompt lost the Russian section samples"
 
 # ── AC1: retro section appended to the day file ──────────────────────────────
 day_file
@@ -140,6 +157,48 @@ if awk 'NR==1&&$0=="---"{fm=1;next} fm&&$0=="---"{exit 0} fm&&index($0,"delivery
 else
   fail "AC1: minimal day file fabricated a brief delivery key"
 fi
+
+# ── .secrets is data, never shell code ──────────────────────────────────────
+# An unquoted value with a space (as a user would type it) must not run "Doe"
+# as a command and abort the retro.
+printf 'USER_NAME=Jane Doe\nUSER_CITY=New York\nTELEGRAM_BOT_TOKEN=\nTELEGRAM_CHAT_ID=\n' > "$HUB/personal/.secrets"
+PROMPT=$(env -u USER_NAME -u USER_CITY KB_HUB="$HUB" KB_RETRO_PROMPT_ONLY=1 "$SRC_BIN/kb-retro" 2>/dev/null); RC=$?
+[[ $RC -eq 0 && "$PROMPT" == *"for Jane Doe"* && "$PROMPT" == *", New York"* ]] \
+  && ok "secrets: unquoted 'USER_NAME=Jane Doe' is read as data" \
+  || fail "secrets: retro aborted or lost the name (rc=$RC)"
+
+# ── Telegram not configured: saved, not delivered, not an error ─────────────
+# Real typed sender, installer's empty values; the API base is a closed port,
+# so any send attempt would fail the run instead of exiting 0.
+day_file
+OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$HUB" \
+  KB_TG_API_BASE=http://127.0.0.1:9 "$SRC_BIN/kb-retro" 2>/dev/null); RC=$?
+DAYF="$HUB/briefs/$TODAY.md"
+[[ $RC -eq 0 ]] && ok "no telegram: retro exits 0 (after:retro still runs)" || fail "no telegram: rc=$RC"
+grep -q 'canned-retro-marker' "$DAYF" && ok "no telegram: retro saved in the day file" \
+  || fail "no telegram: retro not saved"
+grep -q '^retro_delivery: not_configured$' "$DAYF" && ok "no telegram: retro_delivery: not_configured" \
+  || fail "no telegram: delivery state=$(grep '^retro_delivery' "$DAYF")"
+[[ $(grep -c 'telegram not configured, not delivered' "$HUB/logs/retro.log") == "1" ]] \
+  && ok "no telegram: one log line" || fail "no telegram: log lines=$(grep -c 'not configured' "$HUB/logs/retro.log")"
+[[ "$OUT" == "retro saved to $DAYF (not delivered: telegram not configured)" ]] \
+  && ok "no telegram: prints the saved path" || fail "no telegram: output=$OUT"
+
+# ── The Telegram token from .secrets never reaches the model run ──────────────
+# The old retro sourced .secrets without exporting plain lines; reading it as
+# data must not start exporting the token to the orchestrator (an agent with
+# tool access) either. Only the sender gets it.
+EHUB="$TMP/env-hub"; mkdir -p "$EHUB/personal" "$EHUB/bin" "$EHUB/briefs" "$EHUB/logs"
+printf 'TELEGRAM_BOT_TOKEN=tok-model-must-not-see\nTELEGRAM_CHAT_ID=42\n' > "$EHUB/personal/.secrets"
+printf '#!/bin/sh\nenv > "%s/orch-env"\nprintf -- "---RETRO---\\nenv-check\\n---REFLECTION---\\nok\\n"\n' "$EHUB" \
+  > "$EHUB/bin/kb-orchestrator-run"
+chmod +x "$EHUB/bin/kb-orchestrator-run"
+printf '#!/bin/sh\nexit 1\n' > "$EHUB/bin/kb-mail-block"; chmod +x "$EHUB/bin/kb-mail-block"
+env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$EHUB" KB_RETRO_DRY=1 \
+  "$SRC_BIN/kb-retro" >/dev/null 2>&1; RC=$?
+[[ $RC -eq 0 && -s "$EHUB/orch-env" ]] && ! grep -q 'tok-model-must-not-see' "$EHUB/orch-env" \
+  && ok "secrets: the bot token is not in the model run's environment" \
+  || fail "secrets: model env check rc=$RC ($(grep -c 'tok-model' "$EHUB/orch-env" 2>/dev/null) hits)"
 
 echo "PASS=$PASS FAIL=$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

@@ -68,6 +68,7 @@ LABELS = {
 }
 
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# The Russian alternative matches state.md pages written from older Russian templates.
 LAST_UPDATED_RE = re.compile(r"^##\s+(Last Updated|Последнее обновление)\b", re.IGNORECASE)
 LOG_HEAD_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})")
 SENTENCE_END = ".!?…"
@@ -166,8 +167,8 @@ def _lines(text):
 
 
 def state_date(lines, path):
-    """First YYYY-MM-DD under `## Last Updated` / `## Последнее обновление`,
-    else the file's mtime date."""
+    """First YYYY-MM-DD under `## Last Updated` (or its legacy Russian form,
+    see LAST_UPDATED_RE), else the file's mtime date."""
     for i, ln in enumerate(lines):
         if LAST_UPDATED_RE.match(ln):
             m = DATE_RE.search(ln[ln.find(" ") + 1:])

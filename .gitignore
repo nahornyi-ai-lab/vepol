@@ -19,6 +19,12 @@ __pycache__/
 # Installer log (per-user)
 install.log
 
+# Run output from older `kb-demo` versions, which used demo/knowledge in place
+# (kb-demo now works on a private copy in ~/.vepol/demo-knowledge)
+demo/knowledge/briefs/
+demo/knowledge/logs/
+demo/knowledge/.orchestrator/
+
 # Rendered (non-template) launchd plists — only .template versions in repo
 launchd/com.vepol.*.plist
 launchd/com.knowledge.*.plist

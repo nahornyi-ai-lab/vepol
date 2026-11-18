@@ -54,6 +54,15 @@ def main() -> int:
         else:
             print(f"kb-board: {exc}", file=sys.stderr)
         return 1
+    except FileNotFoundError as exc:
+        # A board path that does not exist (e.g. `kb-task --project <slug>` for a project
+        # without knowledge/backlog.md): one clear line instead of a traceback.
+        missing = exc.filename or "board file"
+        if _JSON_OUT:
+            print(json.dumps({"ok": False, "code": "ENOENT", "message": f"board not found: {missing}"}, ensure_ascii=False, indent=2))
+        else:
+            print(f"kb-board: board not found: {missing}", file=sys.stderr)
+        return 1
 
 
 def _main() -> int:
@@ -265,6 +274,7 @@ def _main() -> int:
                     "title": task.title,
                     "claim_owner": task.fields.get("claim_owner"),
                     "claim_id": task.fields.get("claim_id"),
+                    "priority": task.fields.get("priority"),
                     "content_hash": content_hash(task),
                 })
             if args.json_out:

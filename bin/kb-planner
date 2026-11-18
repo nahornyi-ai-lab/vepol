@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Runs once per day (via launchd at 00:05). Fetches today's sunrise/sunset
-for the user's location and writes today-plan.json for kb-tick to consume.
+"""Runs once per day (via launchd at 00:05, and from kb-tick whenever the plan
+is missing or not for today). Writes today-plan.json for kb-tick to consume.
 
-Geolocation chain:
-  1. macOS CoreLocationCLI (accurate under VPN/roaming). Requires Location Services permission.
-  2. ip-api.com (fallback; can be wrong under VPN).
-  3. Environment fallback constants: KB_FALLBACK_LAT, KB_FALLBACK_LON, KB_FALLBACK_TZ.
-  4. Hard-coded defaults (0.0, 0.0, UTC) — will produce nonsense sun times; set fallbacks in .secrets.
+kb-tick reads only `date` and the per-process `*_fired` flags from the plan; the
+times below are informational. So the planner must never block the day: every
+lookup is optional, every failure is logged and replaced by a default, and
+today's plan is always written (a stale plan would keep yesterday's fired flags
+and nothing would run today).
+
+Geolocation chain (first that works):
+  1. macOS CoreLocationCLI (accurate under VPN/roaming; needs Location Services).
+  2. KB_FALLBACK_LAT / KB_FALLBACK_LON / KB_FALLBACK_TZ from the environment or
+     personal/.secrets.
+  3. ip-api.com, only when nothing above is available: it is plain HTTP (the
+     free tier has no HTTPS) and can be wrong under VPN.
+  4. No location: the sun lookup is skipped and default times are used.
 
 Timing:
   brief time = fixed KB_BRIEF_HM (default 07:00 local; owner decision 2026-09-28:
                Health data is built at 06:50 and must be ready before the brief)
-  retro time = sunset + 15min
+  retro time = sunset + 15min (sunset from api.sunrise-sunset.org; default 20:30)
+  tz         = CoreLocation's zone, else KB_FALLBACK_TZ, else KB_TZ or the Mac's
+               own zone (/etc/localtime), else UTC
 """
 from __future__ import annotations  # keep PEP 604 (tuple[...] | None) working on stock macOS python3 (3.9)
 import datetime
@@ -20,11 +30,16 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import urllib.request
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 PLAN_PATH = HUB / "logs" / "today-plan.json"
 LOG_PATH = HUB / "logs" / "planner.log"
+
+# Used when a lookup fails or no location is known (not read by kb-tick).
+DEFAULT_SUNRISE_HM = "07:00"
+DEFAULT_SUNSET_HM = "20:30"
 
 
 def _load_secrets() -> None:
@@ -33,9 +48,11 @@ def _load_secrets() -> None:
     this bridges the gap so KB_FALLBACK_* (and future personalization vars) work
     in the automated path, not only when a user sources .secrets manually."""
     secrets = HUB / "personal" / ".secrets"
-    if not secrets.exists():
+    try:
+        text = secrets.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return
-    for raw in secrets.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -54,9 +71,29 @@ def _load_secrets() -> None:
 
 _load_secrets()
 
-FALLBACK_LAT = float(os.environ.get("KB_FALLBACK_LAT", "0.0"))
-FALLBACK_LON = float(os.environ.get("KB_FALLBACK_LON", "0.0"))
-FALLBACK_TZ = os.environ.get("KB_FALLBACK_TZ", "UTC")
+
+def _float_env(name: str) -> float | None:
+    """A coordinate from the environment; empty (the installer's template) or
+    malformed means "not set"."""
+    try:
+        return float(os.environ.get(name, "").strip())
+    except ValueError:
+        return None
+
+
+def _local_tz_name() -> str:
+    """KB_TZ, else the Mac's own zone, else UTC (shared with kb-agenda)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        from _kb_calendar.dateparse import local_tz_name
+        return local_tz_name()
+    except Exception:  # noqa: BLE001 - the plan must still be written
+        return "UTC"
+
+
+FALLBACK_LAT = _float_env("KB_FALLBACK_LAT")
+FALLBACK_LON = _float_env("KB_FALLBACK_LON")
+FALLBACK_TZ = os.environ.get("KB_FALLBACK_TZ", "").strip() or _local_tz_name()
 
 
 def log(msg: str) -> None:
@@ -84,27 +121,42 @@ def _geo_corelocation() -> tuple[float, float, str] | None:
         return None
 
 
+def _geo_fallback() -> tuple[float, float, str] | None:
+    if FALLBACK_LAT is None or FALLBACK_LON is None:
+        return None
+    return FALLBACK_LAT, FALLBACK_LON, FALLBACK_TZ
+
+
 def _geo_ipapi() -> tuple[float, float, str] | None:
+    # Last resort only: ip-api.com's free tier is plain HTTP, so the request
+    # (and the IP-derived location) is visible on the network.
     try:
         with urllib.request.urlopen(
             "http://ip-api.com/json/?fields=lat,lon,timezone,status", timeout=5
         ) as r:
             d = json.load(r)
         if d.get("status") == "success":
-            return d["lat"], d["lon"], d["timezone"]
+            return float(d["lat"]), float(d["lon"]), d.get("timezone") or FALLBACK_TZ
     except Exception as e:
         log(f"ip-api failed: {e}")
     return None
 
 
 def geo() -> tuple[float, float, str]:
-    for source, fn in (("corelocation", _geo_corelocation), ("ip-api", _geo_ipapi)):
-        result = fn()
+    sources = (("corelocation", _geo_corelocation), ("fallback", _geo_fallback),
+               ("ip-api", _geo_ipapi))
+    for source, fn in sources:
+        try:
+            result = fn()
+        except Exception as e:  # noqa: BLE001 - a lookup must never block the plan
+            log(f"geo source={source} error: {e}")
+            result = None
         if result is not None:
             log(f"geo source={source} lat={result[0]} lon={result[1]} tz={result[2]}")
             return result
-    log(f"geo: all sources failed, using fallback ({FALLBACK_LAT},{FALLBACK_LON} {FALLBACK_TZ})")
-    return FALLBACK_LAT, FALLBACK_LON, FALLBACK_TZ
+    log(f"geo: no location (no CoreLocationCLI, no KB_FALLBACK_LAT/LON, ip-api failed); "
+        f"default times, tz={FALLBACK_TZ}")
+    return 0.0, 0.0, FALLBACK_TZ
 
 
 def _day_frontmatter(text: str) -> dict[str, str]:
@@ -160,25 +212,50 @@ def sun_times(lat: float, lon: float, tz: str, date: str) -> tuple[datetime.date
     return sunrise, sunset
 
 
+def _hm(value: str, default: str) -> str:
+    """A valid HH:MM, else the default."""
+    try:
+        h, m = (int(x) for x in str(value).split(":"))
+        return datetime.time(h, m).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return default
+
+
 def main() -> None:
     today = datetime.date.today().isoformat()
-    lat, lon, tz = geo()
-    sunrise, sunset = sun_times(lat, lon, tz, today)
-    brief_h, brief_m = (int(x) for x in os.environ.get("KB_BRIEF_HM", "07:00").split(":"))
-    brief = sunrise.replace(hour=brief_h, minute=brief_m, second=0, microsecond=0)
-    retro = sunset + datetime.timedelta(minutes=15)
+    try:
+        lat, lon, tz = geo()
+    except Exception as e:  # noqa: BLE001 - never block the day
+        log(f"geo failed: {e}; default times")
+        lat, lon, tz = 0.0, 0.0, FALLBACK_TZ
+    sunrise_hm, sunset_hm = DEFAULT_SUNRISE_HM, DEFAULT_SUNSET_HM
+    if (lat, lon) != (0.0, 0.0):
+        try:
+            sunrise, sunset = sun_times(lat, lon, tz, today)
+            sunrise_hm = sunrise.strftime("%H:%M")
+            sunset_hm = sunset.strftime("%H:%M")
+        except Exception as e:  # noqa: BLE001 - network/API errors: default times
+            log(f"sun times lookup failed: {e}; default sunrise {sunrise_hm}, sunset {sunset_hm}")
+    brief_hm = _hm(os.environ.get("KB_BRIEF_HM", "07:00"), "07:00")
+    sh, sm = (int(x) for x in sunset_hm.split(":"))
+    retro_hm = (datetime.datetime.combine(datetime.date.today(), datetime.time(sh, sm))
+                + datetime.timedelta(minutes=15)).strftime("%H:%M")
     # D11: on (late) regeneration, fired state comes from verified delivery
     # evidence — never `now > planned time` (the clock heuristic silently
     # swallowed the brief whenever the plan regenerated after brief time).
-    brief_fired, retro_fired = _delivery_evidence(today)
+    try:
+        brief_fired, retro_fired = _delivery_evidence(today)
+    except Exception as e:  # noqa: BLE001 - unreadable evidence: let the routines check
+        log(f"delivery evidence unreadable: {e}; brief/retro re-check their day file")
+        brief_fired, retro_fired = False, False
     plan = {
         "date": today,
-        "brief_hm": brief.strftime("%H:%M"),
-        "retro_hm": retro.strftime("%H:%M"),
+        "brief_hm": brief_hm,
+        "retro_hm": retro_hm,
         "brief_fired": brief_fired,
         "retro_fired": retro_fired,
-        "sunrise": sunrise.strftime("%H:%M"),
-        "sunset": sunset.strftime("%H:%M"),
+        "sunrise": sunrise_hm,
+        "sunset": sunset_hm,
         "lat": lat,
         "lon": lon,
         "tz": tz,

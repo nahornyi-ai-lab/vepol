@@ -70,6 +70,7 @@ class GroupContextTests(unittest.TestCase):
         self.assertIn("(no recent messages)", ctx)
 
     def test_single_event_formatted(self) -> None:
+        # Cyrillic on purpose: Russian group messages must pass through verbatim.
         e = _make_event(1, "статус релиза?", username="demo")
         ctx = format_group_context([e], "demo_vepol_bot")
         self.assertIn("@demo", ctx)
@@ -78,24 +79,24 @@ class GroupContextTests(unittest.TestCase):
     def test_mentions_marked_for_target(self) -> None:
         # Target bot is demo_vepol_bot — mentions should mark
         e = _make_event(
-            1, "@demo_vepol_bot статус?", mentions=("demo_vepol_bot",)
+            1, "@demo_vepol_bot status?", mentions=("demo_vepol_bot",)
         )
         ctx = format_group_context([e], "demo_vepol_bot")
         self.assertIn("[YOU MENTIONED]", ctx)
 
     def test_mentions_not_marked_for_other(self) -> None:
-        e = _make_event(1, "@kb_mail_bot привет", mentions=("kb_mail_bot",))
+        e = _make_event(1, "@kb_mail_bot hi", mentions=("kb_mail_bot",))
         ctx = format_group_context([e], "demo_vepol_bot")
         self.assertNotIn("[YOU MENTIONED]", ctx)
 
     def test_reply_marker_present(self) -> None:
-        e = _make_event(2, "ок", reply_to=1)
+        e = _make_event(2, "ok", reply_to=1)
         ctx = format_group_context([e], "demo_vepol_bot")
         self.assertIn("reply→msg:1", ctx)
 
     def test_bot_sender_labeled(self) -> None:
         e = _make_event(
-            1, "v0.3.2 готов", is_bot=True, bot_slug="vepol", username="demo_vepol_bot"
+            1, "v0.3.2 is ready", is_bot=True, bot_slug="vepol", username="demo_vepol_bot"
         )
         ctx = format_group_context([e], "demo_vepol_bot")
         self.assertIn("bot:vepol", ctx)
@@ -133,14 +134,14 @@ class ChildrenBlockTests(unittest.TestCase):
 class AssembleSpawnPromptTests(unittest.TestCase):
     def test_includes_all_sections(self) -> None:
         agent = _spec("vepol", persona="Vepol orchestrator")
-        event = _make_event(1, "статус?", mentions=("demo_vepol_bot",))
+        event = _make_event(1, "status?", mentions=("demo_vepol_bot",))
         prompt = assemble_spawn_prompt(
             agent=agent,
             trigger_username="demo",
             trigger_chat_type="group",
             recent_events=[event],
             children=[],
-            trigger_text="статус?",
+            trigger_text="status?",
         )
         # Header
         self.assertIn("vepol", prompt)
@@ -181,7 +182,7 @@ class AssembleSpawnPromptTests(unittest.TestCase):
             trigger_chat_type="group",
             recent_events=[],
             children=children,
-            trigger_text="х",
+            trigger_text="x",
         )
         self.assertIn("demo_vepol_marketing_bot", prompt)
         self.assertIn("delegate", prompt.lower())
@@ -194,7 +195,7 @@ class AssembleSpawnPromptTests(unittest.TestCase):
             trigger_chat_type="group",
             recent_events=[],
             children=[],
-            trigger_text="х",
+            trigger_text="x",
         )
         # No children section
         self.assertNotIn("delegate", prompt.lower())

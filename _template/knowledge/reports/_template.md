@@ -32,24 +32,24 @@ status: pending
 run_id: <uuid>
 ---
 
-## Что сделано сегодня
+## What was done today
 
-- <bullet, ref на backlog:lineno или log entry>
+- <bullet, ref to backlog:lineno or a log entry>
 
-## Что было в плане
+## What was planned
 
-- <из daily-plan/<YYYY-MM-DD>.md или top-down плана от parent>
+- <from ~/knowledge/daily-plan/<YYYY-MM-DD>.md or the top-down plan from the parent>
 
-## Дельта (план − факт)
+## Delta (plan − actual)
 
 - closed: N
-- dropped: <slug>:<title> — <причина>
-- carried: <slug>:<title> — <когда>
+- dropped: <slug>:<title> — <reason>
+- carried: <slug>:<title> — <when>
 
-## Candidates (что можно сделать завтра)
+## Candidates (what could be done tomorrow)
 
-- [ ] <задача> — P0|P1|P2 — auto: true|false — <обоснование>
+- [ ] <task> — P0|P1|P2 — auto: true|false — <rationale>
 
-## Escalations (наверх)
+## Escalations (upward)
 
-- <блокер> — требует: <parent-slug|owner|external>
+- <blocker> — needs: <parent-slug|owner|external>

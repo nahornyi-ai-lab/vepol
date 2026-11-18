@@ -8,13 +8,13 @@ description: ""
 
 # {{PROJECT_NAME}}
 
-_(1–2 предложения: что это, для кого, в каком статусе)_
+_(1–2 sentences: what it is, who it is for, what status it is in)_
 
-**Статус:** seeded
-**Категория:** {{CATEGORY}}
-**Создано:** {{DATE}}
+**Status:** seeded
+**Category:** {{CATEGORY}}
+**Created:** {{DATE}}
 
-> Полный каталог — [index.md](index.md). Текущее состояние — [state.md](state.md). Хронология — [log.md](log.md).
+> Full catalog: [index.md](index.md). Current state: [state.md](state.md). Timeline: [log.md](log.md).
 
 <!--
 The frontmatter (slug/parent/category/status/description) is "managed" by

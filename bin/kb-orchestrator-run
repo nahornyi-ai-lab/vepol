@@ -11,9 +11,21 @@ Default provider order: codex,claude. Codex is primary for routine text work
 (briefings, retros, routing), Claude is the fallback + dev-agent. Override via
 KB_ORCHESTRATOR_BACKENDS env or --backend.
 
+Binaries: codex via _kb_codex.codex_bin (KB_CODEX_BIN, ~/.local/bin, PATH,
+Homebrew/npm), claude via _kb_claude_runner.claude_bin (KB_CLAUDE_BIN, PATH,
+~/.local/bin, Homebrew/npm). Models: no --model/-m flag unless CLAUDE_MODEL /
+CODEX_MODEL is set, so each CLI uses the account's default model.
+
+Permissions: the Claude lane is read-only unless the caller passes --allow-edits
+(it denies Bash, Edit, Write and NotebookEdit, even where the user's own Claude
+Code settings allow them). With --allow-edits it auto-accepts file edits in
+--cwd and the --add-dir folders and allows every shell command. The Codex lane
+always runs with approvals and the sandbox bypassed, with or without the flag.
+
 Usage:
   kb-orchestrator-run "prompt text"
   kb-orchestrator-run --backend auto --cwd /path/to/project --resume-key project:<slug> "..."
+  kb-orchestrator-run --allow-edits --cwd /path/to/project/knowledge "write the report"
   printf 'prompt' | kb-orchestrator-run -
 
 Spec: ~/knowledge/concepts/orchestrator-failover.md
@@ -36,7 +48,7 @@ import uuid
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-from _kb_claude_runner import run_command as run_unbounded_command
+from _kb_claude_runner import claude_bin, run_command as run_unbounded_command
 from _kb_codex import CodexUnavailable, codex_bin
 from _kb_failure_reason import failure_reason
 
@@ -51,9 +63,12 @@ DEFAULT_BACKENDS = [
     for part in os.environ.get("KB_ORCHESTRATOR_BACKENDS", "codex,claude").split(",")
     if part.strip()
 ]
-DEFAULT_CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
+# Empty = no --model flag: Claude Code then uses the account's default model.
+DEFAULT_CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "").strip()
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_MODEL", "")
 DEFAULT_TIMEOUT = int(os.environ.get("KB_ORCHESTRATOR_TIMEOUT", "600"))
+# Tools a Claude run without --allow-edits may not use: the ones that change files or run commands.
+CLAUDE_READ_ONLY_DENIED_TOOLS = "Bash,Edit,Write,NotebookEdit"
 
 
 # --- Failure classification ------------------------------------------------
@@ -346,10 +361,11 @@ def classify_stderr(provider: str, stderr: str, returncode: int = 0) -> str:
     """Return one of 8 categories: 'ok' | 'rate_limit' | 'auth' | 'network' |
     'timeout' | 'code_error' | 'crash' | 'other'.
 
-    Phase 1a contract (CR2-B5): plan circuit-breaker зависит от per-category.
-    Caller для timeout-cases должен передавать category напрямую (`timeout` не
-    detect'ится из stderr — он ловится при `subprocess.TimeoutExpired`).
-    `crash` определяется через returncode < 0 (signal-killed на Unix).
+    Phase 1a contract (CR2-B5): the plan circuit-breaker depends on the
+    per-category result. For timeout cases the caller must pass the category
+    directly (`timeout` is not detected from stderr — it is caught on
+    `subprocess.TimeoutExpired`).
+    `crash` is determined by returncode < 0 (signal-killed on Unix).
     """
     if returncode == 0:
         return "ok"
@@ -447,8 +463,23 @@ def build_claude_command(
     add_dirs: list[str],
     session: dict,
     resume_key: str | None,
+    allow_edits: bool = False,
 ) -> list[str]:
-    cmd = ["claude", "-p", prompt, "--model", DEFAULT_CLAUDE_MODEL]
+    # The prompt goes right after -p: --allowedTools, --disallowedTools and --add-dir take a
+    # list of values, so a prompt placed after one of them would be read as another value.
+    cmd = [claude_bin(), "-p", prompt]
+    if allow_edits:
+        # The caller asked for --allow-edits: auto-accept file edits in --cwd and the --add-dir
+        # folders, and allow shell commands. A bare Bash rule allows every command, in any
+        # folder; it is not limited to --cwd.
+        cmd.extend(["--permission-mode", "acceptEdits", "--allowedTools", "Bash"])
+    else:
+        # Read-only by default. Deny rules win over allow rules, so this holds even when the
+        # user's ~/.claude/settings.json allows these tools. The brief and the retro run here:
+        # their prompts carry untrusted mail and calendar text and they only print an answer.
+        cmd.extend(["--disallowedTools", CLAUDE_READ_ONLY_DENIED_TOOLS])
+    if DEFAULT_CLAUDE_MODEL:
+        cmd.extend(["--model", DEFAULT_CLAUDE_MODEL])
     for path in add_dirs:
         cmd.extend(["--add-dir", path])
     if resume_key:
@@ -468,8 +499,9 @@ def run_claude(
     session: dict,
     resume_key: str | None,
     timeout: int,
+    allow_edits: bool = False,
 ) -> RunResult:
-    cmd = build_claude_command(prompt, add_dirs, session, resume_key)
+    cmd = build_claude_command(prompt, add_dirs, session, resume_key, allow_edits)
     try:
         # Owner contract: --timeout remains a Codex-lane SLA only. Claude is
         # owned by the detached durable worker and always waits for natural exit.
@@ -533,6 +565,9 @@ def build_codex_command(
     binary = codex_bin()
     resuming = bool(resume_key and session.get("codex_session_id"))
     base = [binary, "exec", "resume", session["codex_session_id"]] if resuming else [binary, "exec"]
+    # Every Codex run bypasses approvals and the sandbox, so it can edit files and run any
+    # command whether or not the caller passed --allow-edits (that flag only changes the
+    # Claude lane).
     cmd = base + [
         prompt,
         "--skip-git-repo-check",
@@ -655,7 +690,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("prompt", nargs="?", help="Prompt text, or '-' to read from stdin")
     parser.add_argument("--backend", choices=["auto", "claude", "codex"], default="auto")
     parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for the run")
-    parser.add_argument("--add-dir", action="append", default=[], help="Additional trusted/writable directory")
+    parser.add_argument("--add-dir", action="append", default=[],
+                        help="Additional trusted directory (writable by Claude only with --allow-edits)")
+    parser.add_argument(
+        "--allow-edits",
+        action="store_true",
+        help="Claude lane: auto-accept file edits and allow shell commands "
+             "(--permission-mode acceptEdits --allowedTools Bash). Without it the Claude lane is "
+             f"read-only (--disallowedTools {CLAUDE_READ_ONLY_DENIED_TOOLS}). The Codex lane always "
+             "runs with approvals and the sandbox bypassed.",
+    )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-provider timeout in seconds")
     parser.add_argument("--resume-key", help="Stable logical session key for repeated runs")
     parser.add_argument("--fresh", action="store_true", help="Drop stored session mapping for --resume-key")
@@ -785,7 +829,8 @@ def main() -> int:
 
         verbose(args.verbose, f"[kb-orchestrator-run] try {provider} (cwd={cwd})")
         if provider == "claude":
-            result = run_claude(prompt, cwd, add_dirs, session, args.resume_key, args.timeout)
+            result = run_claude(prompt, cwd, add_dirs, session, args.resume_key, args.timeout,
+                                args.allow_edits)
         elif provider == "codex":
             result = run_codex(prompt, cwd, add_dirs, session, args.resume_key, args.timeout)
         else:

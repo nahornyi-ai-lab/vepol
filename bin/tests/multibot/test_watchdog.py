@@ -23,6 +23,14 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(wr.last_stdout_ts, 1000.0)
         self.assertEqual(wr.started_at, 1000.0)
 
+    def test_placeholder_pid_rejected(self) -> None:
+        # pid -1 or 0 would turn a watchdog kill into a broadcast signal.
+        wd = Watchdog()
+        for pid in (-1, 0, None, True):
+            with self.subTest(pid=pid), self.assertRaises(ValueError):
+                wd.add("abc", "vepol", pid=pid, now=0.0)
+        self.assertEqual(len(wd), 0)
+
     def test_contains_and_len(self) -> None:
         wd = Watchdog()
         self.assertNotIn("abc", wd)

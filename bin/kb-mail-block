@@ -9,13 +9,16 @@ verbatim; they never touch Gmail and never persist raw mail.
 
 If the same-day envelope is missing, invalid, or available:false, it prints a
 short controlled freshness note (our own text, not wrapped) so the brief proceeds
-without mail instead of failing.
+without mail instead of failing. Until a mail read has succeeded at least once on
+this hub, mail counts as not set up and the note says to leave mail out, so a
+user without mail never sees a daily "mail could not be checked" risk.
 
 Usage: kb-mail-block --period morning|evening [--day YYYY-MM-DD]
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -25,6 +28,7 @@ from datetime import date, datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from _kb_mail import read_same_day_envelope, wrap_untrusted  # noqa: E402
+from _kb_mail.envelope import mail_dir  # noqa: E402
 from _kb_mail.untrusted import DATA_NOT_INSTRUCTIONS  # noqa: E402
 from _kb_profile import get_language  # noqa: E402
 
@@ -35,9 +39,34 @@ def _today() -> str:
         return datetime.fromisoformat(override).date().isoformat()
     try:
         from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo(os.environ.get("KB_TZ", "Europe/Madrid"))).date().isoformat()
+        from _kb_calendar.dateparse import local_tz_name  # KB_TZ, else the Mac's zone
+        return datetime.now(ZoneInfo(local_tz_name())).date().isoformat()
     except Exception:
         return datetime.now().date().isoformat()
+
+
+def _mail_has_worked(hub: pathlib.Path) -> bool:
+    """True once a mail read has succeeded on this hub. kb-mail-brief writes
+    watermarks.json only after a successful read and keeps every period's
+    envelope, so either one is the evidence. Before that, mail was never set up
+    (no Codex, or its Gmail plugin not connected) and a failed read is not news
+    for the brief or retro."""
+    try:
+        marks = json.loads((mail_dir(hub) / "watermarks.json").read_text(encoding="utf-8"))
+        if isinstance(marks, dict) and any(marks.values()):
+            return True
+    except Exception:  # noqa: BLE001 - missing or corrupt: look at the envelopes
+        pass
+    try:
+        for path in (mail_dir(hub) / "briefs").glob("*.json"):
+            try:
+                if json.loads(path.read_text(encoding="utf-8")).get("available") is True:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    except OSError:
+        pass
+    return False
 
 
 # One plain sentence per fixed reason code of the unavailable envelope. The code
@@ -53,6 +82,9 @@ _REASON_SENTENCES = {
     "network": "Reason: the network was unreachable while reading mail.",
     "timeout": "Reason: reading mail timed out.",
     "disabled": "Reason: mail reading is switched off in settings.",
+    "unavailable": "Reason: the mail reader (Codex) is not available on this "
+                   "Mac; install Codex and connect its Gmail plugin, or set "
+                   "KB_CODEX_BIN to the codex executable.",
 }
 _REASON_OTHER = "Reason: the mail read failed and the cause was not identified."
 _MAX_STREAK = 30
@@ -94,6 +126,13 @@ def main() -> int:
     day = args.day or _today()
     env = read_same_day_envelope(args.period, day, hub)
     language = get_language(hub)
+
+    if (env is None or not env.get("available")) and not _mail_has_worked(hub):
+        # Mail was never set up on this hub: no problem to report, every day.
+        print(f"MAIL ({args.period}): mail is not set up (it has never been read "
+              f"successfully). Leave mail out entirely: no mail section, no "
+              f"risk, no quiet word.")
+        return 0
 
     if env is None or not env.get("available"):
         reason = ""

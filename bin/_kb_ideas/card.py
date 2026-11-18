@@ -14,6 +14,11 @@ import frontmatter
 
 from .locks import ideas_lock
 
+try:
+    import _kb_profile  # bin/ is on sys.path whenever _kb_ideas is importable
+except Exception:  # pragma: no cover - profile module optional
+    _kb_profile = None
+
 STATUS_ACTIVE = {"captured", "triage", "critique", "ready", "promoted"}
 STATUS_PARKED = {"parked"}
 STATUS_TERMINAL = {"killed", "merged", "done"}
@@ -103,7 +108,7 @@ def triage(
         post.content = _replace_section(
             post.content,
             "Dedupe",
-            "Checked against current idea cards during triage. No duplicate selected.",
+            _dedupe_note(root, post),
         )
         post.content = _replace_section(
             post.content,
@@ -276,10 +281,11 @@ def propose_calendar(
     start: str,
     end: str,
     proposal_id: str | None = None,
-    timezone: str = "Europe/Madrid",
+    timezone: str | None = None,
     hub: str | Path | None = None,
 ) -> dict[str, str]:
     """Attach a calendar proposal without creating a calendar event."""
+    timezone = timezone or _local_tz_name()
     root = hub_path(hub)
     with ideas_lock(root):
         path, post = _load_required_unlocked(root, idea_id)
@@ -448,7 +454,7 @@ def _default_body(title: str, raw: str, now: datetime) -> str:
 Captured verbatim at {now.isoformat(timespec="seconds")}. Interpretation is pending triage.
 
 ## Why it matters
-Pending triage against `personal/priority-profile.md`.
+Pending triage.
 
 ## Dedupe
 Pending triage.
@@ -545,6 +551,51 @@ def _load_required_unlocked(root: Path, idea_id: str) -> tuple[Path, frontmatter
         return path, frontmatter.load(f)
 
 
+def _local_tz_name() -> str:
+    """Default zone for calendar proposals: KB_TZ, else the Mac's own zone
+    (the shared rule in _kb_calendar.dateparse), else UTC. Never a fixed city."""
+    try:
+        from _kb_calendar.dateparse import local_tz_name
+    except Exception:  # pragma: no cover - calendar package optional
+        return os.environ.get("KB_TZ", "").strip() or "UTC"
+    return local_tz_name()
+
+
+def _title_words(title: str) -> set[str]:
+    """Lower-cased words of a title (any script), without very short words."""
+    return {w for w in re.findall(r"\w+", (title or "").casefold()) if len(w) >= 3}
+
+
+def _dedupe_note(root: Path, post: frontmatter.Post) -> str:
+    """Compare this card's title with every other idea card's title and say
+    what the check found. Near-duplicate: same words, or at least two shared
+    words making up half or more of both titles' words together."""
+    own_id = post.get("id")
+    own = _title_words(str(post.get("title") or ""))
+    others = [(p, o) for p, o in _list_cards(root) if o.get("id") != own_id]
+    if not others:
+        return "Duplicate check (titles): no other idea cards to compare against."
+    matches = []
+    for _path, other in others:
+        words = _title_words(str(other.get("title") or ""))
+        shared = own & words
+        if own and (own == words or (len(shared) >= 2 and len(shared) / len(own | words) >= 0.5)):
+            matches.append(other)
+    if not matches:
+        return (
+            f"Duplicate check (titles): compared with {len(others)} other idea card(s); "
+            "no near-duplicate found."
+        )
+    listed = ", ".join(
+        f"`{m.get('id')}` ({m.get('status')}: {m.get('title')})" for m in matches[:3]
+    )
+    more = f" and {len(matches) - 3} more" if len(matches) > 3 else ""
+    return (
+        f"Duplicate check (titles): possible duplicate of {listed}{more}. "
+        "Compare them before promoting."
+    )
+
+
 def _list_cards(root: Path) -> list[tuple[Path, frontmatter.Post]]:
     cards = []
     for path in sorted(ideas_dir(root).glob("idea-*.md")):
@@ -558,9 +609,34 @@ def _list_cards(root: Path) -> list[tuple[Path, frontmatter.Post]]:
     return cards
 
 
+# Dashboard text the user reads, keyed by the profile language; `en` is the
+# fallback for any language without an entry.
+DASHBOARD_LABELS = {
+    "en": {
+        "intro": "> Dashboard of personal ideas. Each idea's source of truth is its card in `personal/ideas/`. This file is rendered from the cards; edit the status in the card.",
+        "empty": "_Empty._",
+    },
+    "ru": {
+        "intro": "> Dashboard личных идей. Канон каждой идеи — карточка в `personal/ideas/`. Этот файл рендерится из карточек; статус редактируется в карточке.",
+        "empty": "_Пусто._",
+    },
+}
+
+
+def _dashboard_labels(root: Path) -> dict[str, str]:
+    lang = "en"
+    if _kb_profile is not None:
+        try:
+            lang = _kb_profile.get_language(root)
+        except Exception:
+            lang = "en"
+    return DASHBOARD_LABELS.get(lang, DASHBOARD_LABELS["en"])
+
+
 def _render_dashboard_unlocked(root: Path) -> None:
     dash = dashboard_path(root)
     dash.parent.mkdir(parents=True, exist_ok=True)
+    labels = _dashboard_labels(root)
     cards = _list_cards(root)
     active = []
     parked = []
@@ -585,7 +661,7 @@ def _render_dashboard_unlocked(root: Path) -> None:
             "",
             "# Ideas",
             "",
-            "> Dashboard личных идей. Канон каждой идеи — карточка в `personal/ideas/`. Этот файл рендерится из карточек; статус редактируется в карточке.",
+            labels["intro"],
             "",
             "## Protocol",
             "",
@@ -602,11 +678,11 @@ def _render_dashboard_unlocked(root: Path) -> None:
             "",
             "## Parking Lot",
             "",
-            _table(parked) if parked else "_Пусто._",
+            _table(parked) if parked else labels["empty"],
             "",
             "## Killed / Archived",
             "",
-            _table(terminal) if terminal else "_Пусто._",
+            _table(terminal) if terminal else labels["empty"],
             "",
         ]
     )
@@ -755,7 +831,7 @@ def _create_google_calendar_event(proposal: dict[str, Any], idea_id: str) -> str
         "summary": proposal["title"],
         "start": proposal["start"],
         "end": proposal["end"],
-        "timezone": proposal.get("timezone", "Europe/Madrid"),
+        "timezone": proposal.get("timezone") or _local_tz_name(),
         "source": "kb-idea",
     }
     try:

@@ -12,6 +12,22 @@ SRC_BIN="${KB_TTS_SRC_BIN:-$HOME/knowledge/bin}"
 INSTALL="$SRC_BIN/kb-tts-install"
 RENDER="$SRC_BIN/kb-tts-render"
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH, so nothing
+# here can reach a real logged-in agent.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+# The profile language must come from this test, never from the real hub.
+export KB_HUB="$TMP/hub"
+mkdir -p "$KB_HUB/personal"
+# A stand-in ffmpeg: the fake worker writes MP3 bytes itself, so the render
+# preflight only needs an executable, not a host ffmpeg install.
+FAKE_FFMPEG="$TMP/stub-bin/ffmpeg"
+printf '#!/bin/sh\nexit 0\n' >"$FAKE_FFMPEG"; chmod +x "$FAKE_FFMPEG"
+
 ok() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
 bad() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
 
@@ -114,6 +130,7 @@ run_render() {
   KB_TTS_HOME="$HOME_DIR" \
   KB_TTS_PYTHON="$HOME_DIR/venv/bin/python" \
   KB_TTS_WORKER="$FAKE_WORKER" \
+  KB_TTS_FFMPEG="${KB_TTS_FFMPEG:-$FAKE_FFMPEG}" \
   "$RENDER" "$@"
 }
 
@@ -290,9 +307,11 @@ EOF
   expect_fail "renderer rejects superseded 8-bit marker before worker" run_render --text x --out "$TMP/old-marker.wav"
   mv "$TMP/install-bf16.json" "$HOME_DIR/install.json"
 
+  # Russian on purpose: mixed Cyrillic/Latin text must reach the worker byte-exact.
+  # A ru profile (KB_LANG=ru) keeps the owner's Russian narration defaults.
   TEXT='Сегодня 10 июля. Qwen должен прочитать этот текст буквально: Gmail, MLX и 3 500 рублей.'
   CAPTURE="$TMP/capture.json"
-  KB_TTS_TEST_CAPTURE="$CAPTURE" run_render --text "$TEXT" --out "$TMP/sample.wav"
+  KB_LANG=ru KB_TTS_TEST_CAPTURE="$CAPTURE" run_render --text "$TEXT" --out "$TMP/sample.wav"
   RC=$?
   [[ $RC -eq 0 && -s "$TMP/sample.wav" ]] && ok "WAV render is atomic and non-empty" || bad "WAV render failed"
   python3 - "$CAPTURE" "$TEXT" <<'PY' && ok "literal Russian text, pinned model, and offline env reach worker" || bad "worker handoff mutated text/model/env"
@@ -300,11 +319,28 @@ import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["text"] == sys.argv[2]
 assert d["language"] == "Russian"
+assert d["voice_instruct"].startswith("A natural native Russian male narrator"), d["voice_instruct"]
 assert d["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
 assert d["model_revision"] == "7d3824abff87e49756bb0f83fb5411de75d160c4"
 assert d["offline_env"] == {
     "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
 PY
+
+  # Without a profile the narration language defaults to English, not Russian.
+  rm -f "$CAPTURE"
+  KB_TTS_TEST_CAPTURE="$CAPTURE" run_render --text "Hello there." --out "$TMP/default-lang.wav" >/dev/null 2>&1
+  python3 - "$CAPTURE" <<'PY' && ok "default narration language follows the profile (English without one)" || bad "default narration language is not the profile language"
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["language"] == "English", d["language"]
+assert "Russian" not in d["voice_instruct"], d["voice_instruct"]
+PY
+  rm -f "$CAPTURE"
+  echo "language: ru" >"$KB_HUB/personal/profile.yaml"
+  KB_TTS_TEST_CAPTURE="$CAPTURE" run_render --text "x" --out "$TMP/profile-lang.wav" >/dev/null 2>&1
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["language"] == "Russian"' "$CAPTURE" \
+    && ok "profile language ru defaults the narration to Russian" || bad "profile language ru was ignored"
+  rm -f "$KB_HUB/personal/profile.yaml"
 
   printf '%s' "$TEXT" >"$TMP/input.txt"
   KB_TTS_TEST_CAPTURE="$CAPTURE" run_render --file "$TMP/input.txt" --out "$TMP/sample.mp3"
@@ -390,6 +426,71 @@ PY
   [[ $rc -ne 0 && $alive -eq 0 && ! -e "$TMP/double-signal.wav" ]] \
     && ok "repeated signal cannot interrupt cleanup" \
     || bad "cleanup is signal-reentrant (rc=$rc alive=$alive)"
+
+  # ── --check: readiness probe used by kb-morning-digest ───────────────────
+  # It must report ready only for what kb-tts-install sets up, never load
+  # the model, and give a one-line reason otherwise.
+  CHECK_HOME="$TMP/check-home"
+  CHECK_MODEL="$CHECK_HOME/models/bf16-test"
+  mkdir -p "$CHECK_MODEL/speech_tokenizer" "$CHECK_HOME/venv/bin"
+  printf 'weights' >"$CHECK_MODEL/model.safetensors"
+  printf 'tokenizer' >"$CHECK_MODEL/speech_tokenizer/model.safetensors"
+  cat >"$CHECK_HOME/venv/bin/python" <<SH
+#!/bin/sh
+echo "\$*" >>"$TMP/check-python.log"
+case "\$*" in
+  *"version('mlx-audio')"*) echo "\${FAKE_MLX_VERSION:-0.4.5}"; exit 0 ;;
+esac
+echo "model would load here" >>"$TMP/check-python.log"
+exit 9
+SH
+  chmod +x "$CHECK_HOME/venv/bin/python"
+  run_check() {
+    KB_TTS_HOME="$CHECK_HOME" KB_TTS_WORKER="$FAKE_WORKER" \
+    KB_TTS_FFMPEG="${KB_TTS_FFMPEG:-$FAKE_FFMPEG}" "$RENDER" --check \
+      >"$TMP/check.out" 2>"$TMP/check.err"
+  }
+  check_json() { python3 -c 'import json,sys; d=json.loads(open(sys.argv[1]).read()); assert eval(sys.argv[2], {}, {"d": d}), d' "$TMP/check.out" "$1"; }
+
+  run_check; RC=$?
+  [[ $RC -eq 3 ]] && check_json 'd["ready"] is False and d["engine"] == "qwen" and "kb-tts-install" in d["error"]' \
+    && [[ $(wc -l <"$TMP/check.err") -eq 1 ]] \
+    && ok "--check without an install exits 3 with a one-line reason" \
+    || bad "--check without an install (rc=$RC): $(cat "$TMP/check.out" "$TMP/check.err")"
+
+  cat >"$CHECK_HOME/install.json" <<EOF
+{"schema": 1, "python_version": "3.12.9", "mlx_audio_version": "0.4.5",
+ "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+ "model_revision": "7d3824abff87e49756bb0f83fb5411de75d160c4",
+ "model_path": "$CHECK_MODEL"}
+EOF
+  : >"$TMP/check-python.log"
+  run_check; RC=$?
+  [[ $RC -eq 0 ]] && check_json 'd == {"ready": True, "engine": "qwen"}' \
+    && ok "--check on a complete install exits 0 and reports ready" \
+    || bad "--check on a complete install (rc=$RC): $(cat "$TMP/check.out" "$TMP/check.err")"
+  if grep -q "model would load" "$TMP/check-python.log"; then
+    bad "--check started the worker / loaded the model"
+  else
+    ok "--check never starts the worker or loads the model"
+  fi
+
+  FAKE_MLX_VERSION=0.4.4 run_check; RC=$?
+  [[ $RC -eq 3 ]] && check_json '"mlx-audio" in d["error"]' \
+    && ok "--check rejects a runtime with the wrong mlx-audio" || bad "--check accepted a wrong mlx-audio (rc=$RC)"
+
+  KB_TTS_FFMPEG="$TMP/definitely-missing-ffmpeg" run_check; RC=$?
+  [[ $RC -eq 3 ]] && check_json '"ffmpeg" in d["error"]' \
+    && ok "--check reports a missing ffmpeg" || bad "--check ignored a missing ffmpeg (rc=$RC)"
+
+  mv "$CHECK_MODEL/speech_tokenizer/model.safetensors" "$TMP/tokenizer.bak"
+  run_check; RC=$?
+  [[ $RC -eq 3 ]] && check_json '"model file is missing" in d["error"]' \
+    && ok "--check reports missing model weights" || bad "--check accepted missing weights (rc=$RC)"
+  mv "$TMP/tokenizer.bak" "$CHECK_MODEL/speech_tokenizer/model.safetensors"
+
+  KB_TTS_HOME="$CHECK_HOME" "$RENDER" --check --text x >/dev/null 2>&1; RC=$?
+  [[ $RC -eq 2 ]] && ok "--check refuses render arguments" || bad "--check accepted render arguments (rc=$RC)"
 
   if find "$TMP" -name '*.kb-tts-*' -print -quit | grep -q .; then
     bad "temporary render files are removed"

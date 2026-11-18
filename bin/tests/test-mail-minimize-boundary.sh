@@ -9,6 +9,14 @@
 set -uo pipefail
 SRC_BIN="${KB_MAIL_SRC_BIN:-$HOME/knowledge/bin}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 
 python3 - "$SRC_BIN" "$TMP" <<'PY'
 import sys, json, pathlib, importlib

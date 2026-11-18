@@ -13,6 +13,8 @@ Spec: knowledge/decisions/calendar-backed-followups-v1-2026-06-25.md
 
 Usage:
   kb-agenda --from today --days 8 --json [--now ISO] [--tz TZ]
+
+--tz defaults to KB_TZ, else the Mac's own time zone (/etc/localtime), else UTC.
 """
 from __future__ import annotations
 
@@ -53,7 +55,8 @@ def main() -> int:
     p.add_argument("--days", type=int, default=8)
     p.add_argument("--json", action="store_true")
     p.add_argument("--now")
-    p.add_argument("--tz", default=dateparse.DEFAULT_TZ)
+    p.add_argument("--tz", default=dateparse.local_tz_name(),
+                   help="IANA zone (default: KB_TZ, else the Mac's own zone)")
     args = p.parse_args()
 
     try:

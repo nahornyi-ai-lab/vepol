@@ -26,6 +26,84 @@ this one.
 
 ## [Unreleased]
 
+Vepol now talks to you in your language, and its repository is English-first.
+A fresh install runs its daily routine without hand fixes, and a new install
+grants Claude Code only what Vepol needs. Some `kb-*` commands change an exit
+code or a default; each such change is called out below.
+
+### Added
+- **Plan my day, in Vepol Desktop.** The Memory view opens with a Today card:
+  goal, outcomes, time blocks and the plan's status (Draft, Confirmed, In
+  calendar, Conflict, Partial). "Plan my day" opens an agent in the app's
+  terminal that reads the day's brief, goals and calendar, proposes a plan and
+  saves every correction as a new version with the new `kb-dayplan` command
+  (`personal/day-plans/<date>.json`). Your Google Calendar, reached through
+  Claude Code, is written only when you ask for it, and then only Vepol's own
+  marked events of that day: nothing is written if a busy event overlaps an
+  agreed block, and the calendar is read back to report exactly what is there.
+  The evening retro compares the day with the confirmed plan.
+- **A nightly knowledge refresh.** `kb-consolidate` (06:30 in the default
+  `processes.yaml`) reads what each project in `~/knowledge/hierarchy.yaml`
+  logged since the last pass and applies point edits to its `state.md`, keeping
+  only edits that match the page exactly and cite a log or daily note. If the
+  model fails, the page gets a list of the newer log headlines instead. Each
+  run leaves a report with the diff and a backup of the page under
+  `~/knowledge/.orchestrator/consolidate/`. Until `hierarchy.yaml` exists it
+  has nothing to do: run `kb-rebuild-registry bootstrap`, then
+  `kb-rebuild-registry apply`, once. `kb-child-rollup` ships with it (a daily
+  child-to-parent summary at 07:00, idle until `hierarchy.yaml` names parents).
+- **Close a task from Vepol Desktop.** Every Backlog, Ready or Blocked task in
+  the Tasks view has a Close button with an optional reason and an Undo.
+  `kb-board` gains `cancel` and `reopen`, and `list --json` rows carry each
+  task's `content_hash`.
+- **Sessions that remember their task.** A Desktop session started from a task
+  shows the task and its status and moves to Done when the task closes; you can
+  run several sessions of one agent in one project; every terminal agent
+  (Claude Code, Codex, Grok, Antigravity, Hermes, OpenCode) gets a real title and
+  last message on its card.
+- **Add Vepol's session hooks to the settings you already have.** When
+  `~/.claude/settings.json` already existed, install left it without Vepol's
+  hooks, so agents started without your knowledge base and sessions were not
+  captured. `~/knowledge/bin/kb-claude-hooks --check` names the missing
+  SessionStart, SessionEnd and PreCompact hooks. `--apply` writes a
+  timestamped backup next to the file, then adds only those hooks and keeps
+  every other setting; a second run changes nothing. An interactive install
+  offers this, and `install.sh --apply` does it when `VEPOL_MERGE_HOOKS=1` is
+  set.
+- **A guide to your daily routine.**
+  [docs/daily-routine.md](docs/daily-routine.md) covers everything Vepol runs
+  on a schedule: turning on scheduled tasks, setting up Telegram step by step,
+  what each step in `~/knowledge/personal/processes.yaml` does and how to
+  switch it off, the brief, the retro, mail, the arXiv digest, audio, research,
+  Money Radar, the nightly refresh, people reminders, time zone, and what to
+  check when something does not arrive.
+- **`new-wiki` registers the project.** With a hand-written
+  `~/knowledge/registry.md`, `new-wiki` adds one `seeded` row for the project
+  to the table under its category, and never a second one. A one-line
+  description is an optional fourth argument:
+  `new-wiki <path-to-project> [slug] [category] [description]`. A registry
+  that `kb-rebuild-registry` generated is left untouched, and `new-wiki`
+  prints the project's entry to append, unchanged, to the end of
+  `~/knowledge/migration-2026-04-25.yaml`; then run
+  `kb-rebuild-registry apply`. The categories are `lab`, `order`, `pet`, `job`
+  and `personal` (the default).
+- **`kb-brief --help`, and a status line after every run.** `kb-brief --help`
+  explains `KB_BRIEF_DRY=1`, `KB_BRIEF_PROMPT_ONLY=1`, `BRIEF_TIMEOUT` and the
+  06:00 preview rule. A run now ends with one line: where the brief was saved
+  and whether it reached Telegram, and why not when it did not.
+- **A contributor guide, community files and CI.**
+  [CONTRIBUTING.md](CONTRIBUTING.md) covers the development setup, the tests
+  and the language rule, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) sets how
+  we treat each other. Bug and idea forms help you open an issue (security
+  problems go to a private advisory), and pull requests start from a short
+  template. A GitHub Actions workflow runs `tests/run-all.sh` and the Vepol
+  Desktop tests on macOS for every pull request and every push to `main`.
+  `tests/run-all.sh` now also runs the twelve daily-routine suites (brief,
+  retro, audio digests, mail, calendar, people, research, Money Radar and user
+  language), the `kb-codex-cleanup` scope suite, and the `kb-doctor` and
+  multi-bot pytest suites, so it needs `pytest` for the `python3` on your
+  `PATH` (`python3 -m pip install --user pytest`).
+
 ### Changed
 - **Morning brief v3: readable in a minute, with optional sleep and health.**
   `kb-brief` now writes a short phone-first brief (date · focus, day plan, main
@@ -34,20 +112,417 @@ this one.
   `health-morning/v1` files to get a 🫀 Body section; without it the brief never
   mentions health and never waits. See
   [docs/health-in-the-brief.md](docs/health-in-the-brief.md).
+- **The brief's time no longer depends on sunrise.** `kb-planner` records a
+  fixed brief time, `KB_BRIEF_HM` (07:00 by default), instead of one tied to
+  sunrise. The brief itself runs when `processes.yaml` says: by default after
+  the 07:15 mail read.
+- **A manual brief at night is a preview.** A manual `kb-brief` run before
+  `KB_BRIEF_PREVIEW_BEFORE` (06:00) writes `briefs/<date>-preview-HHMM.md`, so
+  the scheduled morning brief is still written and delivered.
+- **The Automations view shows the real reason a routine failed** (quota,
+  model, auth, network or timeout) instead of the first line of its output.
+- **Failed end-of-session summaries are kept, not lost.** With session capture
+  on, a summary that fails (most often after an expired login) waits in
+  `pending/` with the real reason and is retried at the next successful session
+  end; `kb-session-start` mentions stuck summaries for the current project.
+- **An English-first repository, and Vepol talks to you in your language.**
+  Code, comments, prompts, templates, skills and docs in the repository are
+  in English; other languages appear only in per-language tables, in patterns
+  that must match text in that language, and in tests (see
+  [CONTRIBUTING.md](CONTRIBUTING.md)). What Vepol writes for you follows
+  `language:` in `~/knowledge/personal/profile.yaml`: prompts tell the agent
+  which language to answer in, and fixed labels come from per-language tables
+  with English as the default. This now also covers parts that were Russian
+  for everyone: the audio digest (see Fixed), the arXiv digest's translation
+  warnings, the daily-research digest labels, the NotebookLM packet from
+  `kb-arxiv-notebooklm`, the ideas dashboard (`personal/ideas.md`), the
+  headings of a generated `registry.md`, and the hub's rule for which
+  language wiki pages are written in. With a Russian profile, your briefs,
+  retros and digests and their fixed labels stay in Russian; new project
+  templates, a few labels in report source lists and `log.md`, and most
+  terminal messages (for example from `kb-search` and `kb-doctor`) are now
+  English.
+- **Install needs fewer tools and checks their versions.** You need git,
+  Claude Code (`claude`), ripgrep, Python 3.10+ and bash 5+. Node and Bun are
+  optional: no `kb-*` script runs them; Node helps install npm-based CLIs such
+  as Codex, and Bun runs only Claude Code's own Telegram plugin. The Homebrew
+  hint is `brew install bash ripgrep git python@3`. `install.sh --probe` now
+  reports the Python and bash versions and exits 10 when one is too old.
+  `kb-doctor install-health` requires the same tools and reports a missing
+  optional one as info.
+- **Install explains Telegram and the scheduled tasks.** It says that the
+  brief, retro, digests and review buttons read `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` from `~/knowledge/personal/.secrets`, how to find your
+  chat id (message your bot, then open
+  `https://api.telegram.org/bot<token>/getUpdates` and read `chat.id`), and
+  that briefs are saved but not sent until both are set. The optional Claude
+  Code Telegram plugin, for chatting with Claude, needs Bun and a second bot.
+  Each LaunchAgent is described by what it really does. The next steps say to
+  open Claude Code in a project and type `/init-kb`, and the Gemini CLI step
+  and the empty `~/.gemini` folder are gone. When Python packages are
+  missing, the hint names the Python in use and gives the
+  `--break-system-packages` form that Homebrew Python needs.
+- **A failed local voice install no longer stops the install.** The local Qwen
+  question now comes after the Telegram question, so scripts that pipe
+  answers by position need updating. If `kb-tts-install` fails, install warns
+  with the reason and the retry command, leaves `processes.yaml` as it was and
+  carries on. `install.sh --apply --audio-backend local_qwen` then finishes
+  and exits 11 (partial install) instead of stopping halfway with exit 1. The
+  install receipt records the audio route.
+- **Claude Code loads Vepol's global instructions.** New installs write the
+  Vepol block in `~/.claude/CLAUDE.md` as a real import,
+  `@~/.claude/.vepol/CLAUDE.managed.md`. The old line was an HTML comment that
+  Claude Code ignored. An existing block is left as it is, and install prints
+  the line to put in its place.
+- **Re-running install keeps your setup current.** It adds agents missing
+  from `~/knowledge/.orchestrator/cli-tools.tsv` and never edits your rows; a
+  commented-out row keeps that agent off. LaunchAgents installed from now on
+  have `~/.local/bin` at the end of their `PATH`, so agent CLIs from native
+  installers are found. Session capture clones `claude-memory-compiler` at a
+  pinned commit and says when `uv` is missing. `requirements.txt` lists the
+  optional Telethon and python-dotenv packages for the Telegram people
+  collector and the multi-bot runtime.
+- **Scheduled Claude runs use your account's default model.**
+  `kb-orchestrator-run` no longer passes `--model claude-opus-4-7`. Set
+  `CLAUDE_MODEL` (or `CODEX_MODEL` for Codex) to choose a model; for scheduled
+  runs, put it in the LaunchAgent's `EnvironmentVariables`.
+- **Your Mac's time zone, everywhere.** Mail day windows, calendar reads and
+  writes, follow-up reminders, task dates, idea calendar blocks and the day
+  plan use `KB_TZ`, then `TZ`, then your Mac's own zone. Before, several of
+  them assumed Europe/Madrid.
+- **The brief and retro leave mail out until mail works.** Until a mail read
+  has succeeded once, they say nothing about mail: no section and no daily
+  "mail could not be checked" line. After that, a failure comes with its
+  reason, including a new one for a missing Codex: install Codex and connect
+  its Gmail plugin, or set `KB_CODEX_BIN`.
+- **`kb-channel-send` has new exit codes and sends long messages whole.** Exit
+  3 now means Telegram is not configured (it was 2) and exit 4 a failed send
+  (it was 3). `kb-channel-send-audio` exits 3 instead of 20 when Telegram is
+  not configured. A message longer than Telegram's limit (4096 UTF-16 units)
+  is split at line breaks into as many parts as it needs, instead of two parts
+  ending in "[truncated]". If your own scripts call these commands, update
+  their exit-code checks.
+- **`kb-search` searches more of your hub.** Besides concepts, people,
+  companies, solutions and raw notes, it searches `reports/`, `sources/`,
+  `briefs/`, `daily/` and `personal/`, so `kb-idea` cards are found, plus the
+  `.txt` digests in the hub's and each project's `reports/`.
+- **"Why it matters" in the arXiv digest is about your work.** When
+  `personal/daily-research.yaml` sets neither `focus_project` nor
+  `focus_context`, each paper is explained for your own work with AI agents,
+  naming your live projects from `registry.md`, not for Vepol. A file that
+  sets either key keeps the old wording.
+- **Docs rewritten against the code.** The [README](README.md), the
+  [feature reference](docs/features.md), [What is Vepol](docs/what-is-vepol.md),
+  [Getting started](docs/getting-started.md), the
+  [dependency matrix](docs/dependency-matrix.md),
+  [Security and privacy](docs/security-and-privacy.md),
+  [Health in the brief](docs/health-in-the-brief.md), the
+  [People](docs/modules/people.md) and
+  [Idea Intake](docs/modules/idea-intake.md) guides, the
+  [Vepol Desktop](face/README.md) and [demo](demo/README.md) READMEs, and the
+  guides agents follow to install Vepol ([SETUP.prompt.md](SETUP.prompt.md),
+  [AGENTS.md](AGENTS.md)) describe what ships today and label what is
+  experimental. The multi-bot docs are in English, and every command they tell
+  you to run exists.
+- **The startup bundle lists your Backlog.** Active work in the bundle now
+  also lists open Backlog items, where `kb-task` and `kb-board append` put new
+  tasks, after the Ready, In Progress, Blocked and Review ones: the first 10,
+  then one line with the count and the `kb-board list … --status Backlog`
+  command for the rest. A task added with `kb-task "…" --project my-app` now
+  shows up in the next session in that project. `kb-session-start --print`
+  without `--cwd` now uses the current folder when `$CLAUDE_PROJECT_DIR` is not
+  set; before, it printed nothing.
+- **`kb-task` prints one line, and `--json` for scripts.** A task added now
+  prints `✓ Added to hub board (id: <id>)` or
+  `✓ Added to project '<slug>' board (id: <id>)`; the `(via kb-board append)`
+  suffix and the `{'ok': True, …}` line are gone. `kb-task "…" --json` prints
+  only kb-board's JSON result; with `--calendar`, the follow-up proposal then
+  goes to stderr. If your scripts read kb-task's output, update them.
+- **`new-wiki` keeps your own `AGENTS.md` and adds the startup step.** On a
+  project that already has an `AGENTS.md` (also through **Add project…** in
+  Vepol Desktop), it keeps your text and appends one block, once, between
+  `<!-- BEGIN VEPOL … -->` and `<!-- END VEPOL -->`: the project's wiki is
+  `knowledge/`, and an agent with no startup context runs
+  `~/knowledge/bin/kb-session-start --print --cwd "$PWD"`. A linked or
+  read-only `AGENTS.md` is not changed; `new-wiki` prints the line to add.
+- **`kb-rebuild-registry bootstrap` no longer overwrites your migration
+  table.** When `~/knowledge/migration-2026-04-25.yaml` (or the `--out` path)
+  exists, it exits 2 and says how to add a project instead. `bootstrap
+  --force` rebuilds the table and keeps the old one as
+  `migration-2026-04-25.yaml.bak-<date>-<time>`, but it cannot read back a
+  `registry.md` that `apply` generated, so check every category, status and
+  description afterwards.
+- **English registry categories say what they hold.** A fresh English
+  `registry.md` has the sections `lab — research and experiments`,
+  `order — client work`, `pet — side projects`, `job — employment` and
+  `personal / other`, and the header of a generated one names the same
+  meanings. `kb-rebuild-registry check` still accepts the older header line,
+  and the next `apply` writes the new one. Russian registries are unchanged.
+- **Re-running install says whether the hub's `AGENTS.md` and `CLAUDE.md` are
+  current.** It prints "up to date", or "differs from this version's — not
+  overwritten" with a `diff` command, instead of the same warning on every
+  run. It never overwrites either file.
+- **Install's "Try these next" list.** It now suggests `kb-doctor
+  install-health`, `kb-task`, `kb-search`, `kb-idea capture` (with the Python
+  packages) and `kb-demo brief`, and no longer a plain `kb-brief`.
+- **`kb-doctor install-health` checks the Python packages.** It checks that
+  the `python3` on your `PATH` can import python-frontmatter, click, PyYAML
+  and jellyfish. A missing one is a P1 (`install-health:python-packages-missing`)
+  that names the `pip` command for your checkout's `requirements.txt`, so
+  `install-health --strict` exits 1 and the installer's last step says
+  "kb-doctor reported issues" until they are installed. A missing
+  CoreLocationCLI is now an info line instead of a P2.
+- **A brief without Telegram says `delivery: not_configured`.** The brief's
+  day file (and the preview and error files) used `telegram_failed` when
+  Telegram was not set up. It now says `not_configured`: nothing was sent and
+  nothing was tried. As before, a run after you set up Telegram sends the
+  saved brief without a new model call. If your own scripts read the
+  `delivery:` line, update them.
+- **Claude Code in the Vepol folder loads the agent manual.** The
+  repository's `CLAUDE.md` now imports `AGENTS.md` (`@AGENTS.md`). Claude Code
+  loads a project's `AGENTS.md` itself only when there is no `CLAUDE.md` or
+  `CLAUDE.local.md` in the folder or above it, so an agent asked to install
+  Vepol from the clone saw only a pointer to the manual.
+- **When no AI agent answers, the brief says why in plain words.** `kb-brief`
+  exits 1, saves no brief and sends (at most once a day, when Telegram is set
+  up) "The brief was not made: no AI agent answered", one line per agent tried
+  with the reason (for example "Claude Code: not signed in — run `claude`
+  once to sign in."), and the log to check. A manual run, or a scheduled one
+  without Telegram, prints the same text. It no longer shows `rc=75` or
+  "exhausted"; `brief.log` keeps the raw error.
 
 ### Fixed
+- **Hub sessions start in the hub folder.** A Desktop session for the hub now
+  runs inside `~/knowledge`, so the hub agent gets its own startup context, and
+  **Add project…** on the hub folder opens the hub.
 - **Install points to Claude Code, not the Claude desktop app** (#34). When
-  `claude` is missing, `install.sh` and `kb-cli-offer` now print the exact
-  install command for Claude Code, the command-line tool
+  `claude` is missing, `install.sh` now prints the exact install command for
+  Claude Code, the command-line tool
   (`curl -fsSL https://claude.ai/install.sh | bash` or
-  `brew install --cask claude-code`); the dependency docs and `AGENTS.md` say
-  the same. Login hints use `claude auth login`.
+  `brew install --cask claude-code`), and `kb-cli-offer` gives the Homebrew
+  command and the setup page; the dependency docs and `AGENTS.md` say the
+  same. Login hints use `claude auth login`.
+- **A fresh install runs its daily routine.** `kb-planner` crashed on the
+  empty `KB_FALLBACK_LAT=` line that install writes to
+  `~/knowledge/personal/.secrets`, so no day plan was written and `kb-tick`
+  ran no routine at all. Empty coordinates now count as not set, and a plan
+  for today is always written, with default times when a lookup fails. The
+  location comes from CoreLocationCLI, then `KB_FALLBACK_LAT` and
+  `KB_FALLBACK_LON`, and only then from ip-api.com.
+- **Routines keep going without Telegram.** Until `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` are set, the brief, the retro, the arXiv digest, Money
+  Radar, daily research and the local audio digest save their output, log one
+  "telegram not configured" line and exit 0, so the routines after them still
+  run. Before, the brief failed on every tick and nothing after it started.
+  Once Telegram is set up, running `kb-brief` again sends the saved brief
+  without a new model call, and the arXiv digest keeps its messages for a
+  later run.
+- **The evening retro reaches Telegram.** It read only the older
+  `TELEGRAM_TOKEN` key, so a retro set up with `TELEGRAM_BOT_TOKEN`, the key
+  install writes, was never sent. It now uses `TELEGRAM_BOT_TOKEN` first (the
+  old key still works) and sends through the same checked sender as the
+  brief.
+- **Morning audio in your language.** The morning digest told the model to
+  write Russian for every user, and its titles, captions, weekday names,
+  sources heading, failure alert, NotebookLM notebook name and NotebookLM
+  prompts were Russian for everyone. All of it now follows your profile
+  language, English by default; a Russian profile keeps the same titles,
+  captions and narration rules. This month's NotebookLM notebook is still
+  found after the rename.
+- **The local Qwen voice works.** The audio digest asks
+  `kb-tts-render --check` whether the voice is ready, but that option did not
+  exist, so every local audio digest was marked unavailable. `--check` now
+  checks what `kb-tts-install` set up without downloading or loading the
+  model, and `--language` defaults to your profile language instead of
+  Russian. The failure alert names commands that exist (`kb-tts-install`,
+  `kb-digest-migrate --file ~/knowledge/personal/processes.yaml --audio-backend notebooklm`
+  and `kb-morning-digest --force`) instead of a `kb-tts-engine` that never
+  shipped. The spoken text skips the arXiv report's scores, source lists,
+  authors, categories and bare links, and each NotebookLM call times out after
+  120 seconds (`KB_MORNING_NOTEBOOKLM_TIMEOUT`) instead of holding up the
+  schedule.
+- **Switching an optional input off no longer stops the routines that wait
+  for it.** A process with `when: after:<id>` whose parent is `mail-morning`,
+  `mail-evening`, `learning` or `money-radar` and has `enabled: false` now
+  runs at the parent's own trigger, following the chain up. With
+  `mail-morning` and `mail-evening` off, the brief runs at 07:15 and the
+  retro at 20:30; before, they never ran. Switching off any other step, such
+  as `daily` or `retro`, still holds the steps after it for the day.
+- **A long health wait no longer gets the brief killed.** `kb-tick` now tells
+  each routine its time limit (`KB_PROCESS_TIMEOUT`). When the brief is still
+  waiting for your health data and that limit is near, it stops before the
+  model call, sends nothing, and `kb-tick` runs it again on the next tick. At
+  your deadline it goes out without the health section, as before.
+- **Money Radar runs on schedule once you switch it on.** Started by
+  `kb-tick` without `MONEY_RADAR_PROJECT`, it ran from a folder with no
+  `knowledge/` and exited with code 2. It now writes into the hub
+  (`~/knowledge/sources/money-radar/` and `~/knowledge/reports/money-radar/`)
+  and logs that it did. Its Claude lane finds Claude Code the standard way
+  instead of only at `/opt/homebrew/bin/claude`.
+- **Vepol finds Codex and Claude Code wherever a standard installer puts
+  them.** Codex: `$KB_CODEX_BIN`, `~/.local/bin/codex`, your `PATH`,
+  `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, so a Homebrew, npm or
+  standalone install works; a copy inside an app bundle is skipped. Before,
+  Codex counted only at `~/.local/bin/codex`. Claude Code: `$KB_CLAUDE_BIN`,
+  your `PATH`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`,
+  `/usr/local/bin/claude`, so scheduled jobs find a native install that is
+  missing from launchd's `PATH`. Vepol Desktop's agent list checks the same
+  places, and `kb-cli-offer` now lists Hermes.
+- **The arXiv tools share one snapshot, and your research settings stay.**
+  `kb-arxiv-notebooklm` and the paper lane of `kb-daily-research` read
+  `sources/arxiv-learning-snapshot-<date>.md`, which `kb-learning-arxiv`
+  writes; before, they looked for a file nothing wrote. The `--set-topic`,
+  `--auto-topic` and `--legacy-auto-topic` options of `kb-daily-research`
+  change only their own keys in `personal/daily-research.yaml` and keep the
+  rest, and a run no longer creates that file.
+- **A fresh hub is complete.** Install creates `~/knowledge/logs/`, fills in
+  the hub's index, log, state, backlog, escalations, incidents and strategies
+  pages (they kept a literal `{{PROJECT_NAME}}` and `{{DATE}}`), and writes a
+  `registry.md` with an empty table per category, in English or, for a
+  Russian profile, in Russian. `kb-rebuild-registry bootstrap` works on it;
+  without a `registry.md` it explains what to create and exits 2 instead of
+  crashing. `kb-spawn-project` finds the path column by its header, so the
+  tables `kb-rebuild-registry apply` writes work too, and without a
+  `registry.md` it says so and exits 3 instead of crashing.
+- **`kb-doctor` is accurate on a fresh install.** Accepting scheduled tasks no
+  longer gives two P0 findings for the optional `channel-telegram` and
+  `multibot-supervisor` LaunchAgents; they are info now (refresh an older
+  manifest with `~/knowledge/bin/kb-bootstrap-manifest --force`). Missing Node
+  or Bun, `kb-seed-sync`, `GEMINI.md` or `_template/CLAUDE.md`, and a new
+  project's empty task board no longer count as problems. A missing session
+  hook now tells you to run `~/knowledge/bin/kb-claude-hooks --apply`, and
+  `kb-doctor agent-entrypoint --strict` exits 1 on a P1, as the hub contract
+  says.
+- **`uninstall.sh` removes everything it should and lists what it leaves.** It
+  unloads and removes six LaunchAgents: `tick`, `planner`,
+  `orchestrator-cycle`, `people-review-bot`, `channel-telegram` and
+  `multibot-supervisor`; the last three used to stay loaded. It recognizes
+  both forms of the Vepol block in `~/.claude/CLAUDE.md` and warns, instead of
+  reporting success, when it cannot. At the end it lists what it leaves on
+  purpose and how to remove each: the hooks and status line in
+  `~/.claude/settings.json`, `~/.claude/statusline-command.sh`,
+  `~/claude-memory-compiler`, the local Qwen voice and
+  `~/.claude/channels/telegram/`.
+- **`kb-codex-cleanup` stops only Vepol's own processes.** It stops leftover
+  Codex helper processes (the `codex-companion` brokers an interrupted Codex
+  review can leave holding a folder) only when they serve the hub or a linked
+  project's `knowledge/` folder, and it finds duplicate Claude Code Telegram
+  plugins by the plugin's path. Before, it stopped them for any folder and ran
+  `pkill -9 -f 'bun server\.ts'`, which killed any Bun `server.ts` process on
+  your Mac. Each stop is TERM first, then KILL after about 3 seconds. A
+  broker serving a folder whose name only starts like the hub's (for example
+  `~/knowledge copy`) is left alone; when a broker's folder name contains a
+  space, it is stopped only if its real working folder is the hub, a folder
+  under it or a linked project's `knowledge/`.
+- **Multi-bot runtime (experimental): stopping a run stops only that run.**
+  When a run went silent for too long or got `/stop`, the supervisor sent its
+  stop signals to pid -1, which reaches every process you own. It now signals
+  only the agent's own child process (SIGTERM, then SIGKILL after up to 5
+  seconds) and refuses pid 1 or below, itself and its parent. Agents with
+  `runtime: codex` now start (they crashed at spawn), the supervisor finds
+  Claude Code in `~/.local/bin`, and `kb-multibot-setup` ends by pointing to
+  `kb-multibot-add <token>` instead of a `kb-init-agent` that never shipped.
+- **The multi-project cycle (experimental) waits until you set it up.**
+  `kb-orchestrator-cycle` runs a morning plan and an evening retro for the
+  projects you opt in. On a hub where it was never set up, its 07:30 and 20:45
+  runs log one line on how to enable it and exit 0 instead of failing twice a
+  day. With `KB_AUTONOMY_GATE_INPUT` or `KB_AUTONOMY_GATE_DEEP=1` set and no
+  `_kb_autonomy` safety scanner (Vepol does not ship one), `retro` and `plan`
+  refuse at the start with exit 75 instead of stopping halfway. Project retros
+  read the day's plan from `~/knowledge/daily-plan/<date>.md`, where it is
+  written.
+- **`kb-idea` really checks for duplicates.** Triage compares the card's title
+  with every other idea card and writes down what it found, instead of
+  claiming a check it never ran. New cards no longer mention a
+  `personal/priority-profile.md` that does not exist.
+- **Session capture stays quiet when you declined it.** `kb-session-end` and
+  `kb-pre-compact` exit silently when `~/claude-memory-compiler` is not
+  installed.
+- **The setup skills match the installer.** The `orchestrator-setup` skill
+  drives `install.sh`'s agent modes and follows `SETUP.prompt.md`; it used to
+  clone another repository and cite files that do not ship. The `init-kb`
+  skill no longer expects a project `CLAUDE.md`.
+- **Vepol Desktop: the demo adds projects, and About shows the right
+  version.** **Add project…** works in `face/demo.sh`, and
+  `face/desktop/build.sh` stamps the built app with the version in `VERSION`;
+  the About box said 1.1.0.
+- **Upgrading keeps the extras you already have.** `upgrade.sh` re-runs
+  `install.sh --apply` without answers for the extras, and the installer took
+  that as "declined": it recorded installed scheduled tasks and session capture
+  as switched off, so `kb-doctor` and the install receipt reported them off.
+  Extras that are already installed are now kept as they are; an explicit
+  `VEPOL_ENABLE_LAUNCHD=0` still declines.
+- **`kb-demo` works on a private copy, and `kb-demo task` works.** The demo
+  commands now run against a copy of `demo/knowledge` in
+  `~/.vepol/demo-knowledge` (`kb-demo reset` starts it over), so trying the
+  demo never changes files in your clone, which `upgrade.sh` would then refuse
+  to update. `kb-demo task` failed because the demo hub has no `bin/`; it now
+  adds the task to the copy's board. `kb-demo retro` prints the retro instead
+  of sending it, as `kb-demo brief` already did.
+- **`kb-rebuild-registry apply` handles a project with no description.** A
+  project added without one (`new-wiki <path>` with no fourth argument, or
+  **Add project…**) made `apply` stop with `KeyError: 'description'`. It now
+  keeps the description line already in the project's README.
+- **`kb-execute-next` sends the task to Claude Code again.** Its direct
+  Claude lane, used for a project path that is not registered in the hub,
+  put the prompt after `--add-dir` and `--allowedTools`, which read it as one
+  more value, so Claude ran with no task. It now runs
+  `claude -p <prompt> --add-dir <project> --permission-mode acceptEdits --allowedTools Bash`
+  and finds Claude Code the standard way, including under launchd's `PATH`.
+- **`kb-doctor mcp-check` finds Claude Code where calendar reads do.** It
+  looked only on your `PATH` and reported a P0 "MCP-first sources cannot run"
+  while calendar reads worked. It now checks `$KB_CLAUDE_BIN`, your `PATH`,
+  `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`.
+- **`kb-idea` and `kb-contact` name a missing Python package.** Instead of a
+  traceback, they print one line with the package, the Python that lacks it
+  and the `pip` command, and exit 1.
+
+### Security
+- **A minimal Claude Code settings file for new installs.** When
+  `~/.claude/settings.json` does not exist, install writes only what Vepol
+  needs: reading `~/knowledge`, running `~/knowledge/bin` commands, the three
+  session hooks and the status line. It no longer grants blanket `Bash`,
+  `Read`, `Edit` and `Write` or a list of web hosts, and no longer adds
+  plugins, a theme, a sound on stop or a Bash hook that pointed at a script
+  Vepol does not ship. Background Claude runs that must write (the project
+  cycle's report for each project, `kb-execute-next`, `kb-spawn-project` and
+  chat turns in Vepol Desktop)
+  pass `--permission-mode acceptEdits --allowedTools Bash` themselves, so
+  they keep working; the brief and the retro run Claude read-only (see
+  below). This applies only when install creates the file; an existing one is
+  not replaced.
+- **Your Telegram bot token stays out of agents and process lists.**
+  `kb-brief` exported the `TELEGRAM_*` values into the environment of the
+  agent that writes the brief; now only the sender gets them. `kb-retro` no
+  longer runs `.secrets` as shell code: it reads the five keys it needs as
+  data, as `kb-brief` does. The retro and `kb-channel-send` no longer put the
+  token on a `curl` command line, where any process list could show it.
+- **`kb-search` never searches secrets.** Now that it searches `personal/`, it
+  skips files named `.secrets`, `.env`, `*.token`, `token.json` and similar,
+  in every folder.
+- **The opt-in Grok check in the arXiv digest is read-only.** With
+  `social_check: grok`, Grok runs with `--deny write --deny edit --deny bash`,
+  as in Money Radar.
+- **Only background Claude runs that must write can edit files and run
+  commands.** `kb-orchestrator-run` has a new `--allow-edits` flag. Without
+  it, its Claude lane runs with `--disallowedTools Bash,Edit,Write,NotebookEdit`,
+  which wins over your settings, so the brief's and the retro's Claude
+  fallback cannot edit files or run commands; everything else still follows
+  your Claude Code settings. With it (the project cycle's report for each
+  project, `kb-execute-next` and `kb-spawn-project` in text mode), Claude runs
+  with `--permission-mode acceptEdits --allowedTools Bash`: edits are accepted
+  in the job's folders, and Bash may run any command, in any folder. In 1.1.1
+  these runs passed no permission flags and used only your own Claude Code
+  settings. The Codex lane is unchanged and runs with approvals and the
+  sandbox off for every job. Vepol Desktop does not pass the flag yet, so in a
+  one-shot session (one from an earlier version, or the legacy `./run.sh`
+  page) Claude cannot edit files or run commands through Vepol's runner.
 
 ## [1.1.1] — 2026-10-05
 
 A fix release for the first five minutes after install and for honest failure
 reasons. The stable core keeps its contracts; `upgrade.sh` now follows release
-tags (below).
+tags (below). ([v1.1.1](docs/releases/v1.1.1.md))
 
 ### Fixed
 - **`kb-doctor` is green on a correct fresh install.** A hub with no projects
@@ -593,13 +1068,16 @@ baseline after the May rollout audit.
   canonical hub `AGENTS.md` and acts as fallback when `agy` runs
   without `--add-dir`.
 - **Multi-bot agent runtime** — `kb-multibot-supervisor`, plus
-  `kb-multibot-setup` / `kb-init-agent` / `kb-deactivate-agent`
-  CLIs, a LaunchAgent template, a Telethon group listener, a Bot
-  API sender with retry/backoff, per-agent queues, file-lock
-  serialization, stdout-silence watchdog, four loop guards
+  `kb-multibot-setup` / `kb-multibot-add` / `kb-multibot-remove` /
+  `kb-multibot-list` CLIs, a LaunchAgent template, a Telethon group
+  listener, a Bot API sender with retry/backoff, per-agent queues,
+  file-lock serialization, stdout-silence watchdog, four loop guards
   (cooldown / depth / fan-out / hourly quota), and 154 unit
   tests. Concept and spec at
   [`docs/methodology/multibot-agent-runtime.md`](docs/methodology/multibot-agent-runtime.md).
+  (Corrected later: this entry first named `kb-init-agent` and
+  `kb-deactivate-agent`, design names that never shipped. The release
+  shipped `kb-multibot-add`, `kb-multibot-remove` and `kb-multibot-list`.)
 - **Vendor-neutral agent positioning in docs** — public docs now
   state that Vepol coordinates ready-made CLI agents such as Claude
   Code, Codex, Antigravity CLI, and future agents over one shared KB.
@@ -744,7 +1222,8 @@ v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
 **2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.1...v1.0.0
 [0.8.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.0...v0.8.1

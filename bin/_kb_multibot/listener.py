@@ -1,4 +1,4 @@
-"""Telethon listener — push events.NewMessage for группа + operator's DMs.
+"""Telethon listener — push events.NewMessage for the group + operator's DMs.
 
 Concept §5: persistent connection, 1 long-lived TelegramClient. Receives
 events realtime via push (no polling), normalizes to our TelegramEvent, hands
@@ -93,7 +93,7 @@ class GroupListener:
                 te = self._normalize(event.message)
                 if te is None:
                     return
-                # Filter: только группа + operator's private chats with bots
+                # Filter: only the group + operator's private chats with bots
                 if not self._is_relevant(te):
                     return
                 await self._on_event(te)

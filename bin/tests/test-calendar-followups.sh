@@ -19,6 +19,16 @@ PASS=0
 FAIL=0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+# No KB_CLAUDE_BIN here: AC7 plants a tripwire `claude` first on PATH, which
+# KB_CLAUDE_BIN would bypass. The PATH stub still catches any other call.
+export PATH="$AGENT_STUBS:$PATH" KB_CODEX_BIN="$AGENT_STUBS/codex"
 
 SRC_BIN="${KB_CALENDAR_SRC_BIN:-$HOME/knowledge/bin}"
 PY=python3
@@ -97,6 +107,8 @@ PY
 echo "== AC1: propose makes zero calendar calls =="
 # -----------------------------------------------------------------------------
 HUB=$(make_hub ac1); FAKE=$(make_fake ac1 ok)
+# Russian phrase on purpose ("tomorrow, check"): the RU date keyword sits
+# inside a longer phrase.
 OUT=$(KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$FUP" propose \
   --summary "Check daily brief reads calendar" \
   --when "завтра проверить" --now "2026-06-25T08:00:00+02:00" \
@@ -113,7 +125,9 @@ ID1=$(echo "$OUT" | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["id"])'
 echo "== AC4: deterministic RU/EN date parsing =="
 # -----------------------------------------------------------------------------
 parse_start() {  # parse_start <hub> <fake> <when>
-  KB_HUB="$1" KB_CALENDAR_FAKE_DIR="$2" "$FUP" propose \
+  # Pin the zone: the default is the machine's own (UTC on CI runners), and the
+  # expected starts below are 09:00 in a +02:00 summer zone.
+  KB_TZ=Europe/Berlin KB_HUB="$1" KB_CALENDAR_FAKE_DIR="$2" "$FUP" propose \
     --summary "x" --when "$3" --now "2026-06-25T08:00:00+02:00" \
     --source "chat:test" --json 2>/dev/null \
     | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["start"])' 2>/dev/null
@@ -151,7 +165,7 @@ HUB=$(make_hub ac2); FAKE=$(make_fake ac2 ok)
 ID=$(KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$FUP" propose --summary "do x" \
   --when "tomorrow 09:00" --now "2026-06-25T08:00:00+02:00" --source "chat:test" --json \
   | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$FUP" approve "$ID" --approval-source "chat:да, поставь" >"$TMP/ac2.out" 2>&1
+KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$FUP" approve "$ID" --approval-source "chat:yes, add it" >"$TMP/ac2.out" 2>&1
 RC=$?
 [[ "$RC" == "0" ]] && ok "AC2: approve exits 0" || fail "AC2: approve rc=$RC ($(cat "$TMP/ac2.out"))"
 [[ "$(create_calls "$FAKE")" == "1" ]] && ok "AC2: exactly one create call" || fail "AC2: $(create_calls "$FAKE") create calls (want 1)"
@@ -385,6 +399,33 @@ EOF
     ok "AC6: brief prompt carries no attendee emails / links / descriptions"
   fi
 fi
+
+# =============================================================================
+echo "== time zone: KB_TZ, else the Mac's own zone (never a hardcoded city) =="
+# -----------------------------------------------------------------------------
+HUB=$(make_hub tz); FAKE=$(make_fake tz ok)
+agenda_tz() { env "$@" KB_HUB="$HUB" KB_CALENDAR_DISABLE=1 "$AGENDA" --from today --days 1 --json 2>/dev/null \
+  | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["timezone"])'; }
+G=$(agenda_tz -u TZ KB_TZ=America/New_York)
+[[ "$G" == "America/New_York" ]] && ok "TZ: KB_TZ sets kb-agenda's zone" || fail "TZ: KB_TZ ignored ($G)"
+G=$(agenda_tz -u KB_TZ TZ=Asia/Tokyo)
+[[ "$G" == "Asia/Tokyo" ]] && ok "TZ: TZ (IANA name) is honored" || fail "TZ: TZ ignored ($G)"
+SYS_TZ=$(readlink /etc/localtime 2>/dev/null | sed -n 's|.*zoneinfo/||p'); SYS_TZ="${SYS_TZ:-UTC}"
+G=$(agenda_tz -u KB_TZ -u TZ)
+[[ "$G" == "$SYS_TZ" ]] && ok "TZ: default is the Mac's own zone ($SYS_TZ)" || fail "TZ: default $G, Mac zone $SYS_TZ"
+OUT=$(env -u TZ KB_TZ=America/New_York KB_HUB="$HUB" KB_CALENDAR_FAKE_DIR="$FAKE" "$FUP" propose \
+  --summary "tz default" --when "tomorrow 09:00" --now "2026-06-25T08:00:00-04:00" --json 2>/dev/null)
+echo "$OUT" | grep -q '"timezone": *"America/New_York"' \
+  && ok "TZ: follow-up proposals default to the same zone" || fail "TZ: follow-up zone (out: $OUT)"
+G=$(env -u TZ KB_TZ=America/New_York "$PY" - "$SRC_BIN" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from _kb_calendar.adapter import CalendarAdapter, FakeBackend  # noqa: F401 (import check)
+from _kb_calendar import dateparse
+print(dateparse.local_tz_name())
+PY
+)
+[[ "$G" == "America/New_York" ]] && ok "TZ: shared default (dateparse.local_tz_name) follows KB_TZ" || fail "TZ: shared default $G"
 
 echo
 echo "=== calendar-followups tests: $PASS passed, $FAIL failed ==="

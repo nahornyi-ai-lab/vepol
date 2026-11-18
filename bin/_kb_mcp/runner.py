@@ -160,6 +160,18 @@ def _unfenced_json(stdout: str) -> str:
     return text
 
 
+
+def _find_claude():
+    """Claude Code binary in Vepol's shared lookup order: $KB_CLAUDE_BIN, PATH,
+    then the native installer's and Homebrew's folders (launchd's PATH lacks ~/.local/bin)."""
+    candidates = [os.environ.get("KB_CLAUDE_BIN", ""), shutil.which("claude") or "",
+                  os.path.expanduser("~/.local/bin/claude"), "/opt/homebrew/bin/claude",
+                  "/usr/local/bin/claude"]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
 def _claude_runner(
     prompt: str, timeout_s: int, *, tolerate_fence: bool = False, extra_args=()
 ) -> str:
@@ -169,10 +181,11 @@ def _claude_runner(
     uses text mode and one outer markdown fence is removed; the reply must
     still be a single JSON object. Non-empty ``extra_args`` (tool isolation)
     go before ``--`` so multi-value flags cannot swallow the prompt."""
-    claude = shutil.which("claude")
+    claude = _find_claude()
     if claude is None:
         raise McpHostError(
-            "claude binary not found in PATH; install Claude Code first "
+            "claude not found ($KB_CLAUDE_BIN, PATH, ~/.local/bin, /opt/homebrew/bin, "
+            "/usr/local/bin); install Claude Code first "
             "(see docs/methodology/mcp-first-sources.md § Preflight)"
         )
     model = os.environ.get("KB_MCP_MODEL", DEFAULT_MODEL)

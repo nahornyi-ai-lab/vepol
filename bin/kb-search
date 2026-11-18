@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# kb-search — поиск по всей базе знаний (хаб + все симлинки проектов).
-# Использует ripgrep, если он установлен; иначе — grep -R (macOS BSD).
+# kb-search — search the whole knowledge base (hub + every project symlink).
+# Uses ripgrep when installed; otherwise grep -R (macOS BSD).
 #
 # Usage:
-#   kb-search "query"                         # везде
-#   kb-search "query" --project <slug>       # только один проект
-#   kb-search "query" --hub-only              # только хаб, без проектов
+#   kb-search "query"                         # everywhere
+#   kb-search "query" --project <slug>       # one project only
+#   kb-search "query" --hub-only              # hub only, no projects
 #
-# По умолчанию ищет только в .md файлах, следуя симлинкам.
+# Searches .md files, following symlinks, plus the .txt digests in any
+# reports/ folder (Money Radar). Hub folders: concepts, people, companies,
+# solutions, raw, reports, sources, briefs, daily, personal. Secrets are never
+# searched: .secrets, .env files and token files are excluded by name.
 
 set -euo pipefail
 
@@ -17,12 +20,12 @@ if [[ $# -lt 1 ]]; then
   cat >&2 <<EOF
 Usage: kb-search <query> [--project <slug>] [--hub-only]
 
-Примеры:
+Examples:
   kb-search "cold email"
   kb-search "reply rate" --project <slug>
   kb-search "Karpathy" --hub-only
 
-Совет: установи ripgrep для более быстрого/умного поиска — brew install ripgrep
+Tip: install ripgrep for faster, smarter search — brew install ripgrep
 EOF
   exit 1
 fi
@@ -40,54 +43,88 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Собираем список корней.
-# Важно: для симлинков добавляем trailing "/" — BSD grep иначе не войдёт внутрь.
+# Build the list of search roots.
+# Important: symlinks get a trailing "/" — otherwise BSD grep will not descend into them.
 ROOTS=()
+# reports/ folders whose .txt digests are searched too (on top of their .md).
+TXT_ROOTS=()
 
 if [[ -n "$PROJECT_FILTER" ]]; then
-  # --project: только один проект, без хаб-файлов
+  # --project: one project only, no hub files
   link="$HUB/projects/$PROJECT_FILTER"
   if [[ -L "$link" ]]; then
     ROOTS+=("$link/")
+    [[ -d "$link/reports" ]] && TXT_ROOTS+=("$link/reports/")
   else
-    echo "⚠ проект не найден: $PROJECT_FILTER (нет симлинка $link)" >&2
+    echo "⚠ project not found: $PROJECT_FILTER (no symlink $link)" >&2
     exit 2
   fi
 else
-  # Хаб-уровневые файлы и папки
+  # Hub-level files and folders
   for f in AGENTS.md CLAUDE.md registry.md index.md log.md state.md backlog.md escalations.md incidents.md strategies.md; do
     [[ -f "$HUB/$f" ]] && ROOTS+=("$HUB/$f")
   done
-  for d in concepts people companies solutions raw; do
+  for d in concepts people companies solutions raw reports sources briefs daily personal; do
     [[ -d "$HUB/$d" ]] && ROOTS+=("$HUB/$d")
   done
+  [[ -d "$HUB/reports" ]] && TXT_ROOTS+=("$HUB/reports/")
 
-  # Все проекты (симлинки) — если не --hub-only
+  # All projects (symlinks) — unless --hub-only
   if [[ $HUB_ONLY -eq 0 ]]; then
     for link in "$HUB"/projects/*; do
       [[ -L "$link" ]] && ROOTS+=("$link/")
+      [[ -L "$link" && -d "$link/reports" ]] && TXT_ROOTS+=("$link/reports/")
     done
   fi
 fi
 
+# Never searched, whatever folder they sit in: secrets, env files, tokens.
+SECRET_GLOBS=('.secrets' '.secrets.*' '*.secrets' '.env' '.env.*' '*.env'
+              '*.token' 'token.json' '*token*.txt' '*secret*.txt')
+
 if [[ ${#ROOTS[@]} -eq 0 ]]; then
-  echo "⚠ нет корней для поиска" >&2
+  echo "⚠ no roots to search" >&2
   exit 3
 fi
 
-# Выбор движка: ripgrep → grep
+# Pick the engine: ripgrep → grep
+# Exit status: 0 when anything matched, 1 (ripgrep) when nothing did, 2 on errors.
+combine() {
+  local rc rc_out=1
+  for rc in "$@"; do
+    if [[ $rc -ge 2 ]]; then rc_out=$rc; break; fi
+    [[ $rc -eq 0 ]] && rc_out=0
+  done
+  echo "$rc_out"
+}
+
 if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then
-  exec rg --follow --type md --color=always --with-filename --heading --line-number "$QUERY" "${ROOTS[@]}"
+  RG_EXCLUDES=()
+  for g in "${SECRET_GLOBS[@]}"; do RG_EXCLUDES+=(--glob "!$g"); done
+  rc_md=0; rc_txt=1
+  rg --follow --type md "${RG_EXCLUDES[@]}" --color=always --with-filename --heading --line-number \
+    "$QUERY" "${ROOTS[@]}" || rc_md=$?
+  if [[ ${#TXT_ROOTS[@]} -gt 0 ]]; then
+    rc_txt=0
+    rg --follow --glob '*.txt' "${RG_EXCLUDES[@]}" --color=always --with-filename --heading --line-number \
+      "$QUERY" "${TXT_ROOTS[@]}" || rc_txt=$?
+  fi
+  exit "$(combine "$rc_md" "$rc_txt")"
 else
-  # macOS BSD grep: -R следует симлинкам, --include фильтрует расширение, -n номера строк
-  # --color=always для цвета даже в pipe; || true чтобы не падать если нет совпадений
-  grep -R --include='*.md' --color=always -H -n "$QUERY" "${ROOTS[@]}" 2>/dev/null || {
-    ec=$?
-    if [[ $ec -eq 1 ]]; then
-      echo "нет совпадений по запросу: $QUERY" >&2
-      exit 0
-    else
-      exit $ec
-    fi
-  }
+  # macOS BSD grep: -R follows symlinks, --include filters by extension, -n prints line numbers
+  # --color=always keeps color even in a pipe; no matches is not a failure
+  GREP_EXCLUDES=()
+  for g in "${SECRET_GLOBS[@]}"; do GREP_EXCLUDES+=("--exclude=$g"); done
+  rc_md=0; rc_txt=1
+  grep -R --include='*.md' "${GREP_EXCLUDES[@]}" --color=always -H -n "$QUERY" "${ROOTS[@]}" 2>/dev/null || rc_md=$?
+  if [[ ${#TXT_ROOTS[@]} -gt 0 ]]; then
+    rc_txt=0
+    grep -R --include='*.txt' "${GREP_EXCLUDES[@]}" --color=always -H -n "$QUERY" "${TXT_ROOTS[@]}" 2>/dev/null || rc_txt=$?
+  fi
+  ec="$(combine "$rc_md" "$rc_txt")"
+  if [[ $ec -eq 1 ]]; then
+    echo "no matches for: $QUERY" >&2
+    exit 0
+  fi
+  exit "$ec"
 fi

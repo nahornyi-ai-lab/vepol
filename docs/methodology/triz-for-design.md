@@ -29,9 +29,11 @@ splitting the difference.
 
 ## The loop
 
-When designing anything non-trivial — a new feature, a refactor, an
-infrastructure change, a workflow rewrite — apply this loop **inside**
-the spec phase:
+When a non-trivial design — a new feature, a refactor, an
+infrastructure change, a workflow rewrite — runs into a real
+trade-off, apply this loop **inside** the spec phase. When it does
+not, the [development loop](development-loop.md) asks only for two
+or three alternatives and why the smallest one won.
 
 ### 1. Formulate the contradiction explicitly
 
@@ -88,7 +90,7 @@ contradiction — you've softened it. Try again.
 
 ### 4. Check against the standard inventive principles
 
-Altshuller compiled [40 principles](https://triz.org/principles/)
+Altshuller compiled [40 principles](https://triz.org/triz/#principles)
 distilled from analyzing many patents. They aren't a checklist; they
 are a palette to spark ideas. A few that come up often in software:
 
@@ -120,7 +122,7 @@ haven't tried.
 TRIZ isn't a separate process running parallel to
 [`spec-driven-workflow.md`](spec-driven-workflow.md) — it's the
 mode of thinking *inside* the spec phase. When you write the spec
-for a non-trivial change:
+for a change with a real trade-off:
 
 - Formulate the contradiction explicitly, in words, in the spec
   document
@@ -174,4 +176,4 @@ analysis of hundreds of thousands of patents. Vepol uses a small
 practical subset; the [official TRIZ site](https://triz.org/) and
 [Altshuller Foundation](https://www.altshuller.ru/world/eng/triz1e.asp)
 have the full body of work. The 40 principles are
-[here](https://triz.org/principles/).
+[here](https://triz.org/triz/#principles).

@@ -47,13 +47,14 @@ change is actually trivial or you've underestimated it.
 
 ### 1. Specification
 
-A spec lives in a markdown file (in your knowledge base for project-
-specific specs, or in `concepts/` for cross-project concerns).
+A spec lives in a markdown file: in the project's
+`knowledge/decisions/` folder for project-specific specs, or in the
+hub's `concepts/` for cross-project concerns.
 
 **It is at most 150 lines.** Headings and their order are yours. What
 is fixed is that a reader gets four answers from the file alone:
 
-- **What we do.** The visible behaviour, in plain language. Not
+- **What we do.** The visible behavior, in plain language. Not
   internals, not motivation, not a product pitch.
 - **How it works.** The logic, structurally: input -> steps -> output,
   with every branch named ("if X then Y"). This is the section where a
@@ -99,7 +100,7 @@ fails, the spec comes back unreviewed — that is not a `BLOCK` verdict
 and does not consume the single review pass.
 
 If you can't write the spec — if the acceptance conditions are vague
-and the failure behaviour is "we'll see what happens" — you don't
+and the failure behavior is "we'll see what happens" — you don't
 understand the problem well enough to build it yet. Stop and learn
 more.
 
@@ -114,7 +115,7 @@ ordered steps, file/artifact list, concrete RED tests, mandatory E2E
 path, and verification commands. The build plan is HOW; the approved
 spec owns WHAT and DONE. If the build plan changes scope, acceptance,
 risk, public behavior, security/privacy, data migration, or the E2E
-  path, return to one lightweight spec review and owner approval.
+path, return to one lightweight spec review and owner approval.
 
 ### 2. Tests before code (RED)
 
@@ -187,8 +188,9 @@ Loop until green.
 ## How AI agents fit in
 
 Vepol assumes you're working with one or more AI agents (Claude Code,
-Codex, Antigravity CLI, and future CLI-capable agents). The agents apply this workflow
-automatically for any non-trivial work:
+Codex, Antigravity CLI, and future CLI-capable agents). The hub
+contract (`AGENTS.md`) tells every agent to apply this workflow to
+any non-trivial work:
 
 - They write the spec first when prompted to make a non-trivial
   change
@@ -225,9 +227,10 @@ next actor can audit how the change came together.
 
 ## Connection to other Vepol disciplines
 
-- **At the spec phase**, apply [TRIZ](triz-for-design.md):
-  formulate the contradiction explicitly, sketch the IFR, look for
-  resolution through separation
+- **At the spec phase**, when the design has a real trade-off, apply
+  [TRIZ](triz-for-design.md): formulate the contradiction explicitly,
+  sketch the IFR, look for resolution through separation. Otherwise
+  record two or three alternatives and why the smallest one won
 - **For non-trivial specs**, run one
   [lightweight spec review](cross-agent-review.md) at the spec stage. Do not
   repeat it for wording/hash churn; only a changed scenario returns to one pass.

@@ -28,7 +28,7 @@ That's it. Everything else is permitted.
 ## Phase 2 — after 2 years (automatic)
 
 **Two years after a release becomes available, that release automatically
-converts to the MIT license** — the most permissive open-source license.
+converts to the MIT license** — one of the most permissive open-source licenses.
 At that point, all restrictions disappear. The software becomes truly
 open source forever.
 
@@ -41,17 +41,18 @@ This means:
 
 ## Why this license
 
-Most commercial-friendly licenses (BUSL, Elastic v2, SSPL) have no
-expiration — they stay restrictive forever. We picked FSL because:
+Other source-available licenses either never convert to an open-source
+license (Elastic License 2.0, SSPL) or take up to four years to convert
+(BUSL). We picked FSL because:
 
 - **Fair to users now.** Personal, commercial, and consulting use all
-  free immediately. Only competing SaaS is restricted.
+  free immediately. Only a competing product or service is restricted.
 - **Open source eventually.** No license-rot risk. Two years out, the
   community owns the code under MIT.
-- **Aligned with our funding model.** We monetize through GitHub
-  Sponsors, optional Pro modules, and rare commercial licenses for
-  enterprises that need pre-conversion freedom — not by holding the
-  code hostage.
+- **Aligned with our funding model.** We fund Vepol through GitHub
+  Sponsors and commercial licenses for companies that need
+  pre-conversion freedom, and we plan optional Pro modules — not by
+  holding the code hostage.
 
 ## In doubt about your use case?
 
@@ -64,5 +65,5 @@ genuinely friendly about this.
 
 Official text and explanation: [fsl.software](https://fsl.software/)
 
-Other projects using FSL: [Sentry](https://sentry.io/),
-[Typebot](https://typebot.io/), [Keygen](https://keygen.sh/).
+Other projects using FSL include [Sentry](https://sentry.io/) and
+[Typebot](https://typebot.io/).

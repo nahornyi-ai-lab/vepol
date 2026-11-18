@@ -1,29 +1,29 @@
-# {{PROJECT_NAME}} — стратегии и гипотезы
+# {{PROJECT_NAME}} — strategies and hypotheses
 
-> Живой документ. Проект-агент обновляет его периодически (раз в неделю по `agent-review`, или когда меняется контекст). Задача — не копить красивые формулировки, а иметь актуальный ответ на «куда двигаюсь и почему» + список проверяемых гипотез об улучшении своей работы.
+> A living document. The project agent updates it periodically (weekly via `agent-review`, or when the context changes). The goal is not to collect pretty wording, but to have a current answer to "where am I heading and why" + a list of testable hypotheses for improving its own work.
 
-## Текущая стратегия
+## Current strategy
 
-_(1 абзац: где мы сейчас, куда двигаемся следующие 1–3 месяца, какие trade-offs приняты. Обновлять при значимом pivot'е.)_
+_(1 paragraph: where we are now, where we are heading over the next 1–3 months, which trade-offs we accepted. Update on any significant pivot.)_
 
-**Последний пересмотр:** {{DATE}}
+**Last reviewed:** {{DATE}}
 
-## Активные гипотезы
+## Active hypotheses
 
-Формат — одна строка на гипотезу. Слабые гипотезы отсеиваем сразу.
+Format: one line per hypothesis. Drop weak hypotheses right away.
 
 <!--
-- **[H-001]** <формулировка через «если X → то Y, измеряем Z»> — предложено YYYY-MM-DD — статус: open | testing | confirmed | refuted — ссылка на эксперимент в `experiments/` если запустили
+- **[H-001]** <phrased as "if X → then Y, we measure Z"> — proposed YYYY-MM-DD — status: open | testing | confirmed | refuted — link to the experiment in `experiments/` if one was run
 -->
 
-## Проверенные гипотезы (архив)
+## Tested hypotheses (archive)
 
-<!-- Закрытые гипотезы с результатом. Формат такой же + `closed: YYYY-MM-DD` + 1-строка вывод. -->
+<!-- Closed hypotheses with their result. Same format + `closed: YYYY-MM-DD` + a 1-line takeaway. -->
 
-## Принципы работы проекта
+## Project working principles
 
-_(короткие правила, которые родились из опыта проекта — то, что агент следует автоматически. Отличаются от hub CLAUDE.md тем, что специфичны именно для этого проекта.)_
+_(short rules born from this project's experience — things the agent follows automatically. They differ from the hub CLAUDE.md in that they are specific to this project.)_
 
-## Open questions — стратегического уровня
+## Open questions — strategic level
 
-_(что неясно в направлении, а не в задаче. Ответ на это меняет стратегию.)_
+_(what is unclear about the direction, not about a task. Answering it changes the strategy.)_

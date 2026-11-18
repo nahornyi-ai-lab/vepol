@@ -9,6 +9,15 @@ SRC_BIN="${KB_MORNING_FIDELITY_SRC_BIN:-$HOME/knowledge/bin}"
 DIGEST="$SRC_BIN/kb-morning-digest"
 DAY=2026-07-13
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMP/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMP/stub-bin/$agent"
+  chmod +x "$TMP/stub-bin/$agent"
+done
+export PATH="$TMP/stub-bin:$PATH" KB_CLAUDE_BIN="$TMP/stub-bin/claude" KB_CODEX_BIN="$TMP/stub-bin/codex"
+
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
@@ -44,6 +53,8 @@ EOF
 {"date":"2026-07-13","status":"completed","no_new_papers":false,
  "selected_papers":[{"id":"paper-1"}],"error":null}
 EOF
+  # Russian field labels on purpose: the hub profile is ru, so this mirrors the
+  # report kb-learning-arxiv writes for a Russian-speaking user.
   cat > "$hub/reports/learning-arxiv-summary-$DAY.md" <<'EOF'
 ARXIV-FIRST
 
@@ -89,7 +100,7 @@ for marker in BRIEF-FIRST BRIEF-MIDDLE BRIEF-FINAL ARXIV-FIRST ARXIV-STUDIED \
 done
 [[ "$OUT" != *"delivery: telegram_ok"* && "$OUT" != *"RETRO-MUST-NOT-SPEAK"* ]] \
   && ok "AC7 frontmatter and Retro tail excluded" || fail "AC7 metadata/tail leaked"
-[[ "$OUT" != *"600–900"* && "$OUT" != *"ДАННЫЕ УТРЕННИХ ПРОЦЕССОВ"* ]] \
+[[ "$OUT" != *"600–900"* && "$OUT" != *"MORNING PROCESS DATA"* ]] \
   && ok "AC4 no synth instruction in source" || fail "AC4 synth prompt remains"
 
 cat > "$TMP/fake-codex" <<EOF
@@ -117,6 +128,13 @@ SPEECH="$HUB/reports/morning-digest-$DAY.txt"
   && grep -q 'MONEY-FINAL' "$SPEECH" \
   && ok "AC4 frozen speech keeps every block final marker" \
   || fail "AC4 frozen speech missing/rewritten"
+# ru hub: the report keeps the Russian strings ru users already get.
+REPORT="$HUB/reports/morning-digest-$DAY.md"
+grep -qx "# Утренний дайджест Vepol — $DAY (понедельник)" "$REPORT" \
+  && grep -qx '## Источники (для проверки, не для озвучки)' "$REPORT" \
+  && grep -q '^- Утренний бриф (finalized) — ' "$REPORT" \
+  && ok "ru report keeps the Russian title, sources heading and sources list" \
+  || fail "ru report title/sources heading/sources list changed"
 
 echo "=== AC5/AC6: no-new and mismatch never select stale research ==="
 NO=$(make_hub nonew)
@@ -134,9 +152,10 @@ echo 'PRIOR-ARXIV-MUST-NOT-SPEAK' > "$NO/reports/learning-arxiv-summary-2026-07-
 echo 'NO-NEW-MONEY' > "$NO/.orchestrator/money-radar-$DAY-digest.txt"
 NO_OUT=$(KB_HUB="$NO" KB_VEPOL_DEV="$TMP/no-project" KB_LANG=ru \
   KB_DIGEST_PROMPT_ONLY=1 "$DIGEST" --date "$DAY" 2>/dev/null)
+# The Russian phrases are kb-learning-arxiv's ru no-new literals (this hub is ru).
 [[ "$NO_OUT" == *"NO-NEW-BRIEF"* && "$NO_OUT" == *"NO-NEW-MONEY"* \
    && "$NO_OUT" != *"PRIOR-ARXIV"* && "$NO_OUT" != *"Сегодня новых статей"* \
-   && "$NO_OUT" != *"Новых статей arXiv"* ]] \
+   && "$NO_OUT" != *"Новых статей arXiv"* && "$NO_OUT" != *"no new arXiv papers"* ]] \
   && ok "AC5 no-new skips arXiv audio and stale report" \
   || fail "AC5 no-new/stale behavior wrong"
 
@@ -226,6 +245,86 @@ PY
   [[ "$TRC" == "0" && ! -e "$TMP/synth-called" && ! -e "$TMP/external-called" ]] \
     && ok "AC8 completed $schema local delivery is terminal" \
     || fail "AC8 completed $schema recaptured or called external rc=$TRC"
+done
+
+echo "=== Language: Russian-only narration rules apply to a ru profile only ==="
+for lang in en es ru; do
+  KB_HUB="$HUB" KB_VEPOL_DEV="$TMP/no-project" KB_LANG="$lang" \
+  python3 - "$DIGEST" "$lang" <<'PY' \
+    && ok "synth prompt narration rules match the $lang profile" \
+    || fail "synth prompt narration rules wrong for the $lang profile"
+import importlib.machinery, importlib.util, re, sys
+loader = importlib.machinery.SourceFileLoader("digest_lang", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+lang = sys.argv[2]
+morning, evening = mod.SYNTH_INSTRUCTION, mod.EVENING_SYNTH_INSTRUCTION
+name = {"en": "English", "es": "Spanish", "ru": "Russian"}[lang]
+# Instructions are English for everyone and keep the user-language directive.
+assert "Hard rules:" in morning and "Hard rules:" in evening
+assert f"in the user's language, {name}" in morning
+assert f"Only {name}." in evening
+cyrillic = re.compile(r"[\u0400-\u04FF]")
+if lang == "ru":
+    # The owner's Russian TTS rules and Russian heading samples stay intact.
+    assert "Write the finished text only in Russian." in morning
+    assert "Latin letters" in morning and "in Cyrillic" in morning
+    assert "«искусственный интеллект», not «ИИ»" in morning
+    assert "## Утро: коротко о главном" in morning
+    assert "## Что закрыто сегодня" in evening
+else:
+    # A non-ru profile must never be told to write Russian (the old bug).
+    assert f"Write the finished text only in {name}." in morning
+    assert "only in Russian" not in morning and "Cyrillic" not in morning
+    assert "Latin letters" not in morning
+    assert not cyrillic.search(morning) and not cyrillic.search(evening)
+    assert "## What I suggest doing today" in morning
+PY
+done
+
+echo "=== Speech drops the arXiv report's machine lines; the report keeps them ==="
+for lang in ru en; do
+  MH=$(make_hub "machine-$lang"); write_selected_fixture "$MH"
+  echo "language: $lang" > "$MH/personal/profile.yaml"
+  if [[ "$lang" == ru ]]; then
+    A=Авторы; C=Категория; SC=Скоры; SO=Источники; O=Оригинал
+  else
+    A=Authors; C=Category; SC=Scores; SO=Sources; O="Original title"
+  fi
+  # Same shape as kb-learning-arxiv's render_report for this language.
+  cat > "$MH/reports/learning-arxiv-summary-$DAY.md" <<EOF
+# arXiv learning — $DAY
+
+## 1. ARXIV-TITLE
+
+- $O: ARXIV-ORIGINAL-TITLE
+- $A: Alice Researcher, Bob Scholar
+- arXiv: https://arxiv.org/abs/2607.00001
+- $C: cs.AI · 2026-07-12
+- $SC: \`{"topic_relevance": 2, "abstract_signal": 3, "final": 41}\`
+
+**Studied:** ARXIV-STUDIED
+
+$SO: [[arxiv-learning-snapshot-$DAY]], [[arxiv-learning-translation-codex-$DAY]]
+EOF
+  # A wiki-link line in the BRIEF is ordinary prose and must still be spoken.
+  printf '%s\n' '---' "date: $DAY" '---' '' 'BRIEF-FIRST' '' "$SO: [[brief-note]]" '' 'BRIEF-FINAL' \
+    > "$MH/briefs/$DAY.md"
+  KB_HUB="$MH" KB_VEPOL_DEV="$TMP/no-project" "$DIGEST" --date "$DAY" --no-push >/dev/null 2>&1
+  MRC=$?
+  SPOKEN=$(cat "$MH/reports/morning-digest-$DAY.txt" 2>/dev/null)
+  WRITTEN=$(cat "$MH/reports/morning-digest-$DAY.md" 2>/dev/null)
+  [[ "$MRC" == "0" && "$SPOKEN" == *"ARXIV-STUDIED"* && "$SPOKEN" == *"ARXIV-ORIGINAL-TITLE"* \
+     && "$SPOKEN" != *"topic_relevance"* && "$SPOKEN" != *"arxiv-learning-snapshot"* \
+     && "$SPOKEN" != *"Alice Researcher"* && "$SPOKEN" != *"cs.AI"* \
+     && "$SPOKEN" != *"$SC:"* && "$SPOKEN" != *"arXiv:"* ]] \
+    && ok "[$lang] speech has no scores/sources/authors/category/link lines" \
+    || fail "[$lang] machine lines reached the speech (rc=$MRC): $SPOKEN"
+  [[ "$SPOKEN" == *"$SO: brief note"* && "$SPOKEN" == *"BRIEF-FINAL"* ]] \
+    && ok "[$lang] the brief's own lines are untouched" || fail "[$lang] brief lines were stripped"
+  [[ "$WRITTEN" == *'"topic_relevance": 2'* && "$WRITTEN" == *"[[arxiv-learning-snapshot-$DAY]]"* \
+     && "$WRITTEN" == *"$A: Alice Researcher"* && "$WRITTEN" == *"$C: cs.AI"* ]] \
+    && ok "[$lang] the written report keeps every line" || fail "[$lang] the written report lost lines"
 done
 
 echo "=== AC5/AC9: learning literals and current public documentation ==="
