@@ -107,8 +107,10 @@ def setup_sandbox():
     # --json-status`. We extract the cwd to write the report there.
     stub_broker = textwrap.dedent(f"""\
         #!/usr/bin/env python3
-        import sys, datetime, pathlib, re
+        import sys, datetime, pathlib, re, json
         args = sys.argv[1:]
+        with open(pathlib.Path({str(p)!r}) / "broker-argv.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(args) + "\\n")
         # find --cwd
         cwd = None
         for i, a in enumerate(args):
@@ -132,7 +134,7 @@ def setup_sandbox():
             f"---\\nreport_id: {{slug}}-{{date}}\\nslug: {{slug}}\\ndate: {{date}}\\n"
             f"cycle: evening\\nparent: {{parent}}\\nchildren_rolled_up: []\\n"
             f"status: done\\nrun_id: {{run_id}}\\n---\\n\\n"
-            f"## Что сделано сегодня\\n- stub task by stub broker\\n\\n"
+            f"## What was done today\\n- stub task by stub broker\\n\\n"
             f"## Candidates\\n\\n## Escalations\\n",
             encoding='utf-8',
         )
@@ -213,6 +215,16 @@ def main():
     print(proc.stderr, file=sys.stderr) if proc.returncode != 0 else None
     assert_(proc.returncode == 0,
             f"retro exits 0 (got {proc.returncode}; stderr={proc.stderr[-300:]})")
+
+    # Each project retro must write its report, so the cycle asks the broker
+    # for the edit grant; the prompt stays the first argument.
+    calls = [json.loads(ln) for ln in
+             (sb / "broker-argv.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert_(len(calls) == 3, f"broker spawned once per project (got {len(calls)})")
+    assert_(all("--allow-edits" in c for c in calls),
+            "every project retro spawn passes --allow-edits")
+    assert_(all(c[0].startswith("# Cycle retro") for c in calls),
+            "the retro prompt is the broker's first argument")
 
     # Verify each project has a `done` report
     today = subprocess.check_output(["date", "+%Y-%m-%d"]).decode().strip()

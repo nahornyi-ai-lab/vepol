@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# test-executor.sh — acceptance tests для `bin/kb-execute-next`.
-# Спека: ~/knowledge/concepts/auto-trigger-executor.md §6.
+# test-executor.sh — acceptance tests for `bin/kb-execute-next`.
+# Spec: §6 of the auto-trigger executor design notes (kept in the author's own
+# knowledge hub, not shipped in this repo).
 #
-# Запуск:
+# Run:
 #   bash bin/tests/test-executor.sh           # T1-T4, T8 (pure); T5-T7 — SKIP
-#   KB_TEST_LIVE=1 bash bin/tests/...         # включает живые спавны T5-T7
+#   KB_TEST_LIVE=1 bash bin/tests/...         # enables live spawns T5-T7
 #
-# Каждый тест создаёт свой temp-проект и удаляет после. На реальный registry
-# не пишет — использует `--project-path`. На реальный executor.log/lock — не пишет,
-# использует `KB_EXECUTOR_LOG_FILE` / `KB_EXECUTOR_LOCK_FILE` в tmp.
+# Each test creates its own temp project and deletes it afterwards. It never
+# writes to the real registry — it uses `--project-path`. It never writes to the
+# real executor.log/lock — it uses `KB_EXECUTOR_LOG_FILE` / `KB_EXECUTOR_LOCK_FILE` in tmp.
 #
-# Exit code = число FAIL. 0 если все зелёные/skip.
+# Exit code = number of FAILs. 0 if all are green/skip.
 
-set -u  # не -e: ошибка в тесте не должна валить весь скрипт
+set -u  # not -e: a failing test must not abort the whole script
 
 HUB="${KB_HUB:-$HOME/knowledge}"
 EXECUTOR="${KB_EXECUTOR:-$HUB/bin/kb-execute-next}"
@@ -84,14 +85,14 @@ _env_for_test() {
 # --- tests ---
 
 t1_parses_auto_true() {
-  _bold "T1: парсит auto:true, игнорирует строку без флага"; echo
+  _bold "T1: parses auto:true, ignores a line without the flag"; echo
   if ! _executor_present; then fail "T1 (executor not implemented yet)"; return; fi
 
   local backlog='# Backlog
 
 ## Open
-- [ ] task-A — opened 2026-04-19 by self — context: нет флага
-- [ ] task-B — opened 2026-04-19 by self — auto: true — context: забирается
+- [ ] task-A — opened 2026-04-19 by self — context: no flag
+- [ ] task-B — opened 2026-04-19 by self — auto: true — context: gets picked
 
 ## Done
 '
@@ -114,7 +115,7 @@ t1_parses_auto_true() {
 }
 
 t2_dry_run_no_mutation() {
-  _bold "T2: --dry-run не меняет backlog.md"; echo
+  _bold "T2: --dry-run does not change backlog.md"; echo
   if ! _executor_present; then fail "T2 (executor not implemented yet)"; return; fi
 
   local backlog='# Backlog
@@ -140,14 +141,14 @@ t2_dry_run_no_mutation() {
 }
 
 t3_no_task_exits_zero() {
-  _bold "T3: нет auto:true задач → no-task, exit 0"; echo
+  _bold "T3: no auto:true tasks → no-task, exit 0"; echo
   if ! _executor_present; then fail "T3 (executor not implemented yet)"; return; fi
 
   local backlog='# Backlog
 
 ## Open
-- [ ] only-manual — opened 2026-04-19 by self — context: нет флага
-- [ ] also-manual — opened 2026-04-19 by self — auto: false — context: явно выключено
+- [ ] only-manual — opened 2026-04-19 by self — context: no flag
+- [ ] also-manual — opened 2026-04-19 by self — auto: false — context: explicitly off
 '
   local root; root=$(_setup_project t3 "$backlog")
   _env_for_test "$root"
@@ -170,7 +171,7 @@ t3_no_task_exits_zero() {
 }
 
 t4_flock_blocks_concurrent() {
-  _bold "T4: flock блокирует конкурентный запуск"; echo
+  _bold "T4: flock blocks a concurrent run"; echo
   if ! _executor_present; then fail "T4 (executor not implemented yet)"; return; fi
 
   # Use python3 fcntl.flock as the lock-holder so test runs on macOS too
@@ -218,7 +219,7 @@ time.sleep(5)
 }
 
 t5_live_success_closes_to_done() {
-  _bold "T5: live-запуск, задача уезжает в Done"; echo
+  _bold "T5: live run, the task moves to Done"; echo
   if [ "${KB_TEST_LIVE:-0}" != "1" ]; then
     skip "T5" "set KB_TEST_LIVE=1 to run real claude spawn"; return
   fi
@@ -227,7 +228,7 @@ t5_live_success_closes_to_done() {
   local backlog='# Backlog
 
 ## Open
-- [ ] Создай файл hello.txt с содержимым PING — opened 2026-04-19 by self — auto: true — context: smoke-test T5
+- [ ] Create a file hello.txt containing PING — opened 2026-04-19 by self — auto: true — context: smoke-test T5
 
 ## Done
 '
@@ -260,7 +261,7 @@ t5_live_success_closes_to_done() {
 }
 
 t6_escalation_goes_to_escalations_md() {
-  _bold "T6: задача требующая человека → escalations.md"; echo
+  _bold "T6: a task that needs a human → escalations.md"; echo
   if [ "${KB_TEST_LIVE:-0}" != "1" ]; then
     skip "T6" "set KB_TEST_LIVE=1 to run real claude spawn"; return
   fi
@@ -269,7 +270,7 @@ t6_escalation_goes_to_escalations_md() {
   local backlog='# Backlog
 
 ## Open
-- [ ] Подключись к банку и сними 1000 EUR — opened 2026-04-19 by self — auto: true — context: T6 escalation
+- [ ] Connect to the bank and withdraw 1000 EUR — opened 2026-04-19 by self — auto: true — context: T6 escalation
 
 ## Done
 '
@@ -298,7 +299,7 @@ t6_escalation_goes_to_escalations_md() {
 }
 
 t7_timeout_returns_to_open() {
-  _bold "T7: timeout — строка возвращается в Open"; echo
+  _bold "T7: timeout — the line goes back to Open"; echo
   if [ "${KB_TEST_LIVE:-0}" != "1" ]; then
     skip "T7" "set KB_TEST_LIVE=1 to run real claude spawn"; return
   fi
@@ -307,7 +308,7 @@ t7_timeout_returns_to_open() {
   local backlog='# Backlog
 
 ## Open
-- [ ] Выполняй команду `sleep 600` и не возвращайся пока не закончится — opened 2026-04-19 by self — auto: true — context: T7 timeout
+- [ ] Run the command `sleep 600` and do not return until it finishes — opened 2026-04-19 by self — auto: true — context: T7 timeout
 
 ## Done
 '
@@ -335,13 +336,13 @@ t7_timeout_returns_to_open() {
 }
 
 t9_prompt_field_override() {
-  _bold "T9: поле prompt: в строке переопределяет дефолтный prompt"; echo
+  _bold "T9: a prompt: field in the line overrides the default prompt"; echo
   if ! _executor_present; then fail "T9 (executor not implemented yet)"; return; fi
 
   local backlog='# Backlog
 
 ## Open
-- [ ] Полная задача с кучей метаданных — opened 2026-04-20 by self — auto: true — prompt: Скажи PONG одним словом — context: остальное игнорируется
+- [ ] Full task with lots of metadata — opened 2026-04-20 by self — auto: true — prompt: Say PONG in one word — context: the rest is ignored
 
 ## Done
 '
@@ -354,22 +355,184 @@ t9_prompt_field_override() {
   if [ "$code" -ne 0 ]; then
     fail "T9: exit=$code (expected 0). stderr: $err"; return
   fi
-  # Dry-run выводит prompt, который будет передан агенту.
-  # При заданном prompt: — должен быть ровно его текст, без задачи и контекста.
-  if ! grep -q 'Скажи PONG одним словом' <<<"$out"; then
+  # Dry-run prints the prompt that will be passed to the agent.
+  # With prompt: set, it must be exactly that text, without the task or context.
+  if ! grep -q 'Say PONG in one word' <<<"$out"; then
     fail "T9: stdout missing prompt-override text. got: $out"; return
   fi
-  if grep -q 'остальное игнорируется' <<<"$out"; then
-    fail "T9: context leaked into prompt (должен быть пропущен при prompt:-override)"; return
+  if grep -q 'the rest is ignored' <<<"$out"; then
+    fail "T9: context leaked into prompt (must be dropped with a prompt: override)"; return
   fi
-  if grep -q 'куча метаданных' <<<"$out"; then
-    fail "T9: task body leaked into prompt (должен быть заменён prompt-полем)"; return
+  if grep -q 'lots of metadata' <<<"$out"; then
+    fail "T9: task body leaked into prompt (must be replaced by the prompt field)"; return
   fi
   pass "T9"
 }
 
+# --- spawn lanes (stub agents; never a real claude/codex) ---
+#
+# Each stub records its argv as one JSON line in $KB_TEST_ARGV_LOG and prints
+# a valid OUTCOME line, so the executor runs its whole live path offline.
+
+_src_bin() {
+  (cd "$(dirname "$EXECUTOR")" && pwd -P)
+}
+
+_write_argv_stub() {
+  # usage: _write_argv_stub <path>
+  cat > "$1" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["KB_TEST_ARGV_LOG"], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(sys.argv) + "\n")
+print("OUTCOME: closed: stub agent")
+PY
+  chmod +x "$1"
+}
+
+_bin_with_stub_broker() {
+  # usage: _bin_with_stub_broker <dir> — a bin/ of links to the real scripts,
+  # except kb-orchestrator-run, which is an argv-recording stub.
+  local dir="$1" src entry
+  src=$(_src_bin)
+  mkdir -p "$dir"
+  for entry in "$src"/*; do
+    ln -s "$entry" "$dir/$(basename "$entry")"
+  done
+  rm -f "$dir/kb-orchestrator-run"
+  _write_argv_stub "$dir/kb-orchestrator-run"
+}
+
+_check_argv() {
+  # usage: _check_argv <log> <python check over argv list `a` and `root`> <root>
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+log, check, root = sys.argv[1:4]
+try:
+    lines = [ln for ln in open(log, encoding="utf-8") if ln.strip()]
+except OSError:
+    lines = []
+if len(lines) != 1:
+    print(f"expected one recorded call, got {len(lines)}")
+    sys.exit(1)
+a = json.loads(lines[0])
+problem = eval(check, {"a": a, "root": root})
+if problem:
+    print(f"{problem}; argv={[x[:60] for x in a]}")
+    sys.exit(1)
+PY
+}
+
+_LANE_BACKLOG='# Backlog
+
+## Open
+- [ ] Write the lane marker — opened 2026-11-18 by self — auto: true — context: lane test
+
+## Done
+'
+
+t10_direct_lane_prompt_follows_p() {
+  _bold "T10: direct claude lane — prompt right after -p, grant flags after it, shared claude lookup"; echo
+  if ! _executor_present; then fail "T10 (executor not implemented yet)"; return; fi
+
+  # slug "hub" with KB_HUB=<project>/knowledge: not registered, no broker → direct lane.
+  local root; root=$(_setup_project t10 "$_LANE_BACKLOG")
+  root=$(cd "$root" && pwd -P)
+  _env_for_test "$root"
+  ln -s "$(_src_bin)" "$root/knowledge/bin"
+  mkdir -p "$root/stub" "$root/refuse"
+  _write_argv_stub "$root/stub/claude"
+  # The recording stub is reachable only through KB_CLAUDE_BIN. The first
+  # "claude" on PATH refuses, so a bare-name or PATH lookup fails this test
+  # instead of starting a real Claude Code with edit and shell grants.
+  printf '#!/bin/sh\necho "test stub: no real claude calls" >&2\nexit 1\n' > "$root/refuse/claude"
+  chmod +x "$root/refuse/claude"
+
+  local out err code
+  _run out err code -- env PATH="$root/refuse:$PATH" KB_HUB="$root/knowledge" \
+    KB_CLAUDE_BIN="$root/stub/claude" KB_TEST_ARGV_LOG="$root/argv.jsonl" KB_EXEC_BROKER=0 \
+    "$EXECUTOR" hub --project-path "$root" --timeout 60
+
+  if [ "$code" -ne 0 ] || ! grep -qx 'result: closed' <<<"$out"; then
+    fail "T10: exit=$code, expected 'result: closed'. out: $out err: $err"; return
+  fi
+  local diag
+  if ! diag=$(_check_argv "$root/argv.jsonl" '(
+      "argv[0] is not the KB_CLAUDE_BIN stub" if a[0] != root + "/stub/claude" else
+      "argv[1] is not -p" if a[1] != "-p" else
+      "argv[2] is not the task prompt" if not (a[2].startswith("You are in project hub.")
+                                               and "## OUTCOME contract" in a[2]) else
+      "grant flags do not follow the prompt" if a[3:] != ["--add-dir", root,
+          "--permission-mode", "acceptEdits", "--allowedTools", "Bash"] else
+      "")' "$root"); then
+    fail "T10: $diag"; return
+  fi
+  pass "T10"
+}
+
+t11_broker_lane_allows_edits() {
+  _bold "T11: broker lane (KB_EXEC_BROKER=1) passes --allow-edits"; echo
+  if ! _executor_present; then fail "T11 (executor not implemented yet)"; return; fi
+
+  local root; root=$(_setup_project t11 "$_LANE_BACKLOG")
+  root=$(cd "$root" && pwd -P)
+  _env_for_test "$root"
+  _bin_with_stub_broker "$root/knowledge/bin"
+
+  local out err code
+  _run out err code -- env KB_HUB="$root/knowledge" KB_EXEC_BROKER=1 \
+    KB_TEST_ARGV_LOG="$root/argv.jsonl" \
+    "$EXECUTOR" hub --project-path "$root" --timeout 60
+
+  if [ "$code" -ne 0 ] || ! grep -qx 'result: closed' <<<"$out"; then
+    fail "T11: exit=$code, expected 'result: closed'. out: $out err: $err"; return
+  fi
+  local diag
+  if ! diag=$(_check_argv "$root/argv.jsonl" '(
+      "argv[1] is not the task prompt" if not a[1].startswith("You are in project hub.") else
+      "no --allow-edits" if "--allow-edits" not in a else
+      "--cwd is not the project" if a[a.index("--cwd") + 1] != root else
+      "")' "$root"); then
+    fail "T11: $diag"; return
+  fi
+  pass "T11"
+}
+
+t12_registered_project_allows_edits() {
+  _bold "T12: registered project → kb-spawn-project → broker with --allow-edits"; echo
+  if ! _executor_present; then fail "T12 (executor not implemented yet)"; return; fi
+
+  local root; root=$(_setup_project t12 "$_LANE_BACKLOG")
+  root=$(cd "$root" && pwd -P)
+  _env_for_test "$root"
+  local hub="$root/hub"
+  mkdir -p "$hub/projects"
+  _bin_with_stub_broker "$hub/bin"
+  ln -s "$root/knowledge" "$hub/projects/t12"
+  printf '| slug | status | path | description |\n|---|---|---|---|\n| t12 | live | `%s` | lane test |\n' \
+    "$root" > "$hub/registry.md"
+
+  local out err code
+  _run out err code -- env KB_HUB="$hub" KB_EXEC_BROKER=0 \
+    KB_TEST_ARGV_LOG="$root/argv.jsonl" \
+    "$EXECUTOR" t12 --timeout 60
+
+  if [ "$code" -ne 0 ] || ! grep -qx 'result: closed' <<<"$out"; then
+    fail "T12: exit=$code, expected 'result: closed'. out: $out err: $err"; return
+  fi
+  local diag
+  if ! diag=$(_check_argv "$root/argv.jsonl" '(
+      "no --allow-edits" if "--allow-edits" not in a else
+      "--cwd is not the project" if a[a.index("--cwd") + 1] != root else
+      "the task prompt is not the last argument" if not a[-1].startswith("You are in project t12.") else
+      "")' "$root"); then
+    fail "T12: $diag"; return
+  fi
+  pass "T12"
+}
+
 t8_depth_limit_rejects() {
-  _bold "T8: KB_EXECUTOR_DEPTH ≥ 3 → reject до запуска"; echo
+  _bold "T8: KB_EXECUTOR_DEPTH ≥ 3 → reject before launch"; echo
   if ! _executor_present; then fail "T8 (executor not implemented yet)"; return; fi
 
   local backlog='# Backlog
@@ -412,6 +575,9 @@ t6_escalation_goes_to_escalations_md
 t7_timeout_returns_to_open
 t8_depth_limit_rejects
 t9_prompt_field_override
+t10_direct_lane_prompt_follows_p
+t11_broker_lane_allows_edits
+t12_registered_project_allows_edits
 
 echo
 _bold "=== summary ==="; echo

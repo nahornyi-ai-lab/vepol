@@ -2,6 +2,12 @@
 # kb-session-start — SessionStart hook wrapper.
 # Injects a startup bundle: manifest, AGENTS.md, agent card, current state,
 # recent log, active work, open escalations, and small incident-derived rules.
+#
+# Usage:
+#   kb-session-start                     # hook mode: reads the hook JSON on stdin
+#   kb-session-start --print [--cwd DIR] # plain Markdown for hookless agents;
+#                                        # DIR defaults to $CLAUDE_PROJECT_DIR,
+#                                        # then the current directory
 set -e
 
 PRINT_MODE=0
@@ -41,6 +47,11 @@ fi
 PROJECT="$PROJECT_ARG"
 if [[ -z "$PROJECT" ]]; then
   PROJECT="${CLAUDE_PROJECT_DIR:-}"
+fi
+# --print is run by hand or by a hookless agent from the project folder, with no
+# hook JSON to name the cwd, so it falls back to the current directory.
+if [[ -z "$PROJECT" && $PRINT_MODE -eq 1 ]]; then
+  PROJECT="$PWD"
 fi
 if [[ -z "$PROJECT" && -n "$STDIN_JSON" ]]; then
   PROJECT=$(printf '%s' "$STDIN_JSON" | python3 -c 'import sys,json
@@ -94,7 +105,7 @@ This project looks like a real project (has marker files), but does not have a \
 
 **If the user wants to start tracking this project in their knowledge base**, invoke the **init-kb** skill. It will analyze the project, propose slug/category/description, and bootstrap the structure with a single dialog. After that, SessionStart/SessionEnd hooks will automatically maintain the wiki going forward.
 
-**Trigger phrases**: «заведи вику», «init-kb», «/init-kb», «создай базу знаний здесь», «нужна вика».
+**Trigger phrases**: \"set up a wiki\", \"init-kb\", \"/init-kb\", \"create a knowledge base here\", \"I need a wiki\" — or the same in the user's language, e.g. Russian «заведи вику», «создай базу знаний здесь», «нужна вика».
 
 Do NOT run init-kb automatically — wait for the user to ask or indicate they want it."
     if [[ -x "$KB_HUB_DIR/bin/kb-cli-roster" ]]; then
@@ -128,6 +139,7 @@ from __future__ import annotations  # keep PEP 604 (Path | None) working on stoc
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -344,11 +356,24 @@ def run_kb_board(backlog: Path, status: str):
         return None, f"kb-board json parse failed: {exc}"
 
 
+# Open Backlog items are where `kb-task` and `kb-board append` put new work, so
+# they belong to the active work too. A backlog can be long, so the slice is
+# defined as its first BACKLOG_LIMIT items (highest priority first when the
+# board reports one, board order otherwise) plus one "+K more" line.
+BACKLOG_LIMIT = 10
+
+
+def backlog_rank(item):
+    m = re.fullmatch(r"[Pp](\d+)", str(item.get("priority") or "").strip())
+    # Unknown or missing priority ranks as P2, kb-board's default.
+    return int(m.group(1)) if m else 2
+
+
 def build_active_work():
     path = K / "backlog.md"
     if not path.exists():
         return Section("active_work", "Active Work", "", path, "missing", readable=False)
-    statuses = ["Ready", "In Progress", "Blocked", "Review"]
+    statuses = ["Ready", "In Progress", "Blocked", "Review", "Backlog"]
     lines = []
     errors = []
     for status in statuses:
@@ -357,12 +382,25 @@ def build_active_work():
             errors.append(err)
             continue
         if items:
+            hidden = 0
+            if status == "Backlog":
+                items = sorted(items, key=backlog_rank)  # stable: ties keep board order
+                hidden = max(0, len(items) - BACKLOG_LIMIT)
+                items = items[:BACKLOG_LIMIT]
             for item in items:
                 title = item.get("title", "")
-                pid = item.get("plan_item_id", "")
+                # A hand-written `- [ ] ...` line has no plan_item_id; say nothing
+                # rather than "None", which reads as an id an agent could act on.
+                pid = item.get("plan_item_id") or ""
+                ref = f"{pid} — " if pid else ""
                 owner = item.get("claim_owner") or item.get("owner") or ""
                 extra = f" ({owner})" if owner else ""
-                lines.append(f"- {status}: {pid} — {title}{extra}")
+                lines.append(f"- {status}: {ref}{title}{extra}")
+            if hidden:
+                lines.append(
+                    f"- Backlog: +{hidden} more not listed; see them with "
+                    f"`{shlex.quote(str(KB_HUB / 'bin' / 'kb-board'))} list "
+                    f"{shlex.quote(str(path))} --status Backlog`")
     if errors and not lines:
         # The board could not be read. That is `missing`, and it emits nothing:
         # a diagnostic sentence in the body would read back as delivered content.

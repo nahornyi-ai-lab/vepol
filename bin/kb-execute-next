@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """kb-execute-next — auto-trigger executor (Phase 1b).
 
-Спека: ~/knowledge/concepts/auto-trigger-executor.md
-План: ~/.claude/plans/rustling-marinating-sketch.md (Phase 1b — claim-token,
+Design notes: the auto-trigger executor spec (kept in the author's own
+knowledge hub, not shipped in this repo).
+Plan: ~/.claude/plans/rustling-marinating-sketch.md (Phase 1b — claim-token,
       hash-chain replay detector, agent OUTCOME contract, optional broker routing)
 
-Берёт первую `- [ ] ... auto: true` строку из `## Open` секции проектного
-backlog.md и спавнит агента в проектной cwd. Контракт исполнения:
+Takes the first `- [ ] ... auto: true` line from the `## Open` section of a
+project's backlog.md and spawns an agent in the project cwd. Execution contract:
 
-1. Pick: `kb-backlog claim <slug> --line N` под per-backlog lock; CLI
-   возвращает claim_id (16-hex token).
+1. Pick: `kb-backlog claim <slug> --line N` under the per-backlog lock; the CLI
+   returns a claim_id (16-hex token).
 2. Pre-spawn snapshot: file_hash_before_spawn + (segment_id, offset_before)
-   зарегистрированы в spawns-active.json под spawns.lock.
-3. Spawn agent: либо через `kb-orchestrator-run` (broker, если KB_EXEC_BROKER=1
-   или `.orchestration.yaml: exec_broker: true`), либо direct claude.
-   Lock не держится во время spawn.
+   are registered in spawns-active.json under spawns.lock.
+3. Spawn agent: either through `kb-orchestrator-run` (broker, if KB_EXEC_BROKER=1
+   or `.orchestration.yaml: exec_broker: true`) or by calling claude directly.
+   The lock is not held during the spawn.
 4. Parse agent stdout per OUTCOME contract — exactly one
    `OUTCOME: closed|escalated|failed: <reason>` as last non-empty stdout line.
    Otherwise → revert + escalation.
@@ -51,6 +52,12 @@ SPAWNS_ACTIVE_PATH = HUB / ".orchestrator" / "spawns-active.json"
 
 sys.path.insert(0, str(HUB / "bin"))
 from _kb_backlog import journal, locks, spawns  # noqa: E402
+from _kb_claude_runner import claude_bin  # noqa: E402
+
+try:
+    import _kb_profile  # noqa: E402
+except Exception:  # profile module optional; prompts fall back to English
+    _kb_profile = None
 
 OUTCOME_RE = re.compile(r"^OUTCOME:\s*(?P<enum>closed|escalated|failed)\s*:\s*(?P<reason>.+)$")
 
@@ -134,6 +141,17 @@ def task_title(body):
     return body.split(" —", 1)[0].strip()
 
 
+def user_language_name():
+    """Prompt-ready name of the user's language (KB_LANG / profile.yaml).
+    Falls back to English if the profile module is missing or fails."""
+    if _kb_profile is None:
+        return "English"
+    try:
+        return _kb_profile.language_directive(_kb_profile.get_language(HUB))
+    except Exception:
+        return "English"
+
+
 def build_prompt(task, slug):
     """Build the agent prompt. The agent contract requires exactly one OUTCOME
     line as the last non-empty stdout line. Spawn-side parser enforces it.
@@ -148,27 +166,35 @@ def build_prompt(task, slug):
             flags=re.IGNORECASE,
         )
         base = (
-            f"Ты в проекте {slug}. В твоём backlog.md тебе назначена задача:\n\n"
+            f"You are in project {slug}. Your backlog.md assigns you this task:\n\n"
             f"{clean}\n\n"
-            "Выполни задачу. По завершении:\n"
-            "- успех — обнови state/log/нужные файлы; **не правь backlog.md напрямую** — executor закроет строку.\n"
-            "- нужен человек / доступ / недостающая информация → допиши запись в "
-            "`knowledge/escalations.md` (секция `## Open`).\n"
-            "- технический сбой (rate-limit, MCP-недоступен) → запись в "
+            "Do the task. When you finish:\n"
+            "- success — update state/log/the files that need it; **do not edit backlog.md directly** — the executor will close the line.\n"
+            "- needs a human / access / missing information → add an entry to "
+            "`knowledge/escalations.md` (section `## Open`).\n"
+            "- technical failure (rate limit, MCP unavailable) → add an entry to "
             "`knowledge/incidents.md`.\n\n"
-            "Не выходи за скоуп задачи. Не бери смежные open-пункты."
+            "Stay within the task's scope. Do not pick up neighbouring open items."
         )
+    # The prompt used to be Russian, which also set the language of what the
+    # agent wrote; now the user's profile language sets it explicitly.
+    language = (
+        "\n\n"
+        "Write any text meant for the user (state/log entries, escalations, incidents, "
+        f"the OUTCOME summary or reason) in {user_language_name()}. "
+        "Keep the OUTCOME tokens below exactly as shown."
+    )
     contract = (
         "\n\n"
-        "## OUTCOME contract (обязательно)\n"
-        "Перед выходом emit ровно одну строку формата как ПОСЛЕДНЮЮ непустую stdout-строку:\n"
-        "    OUTCOME: closed: <one-line summary>           — задача выполнена успешно\n"
-        "    OUTCOME: escalated: <reason>                  — поднял вверх в escalations.md\n"
-        "    OUTCOME: failed: <reason>                     — техническая проблема\n"
-        "Никаких дополнительных stdout строк после OUTCOME. **Не правь backlog.md** — "
-        "executor закроет строку через atomic API."
+        "## OUTCOME contract (required)\n"
+        "Before you exit, emit exactly one line in this format as the LAST non-empty stdout line:\n"
+        "    OUTCOME: closed: <one-line summary>           — task completed successfully\n"
+        "    OUTCOME: escalated: <reason>                  — escalated to escalations.md\n"
+        "    OUTCOME: failed: <reason>                     — technical problem\n"
+        "No extra stdout lines after OUTCOME. **Do not edit backlog.md** — "
+        "the executor will close the line through the atomic API."
     )
-    return base + contract
+    return base + language + contract
 
 
 def project_is_registered(slug):
@@ -365,17 +391,23 @@ def run_live(slug, project, backlog_path, task, prompt, timeout):
             segment_id=seg_before, offset=offset_before, started_at=started_at,
         )
 
-    # Step 3: spawn agent
+    # Step 3: spawn agent. The task is project work, so every lane may edit files and run
+    # commands: the broker gets --allow-edits, and kb-spawn-project passes it itself.
     if use_broker_for(slug, project):
         spawn_cmd = [str(KB_ORCHESTRATOR_RUN), prompt,
-                     "--cwd", str(project), "--timeout", str(timeout)]
+                     "--cwd", str(project), "--timeout", str(timeout), "--allow-edits"]
         subprocess_timeout = timeout + 30
     elif project_is_registered(slug):
         spawn_cmd = [str(HUB / "bin" / "kb-spawn-project"), slug, prompt,
                      "--timeout", str(timeout)]
         subprocess_timeout = timeout + 30
     else:
-        spawn_cmd = ["claude", "-p", "--add-dir", str(project), prompt]
+        # Same grant as the broker's Claude lane with --allow-edits: auto-accept edits in the
+        # project and allow shell commands (a bare Bash rule allows every command, in any
+        # folder). The prompt goes right after -p: --add-dir and --allowedTools take a list of
+        # values, so a prompt placed after them would be read as one more value.
+        spawn_cmd = [claude_bin(), "-p", prompt, "--add-dir", str(project),
+                     "--permission-mode", "acceptEdits", "--allowedTools", "Bash"]
         subprocess_timeout = timeout
 
     child_env = os.environ.copy()

@@ -1,18 +1,24 @@
 # Vepol Python dependencies.
 #
-# Installed once per user via `pip3 install -r requirements.txt` (or
-# inside a venv — see install.sh). Used by Vepol modules that need
-# Python beyond the standard library.
+# Installed once per user into the python3 on your PATH, with the pip line
+# under "After install" in README.md:
+#   python3 -m pip install --user -r requirements.txt
+# (Homebrew's Python: --break-system-packages in place of --user.) The kb-*
+# commands run that python3, so a separate venv is not seen. Used by Vepol
+# modules that need Python beyond the standard library.
 #
 # Modules that need these:
 #   - People  → python-frontmatter, click, PyYAML, jellyfish
-#   - Daily NotebookLM research → notebooklm-py (CLI command: notebooklm)
+#   - Daily NotebookLM research → notebooklm-py (CLI command: notebooklm;
+#     for scheduled runs install it with `pipx install notebooklm-py`)
 #   - Daily-plan generator → standard library only (no extras)
 #   - Evolution Loop → PyYAML
 #
-# External-source ingestion (calendar, mail, chat, etc.) goes through
-# the MCP host via `claude -p`. Vepol modules do NOT link against
-# vendor SDKs. See docs/methodology/mcp-first-sources.md.
+# External sources are read without vendor SDKs or OAuth client libraries
+# in Vepol's code: the calendar through Claude Code's MCP connector
+# (`claude -p`), mail through `codex exec` and Codex's Gmail plugin. The
+# one direct client is Telethon, for Telegram, which signs in with your own
+# Telegram account. See docs/methodology/mcp-first-sources.md.
 #
 # When adding a Python dependency, pin a known-good version range and
 # add a one-line note about which module needs it.
@@ -22,3 +28,8 @@ click>=8.1,<9.0                # People — CLI framework for kb-contact, kb-cal
 PyYAML>=6.0,<7.0               # People — _index.yaml read/write
 jellyfish>=1.0,<2.0            # People — Jaro-Winkler string distance for soft-signal dedup
 notebooklm-py>=0.3.4,<0.4      # Daily research audio — NotebookLM CLI
+
+# Optional — only for the features named. Uncomment, or install them on their own:
+#   python3 -m pip install --user 'telethon>=1.36,<2.0' 'python-dotenv>=1.0,<2.0'
+# telethon>=1.36,<2.0          # Telegram people collector (kb-telegram-people) and the multi-bot runtime (kb-multibot-*)
+# python-dotenv>=1.0,<2.0      # Multi-bot runtime — kb-multibot-setup reads ~/.orchestrator/multibot.env

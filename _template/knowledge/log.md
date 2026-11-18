@@ -1,18 +1,18 @@
-# {{PROJECT_NAME}} — лог
+# {{PROJECT_NAME}} — log
 
-Формат:
+Format:
 
 ```
-## [YYYY-MM-DD] <op> | <описание>
+## [YYYY-MM-DD] <op> | <description>
 ```
 
-Операции: `ingest`, `query`, `experiment`, `lint`, `decision`, `milestone`.
+Operations: `ingest`, `query`, `experiment`, `lint`, `decision`, `milestone`.
 
-Быстрый просмотр:
+Quick view:
 ```
 grep "^## \[" wiki/log.md | tail -20
 ```
 
 ---
 
-## [{{DATE}}] milestone | Вика заведена через `new-wiki`
+## [{{DATE}}] milestone | Wiki created via `new-wiki`

@@ -6,7 +6,13 @@ Spec: ~/.claude/plans/rustling-marinating-sketch.md (Phase 3).
 Subcommands:
   retro              — evening bottom-up cycle (Phase 3)
   plan               — morning top-down decompose (Phase 5)
-  cycle              — retro + plan in one run (mostly for test fixtures)
+  gen-plan           — write daily-plan/<tomorrow>.md from the open backlogs
+                       (no retro)
+
+On a hub where the cycle was never set up (no hierarchy.yaml and no
+kb-rebuild-registry migration table), retro and plan print one line on how
+to enable it and exit 0: kb-rebuild-registry bootstrap, kb-rebuild-registry
+apply, then `cycle_enabled: true` in a project's knowledge/.orchestration.yaml.
 
 Algorithm (retro):
   1. Run `kb-rebuild-registry check` — refuse if drift.
@@ -17,7 +23,8 @@ Algorithm (retro):
      enum status from children, even before spawn.
   4. For each level bottom-up, parallel within level (cap KB_CYCLE_PARALLELISM=4):
      - Spawn agent in child cwd via kb-orchestrator-run (broker contract:
-       positional prompt; --cwd; --timeout). Output report atomically.
+       positional prompt; --cwd; --timeout; --allow-edits so it can write the
+       report). Output report atomically.
      - Pass child report paths via env KB_CHILD_REPORT_PATHS (newline-separated).
   5. Hub level — inline kb-retro with KB_RETRO_CYCLE_MODE=1.
   6. Append `### Cycle summary (HH:MM)` to daily/<date>.md.
@@ -163,6 +170,20 @@ def _parse_yaml(path: pathlib.Path) -> dict:
                 val = int(val)
             parent[key] = val
     return out
+
+
+CYCLE_SETUP_HINT = (
+    "orchestrator cycle is not set up on this hub (no hierarchy.yaml) — nothing to do. "
+    "To enable it: run `kb-rebuild-registry bootstrap`, then `kb-rebuild-registry apply`, "
+    "then set `cycle_enabled: true` in a project's knowledge/.orchestration.yaml."
+)
+
+
+def cycle_not_set_up() -> bool:
+    """True on a hub where the cycle was never set up: no hierarchy.yaml and
+    no kb-rebuild-registry migration table. A fresh install loads the cycle's
+    LaunchAgent, so this is the normal state there — not an error."""
+    return not HIERARCHY_PATH.is_file() and not any(HUB.glob("migration-*.yaml"))
 
 
 def load_hierarchy() -> dict:
@@ -477,11 +498,14 @@ def _spawn_one(node: dict, date: str, cycle_run_id: str,
     # Broker invocation. Pass --run-id so we can read the result-file
     # deterministically (CR4-B1: previously we guessed category from stderr,
     # which collapsed everything to "other").
+    # --allow-edits: the project retro must write reports/<date>.md, which the broker's
+    # Claude lane refuses without it.
     broker_run_id = str(uuid.uuid4())
     cmd = [str(KB_ORCHESTRATOR_RUN), prompt,
            "--cwd", knowledge_path,
            "--timeout", str(effective_timeout),
-           "--json-status", "--run-id", broker_run_id]
+           "--json-status", "--run-id", broker_run_id,
+           "--allow-edits"]
     env = os.environ.copy()
     env["KB_CHILD_REPORT_PATHS"] = "\n".join(child_report_paths)
 
@@ -875,6 +899,10 @@ def _ensure_evening_mail_envelope(date: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 def cmd_retro(args) -> int:
+    if cycle_not_set_up():
+        say(CYCLE_SETUP_HINT)
+        return 0
+
     # Step 1: registry consistency check
     if not args.skip_registry_check:
         rc = subprocess.run([str(KB_REBUILD_REGISTRY), "check"],
@@ -1323,6 +1351,8 @@ def _append_audit_counter_line(*, run_id: str, date: str, phase: str,
 DAILY_PLAN_DIR = HUB / "daily-plan"
 DAILY_PLAN_DEFAULT_LIMIT = 15
 _PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
+# The two Russian words ("example", "empty") match placeholder rows in
+# backlogs written in Russian or from older Russian templates.
 _PLACEHOLDER_BODY_RE = re.compile(
     r"^\s*(пример|example|todo|tbd|placeholder|пусто|sample)\b",
     re.IGNORECASE,
@@ -1835,6 +1865,9 @@ def cmd_plan(args) -> int:
     """Morning top-down plan: read approved daily-plan/<date>.md, group items
     by immediate child, dispatch via kb-backlog ops with carried-item logic.
     """
+    if cycle_not_set_up():
+        say(CYCLE_SETUP_HINT)
+        return 0
     plan_path = pathlib.Path(args.approved_plan).expanduser().resolve()
     # Autonomy-mode v2.1 §"The one promotion boundary" item 8 — per-ingest
     # scanner gate. The approved-plan body is user-typed-here input that
@@ -2127,6 +2160,34 @@ def _today() -> str:
 # CLI
 # ──────────────────────────────────────────────────────────────────────────
 
+def _autonomy_scanner_missing(reason: str, exc: Exception) -> None:
+    """Refuse the run with one clear line when a scanner gate was requested but
+    the scanner module cannot be loaded. Fail-closed by design (the owner asked
+    for scanned input), but called before any work starts, so nothing is half
+    done. Exit 75 = EX_TEMPFAIL."""
+    sys.stderr.write(
+        f"[autonomy-gate] {reason}, but the input scanner (_kb_autonomy) is not "
+        f"installed in this Vepol ({exc}). The cycle did not start. Unset "
+        "KB_AUTONOMY_GATE_INPUT and KB_AUTONOMY_GATE_DEEP to run it without the scanner.\n"
+    )
+    sys.exit(75)
+
+
+def _autonomy_gate_preflight(cmd: str) -> None:
+    """With KB_AUTONOMY_GATE_DEEP=1, confirm the scanner loads before retro/plan
+    start. Without this the deep gate failed only at the first parent's ingest,
+    after the leaf agents had already run, leaving parent reports pending."""
+    if cmd not in ("retro", "plan") or os.environ.get("KB_AUTONOMY_GATE_DEEP") != "1":
+        return
+    try:
+        _hub_bin = os.path.expanduser("~/knowledge/bin")
+        if _hub_bin not in sys.path:
+            sys.path.insert(0, _hub_bin)
+        from _kb_autonomy.gate import should_allow_autonomous_run  # noqa: F401
+    except ImportError as exc:
+        _autonomy_scanner_missing("KB_AUTONOMY_GATE_DEEP=1 is set", exc)
+
+
 def _autonomy_gate_check() -> None:
     """Optional scanner-driven input gate (autonomy-mode runtime wiring).
 
@@ -2152,8 +2213,7 @@ def _autonomy_gate_check() -> None:
             sys.path.insert(0, _hub_bin)
         from _kb_autonomy.gate import should_allow_autonomous_run
     except ImportError as exc:
-        sys.stderr.write(f"[autonomy-gate] scanner gate unavailable: {exc} — fail-closed abort\n")
-        sys.exit(75)
+        _autonomy_scanner_missing("KB_AUTONOMY_GATE_INPUT is set", exc)
     decision = should_allow_autonomous_run(slug, gate_input, origin)
     sys.stderr.write(decision.log_line + "\n")
     if not decision.allowed:
@@ -2292,6 +2352,7 @@ def main() -> int:
                     help="Compute the plan but do not stamp backlog or write the file")
 
     args = p.parse_args()
+    _autonomy_gate_preflight(args.cmd)
 
     # Acquire global cycle lock for retro/plan/gen-plan (single-writer
     # invariant on the .orchestrator/ directory and per-slug backlog mutations).

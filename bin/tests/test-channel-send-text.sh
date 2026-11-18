@@ -5,6 +5,14 @@
 set -uo pipefail
 PASS=0; FAIL=0
 TMP=$(mktemp -d)
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SERVER_PID=""
 trap '[[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 SRC_BIN="${KB_MORNING_FIDELITY_SRC_BIN:-$HOME/knowledge/bin}"
@@ -89,6 +97,7 @@ for _ in $(seq 1 50); do [[ -s "$TMP/port" ]] && break; sleep 0.05; done
 PORT=$(cat "$TMP/port")
 API="http://127.0.0.1:$PORT"
 PART="$TMP/part.txt"
+# Cyrillic and a multi-codepoint emoji on purpose: non-ASCII text must be sent intact.
 printf 'Первая строка 👨‍👩‍👧‍👦\n\nФинальная строка\n' > "$PART"
 chmod 600 "$PART"
 
@@ -161,6 +170,48 @@ OUT=$(KB_HUB="$TMP" TELEGRAM_BOT_TOKEN=x TELEGRAM_CHAT_ID=42 \
   KB_TG_API_BASE="$API" "$SENDER" brief "$EMPTY" 2>/dev/null); RC=$?
 [[ "$RC" == "20" && "$OUT" == *'"known_rejection"'* ]] \
   && ok "empty local part rejected before transport" || fail "empty file rc=$RC out=$OUT"
+
+echo "=== Telegram not configured (exit 3, no network) ==="
+rm -f "$TMP/record.bin"; echo success > "$TMP/mode"
+mkdir -p "$TMP/nocfg/personal"
+printf '%s\n' '# installer template' 'TELEGRAM_BOT_TOKEN=' 'TELEGRAM_CHAT_ID=' > "$TMP/nocfg/personal/.secrets"
+OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/nocfg" \
+  KB_TG_API_BASE="$API" "$SENDER" brief "$PART" 2>"$TMP/stderr"); RC=$?
+[[ "$RC" == "3" && "$OUT" == *'"outcome": "not_configured"'* ]] \
+  && ok "empty token/chat id => exit 3 not_configured" || fail "not configured rc=$RC out=$OUT"
+[[ "$(cat "$TMP/stderr")" == "telegram not configured" ]] \
+  && ok "not configured prints one stderr line" || fail "not configured stderr: $(cat "$TMP/stderr")"
+[[ ! -e "$TMP/record.bin" ]] && ok "not configured makes no request" || fail "not configured reached the server"
+OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID TELEGRAM_BOT_TOKEN="secret-test-token" \
+  KB_HUB="$TMP/nocfg" KB_TG_API_BASE="$API" "$SENDER" brief "$PART" 2>/dev/null); RC=$?
+[[ "$RC" == "3" ]] && ok "token without chat id => exit 3" || fail "token-only rc=$RC out=$OUT"
+
+# .secrets is read as data when the environment has no credentials.
+printf '%s\n' 'export TELEGRAM_BOT_TOKEN="secret-test-token"' "TELEGRAM_CHAT_ID='42'" > "$TMP/nocfg/personal/.secrets"
+OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/nocfg" \
+  KB_TG_API_BASE="$API" "$SENDER" brief "$PART" 2>/dev/null); RC=$?
+[[ "$RC" == "0" && "$OUT" == *'"outcome": "success"'* ]] \
+  && ok ".secrets credentials (export + quotes) are used" || fail ".secrets fallback rc=$RC out=$OUT"
+printf '%s\n' 'TELEGRAM_TOKEN=secret-test-token' 'TELEGRAM_CHAT_ID=42' > "$TMP/nocfg/personal/.secrets"
+OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/nocfg" \
+  KB_TG_API_BASE="$API" "$SENDER" retro "$PART" 2>/dev/null); RC=$?
+[[ "$RC" == "0" ]] && ok "legacy TELEGRAM_TOKEN in .secrets + retro message type" || fail "legacy alias rc=$RC out=$OUT"
+
+echo "=== per-type length limit: brief parts 3500, the unsplit retro 4096 ==="
+LONG="$TMP/long.txt"
+python3 -c 'import sys; open(sys.argv[1], "w", encoding="utf-8").write("р" * 3800)' "$LONG"
+chmod 600 "$LONG"
+OUT=$(KB_HUB="$TMP" TELEGRAM_BOT_TOKEN="secret-test-token" TELEGRAM_CHAT_ID="42" \
+  KB_TG_API_BASE="$API" "$SENDER" retro "$LONG" 2>/dev/null); RC=$?
+[[ "$RC" == "0" && "$OUT" == *'"outcome": "success"'* ]] \
+  && ok "retro of 3800 units (under Telegram's 4096) is sent" || fail "long retro rc=$RC out=$OUT"
+OUT=$(KB_HUB="$TMP" TELEGRAM_BOT_TOKEN="secret-test-token" TELEGRAM_CHAT_ID="42" \
+  KB_TG_API_BASE="$API" "$SENDER" brief "$LONG" 2>/dev/null); RC=$?
+[[ "$RC" == "20" ]] && ok "brief part over 3500 units is still rejected locally" || fail "long brief part rc=$RC out=$OUT"
+python3 -c 'import sys; open(sys.argv[1], "w", encoding="utf-8").write("р" * 4097)' "$LONG"
+OUT=$(KB_HUB="$TMP" TELEGRAM_BOT_TOKEN="secret-test-token" TELEGRAM_CHAT_ID="42" \
+  KB_TG_API_BASE="$API" "$SENDER" retro "$LONG" 2>/dev/null); RC=$?
+[[ "$RC" == "20" ]] && ok "retro over Telegram's 4096 units is rejected locally" || fail "too long retro rc=$RC out=$OUT"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

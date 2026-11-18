@@ -95,7 +95,12 @@ echo "=== Phase 3 CR5-B2 broker race (6 concurrent kb-orchestrator-run) ==="
 python3 cycle-retro/broker-race.py > /dev/null && pass "cycle-retro/broker-race.py" || { fail "broker-race"; exit 1; }
 
 echo
-echo "=== Wave-rollup-to-log (T1-T6, 22 ассерций) ==="
+echo "=== kb-codex-cleanup stops only Vepol-owned brokers and plugin copies ==="
+bash cycle-retro/codex-cleanup-scope.sh > /dev/null && pass "cycle-retro/codex-cleanup-scope.sh" || { fail "codex-cleanup-scope"; exit 1; }
+bash cycle-retro/broker-grants.sh > /dev/null && pass "cycle-retro/broker-grants.sh (brief and retro stay read-only)" || { fail "broker-grants"; exit 1; }
+
+echo
+echo "=== Wave-rollup-to-log (T1-T6, 22 assertions) ==="
 python3 wave-rollup/test-wave-rollup.py > /dev/null && pass "wave-rollup/test-wave-rollup.py" || { fail "wave-rollup"; exit 1; }
 
 echo
@@ -114,6 +119,8 @@ echo
 echo "=== Owner-approved spec gate methodology contract ==="
 python3 methodology/owner_spec_gate.py > /dev/null && pass "methodology/owner_spec_gate.py" || { fail "owner-spec-gate"; exit 1; }
 
+echo "=== Docs: fixed statements stay fixed, every link and anchor resolves ==="
+python3 docs/consistency.py > /dev/null && pass "docs/consistency.py" || { fail "docs/consistency.py"; exit 1; }
 echo "=== Lightweight one-pass spec review contract ==="
 python3 methodology/lightweight_review_policy.py > /dev/null && pass "methodology/lightweight_review_policy.py" || { fail "lightweight-review-policy"; exit 1; }
 
@@ -133,9 +140,23 @@ echo
 echo "=== Installer agent modes (prompt-first: probe/dry-run/verify/apply, C-01, managed-only uninstall) ==="
 bash install/agent-modes.sh > /dev/null && pass "install/agent-modes.sh (23 cases)" || { fail "install/agent-modes.sh"; exit 1; }
 
+echo "=== Installer first run (questions, hub files, registry, Telegram, hooks, roster) ==="
+bash install/first-run.sh > /dev/null && pass "install/first-run.sh" || { fail "install/first-run.sh"; exit 1; }
+
+echo "=== new-wiki and the registry (AGENTS.md block, apply without a description, bootstrap guard) ==="
+bash agent-entrypoint/synthetic.sh > /dev/null && pass "agent-entrypoint/synthetic.sh" || { fail "agent-entrypoint/synthetic.sh"; exit 1; }
+
+echo "=== Upgrade keeps installed extras ==="
+bash install/upgrade-keeps-extras.sh > /dev/null && pass "install/upgrade-keeps-extras.sh" || { fail "install/upgrade-keeps-extras.sh"; exit 1; }
+
 echo
 echo "=== Phase 8 kb-doctor periodic checks ==="
-python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py (7 fixtures)" || { fail "phase8"; exit 1; }
+python3 kb-doctor/phase8.py > /dev/null && pass "kb-doctor/phase8.py" || { fail "phase8"; exit 1; }
+
+echo
+echo "=== kb-doctor and multibot supervisor pytest suites ==="
+python3 -m pytest -q -p no:cacheprovider "$REPO_ROOT/bin/tests/multibot" "$REPO_ROOT/tests/kb-doctor" > /dev/null \
+  && pass "pytest bin/tests/multibot tests/kb-doctor" || { fail "pytest bin/tests/multibot tests/kb-doctor"; exit 1; }
 
 echo
 echo "=== Runtime capability registry (7 runtimes, tri-state availability, hermetic probes) ==="
@@ -153,7 +174,8 @@ for suite in bin/tests/test-brief-reliability.sh bin/tests/test-morning-brief-fi
              bin/tests/test-morning-whole-block-audio.sh bin/tests/test-kb-contact-notebook.sh \
              bin/tests/test-people.sh bin/tests/test-calendar-followups.sh \
              bin/tests/test-mail-brief-envelope.sh tests/test-daily-research.sh \
-             tests/test-money-radar.sh tests/test-user-language.sh; do
+             tests/test-money-radar.sh tests/test-user-language.sh \
+             bin/tests/test-claude-hooks.sh bin/tests/test-channel-send-plain.sh; do
   HOME="$COMPAT_HOME" bash "$REPO_ROOT/$suite" > /dev/null 2>&1 && pass "$suite" || { fail "$suite"; exit 1; }
 done
 

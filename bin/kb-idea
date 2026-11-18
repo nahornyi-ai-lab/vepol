@@ -4,9 +4,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+from pathlib import Path
 
-from _kb_ideas import card
+# Vepol's Python packages (requirements.txt): module name → pip package name.
+_PY_PACKAGES = {"frontmatter": "python-frontmatter", "click": "click",
+                "yaml": "PyYAML", "jellyfish": "jellyfish"}
+
+
+def _exit_if_package_missing(exc: ImportError) -> None:
+    """Exit with the one-line install command when a requirements.txt package is missing."""
+    if exc.name not in _PY_PACKAGES:
+        return
+    req = Path(__file__).resolve().parent.parent / "requirements.txt"
+    req_s = shlex.quote(str(req)) if req.is_file() else "~/vepol/requirements.txt"
+    sys.exit(f"kb-idea: Python package {_PY_PACKAGES[exc.name]} is missing for {sys.executable}."
+             f" Run: python3 -m pip install --user -r {req_s}"
+             f" (Homebrew Python: python3 -m pip install --break-system-packages -r {req_s})")
+
+
+try:
+    from _kb_ideas import card
+except ImportError as _exc:
+    _exit_if_package_missing(_exc)
+    raise
 
 
 def emit(result: object, json_out: bool) -> None:
@@ -63,7 +85,8 @@ def main() -> int:
     p.add_argument("--start", required=True)
     p.add_argument("--end", required=True)
     p.add_argument("--proposal-id")
-    p.add_argument("--timezone", default="Europe/Madrid")
+    p.add_argument("--timezone", default=None,
+                   help="IANA zone (default: KB_TZ, else the Mac's own time zone, else UTC)")
     p.add_argument("--json", action="store_true")
 
     p = cal_sub.add_parser("approve", help="approve a calendar proposal and record/create the event pointer")

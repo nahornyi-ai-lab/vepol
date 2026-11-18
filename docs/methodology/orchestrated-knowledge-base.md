@@ -9,17 +9,19 @@ extends: karpathy-llm-wiki-pattern
 # Orchestrated Knowledge Base
 
 The root concept Vepol is built on: **a Karpathy-style personal LLM
-wiki as the substrate, with an active orchestrator on top**. This page
-explains why both layers are needed, and which guardrails the
-combination has to respect.
+wiki as the foundation, with an active orchestrator on top** (the
+scheduled routines and agents that plan, run and record your work).
+This page explains why both layers are needed, and which guardrails
+the combination has to respect.
 
 ## The thesis
 
 Vepol is not a memory tool or document librarian — a passive
-accumulator that waits for you to ask questions. It is **an
-autonomous AI partner that can plan, execute, review, and
-escalate**. But a partner without reliable shared context is just
-empty talk. So:
+accumulator that waits for you to ask questions. It is **an AI
+partner that plans your day, runs your routines and escalates what
+needs you**; letting it execute tasks on its own is experimental.
+But a partner without reliable shared context is just empty talk.
+So:
 
 - **Knowledge (the LLM-wiki pattern) is the foundation.** What you
   know, where you're going, what you've decided.
@@ -54,26 +56,27 @@ demands a rethink.
 Karpathy's pattern is single-user, single-LLM, passive, offline. Vepol
 extends it on seven axes:
 
-1. **Active scheduling.** Background services (LaunchAgent + tick)
-   wake the system in the morning and evening, on its own — no
-   human prompt required.
+1. **Active scheduling.** Once you turn on scheduled tasks at
+   install, background services (LaunchAgent + tick) wake the system
+   in the morning and evening, on its own — no human prompt
+   required.
 2. **Task delegation.** A multi-level project tree where each node
    can spawn children with assignments and propagate results
-   upward.
-3. **External inputs as first-class.** Calendar, email, Telegram —
-   not raw material to ingest later but live signals that adjust
-   the day's plan in real time.
+   upward (experimental).
+3. **External inputs as first-class.** Calendar and email — not raw
+   material to ingest later but signals the morning brief and the
+   evening retro read every day.
 4. **Feedback loops.** Not lint as a one-off health check, but a
    daily `retro → plan → execute → retro` cycle that catches drift
-   inside 24 hours.
-5. **Plan as artifact.** `roadmap.md`, `daily-plan/<date>.md`, sprint
-   cadence — the plan and its lifecycle are materialized as files,
-   not held in memory.
+   inside 24 hours (experimental, for the projects you opt in).
+5. **Plan as artifact.** `personal/roadmap.md` and, in the nightly
+   cycle, `daily-plan/<date>.md` — the plan and its lifecycle are
+   materialized as files, not held in memory.
 6. **Multi-orchestrator symmetry.** Multiple AI agents (Claude Code,
    Codex, Antigravity CLI, future CLI-capable agents) work against the
    same knowledge base; no
-   single point of failure; significant plans get cross-reviewed by
-   another agent (see [`cross-agent-review.md`](cross-agent-review.md)).
+   single point of failure; each non-trivial spec gets one review
+   from another agent (see [`cross-agent-review.md`](cross-agent-review.md)).
 7. **Reproducibility as product.** The setup is not a one-off
    personal hack — it's a turnkey kit anyone can clone and run
    themselves with their own knowledge base.
@@ -119,19 +122,20 @@ else is either derived from it or a read-only mirror.
 |---|---|---|
 | Long-term goals | `personal/goals.md` | human |
 | Roadmap | `personal/roadmap.md` | human + agent suggestions |
-| Daily plan | `daily-plan/<date>.md` | orchestrator (approved by human) |
-| Daily retro | `daily/<date>.md` | orchestrator (aggregated from per-project reports) |
+| Daily plan | `daily-plan/<date>.md` | nightly cycle (experimental) |
+| Morning brief and evening retro | `briefs/<date>.md` | `kb-brief` and `kb-retro` |
+| Session notes | `<project>/knowledge/daily/<date>.md` | session capture |
 | Per-project state | `<project>/knowledge/state.md` | self |
 | Per-project tasks | `<project>/knowledge/backlog.md` | hub (dispatch) + self (planning) + human (ad-hoc) |
 | Asks upward | `<project>/knowledge/escalations.md` | self |
 | Incidents | `<project>/knowledge/incidents.md` | self after errors |
 | Per-project strategy + hypotheses | `<project>/knowledge/strategies.md` | self |
 | Per-project reports | `<project>/knowledge/reports/<date>.md` | cycle (evening) |
-| Hub registry | `registry.md` (derived block + hub-managed block) | derived from per-project frontmatter; manual entries for archived/no-wiki |
+| Hub registry | `registry.md` | `new-wiki` adds a row to the hand-written table; after `kb-rebuild-registry apply`, a derived block rebuilt from per-project frontmatter plus a hub-managed block for archived/no-wiki projects |
 | Chronology | `log.md` (hub + per-project) | append by all |
 
 Conflicts where two writers touch the same file are implementation
-bugs and get caught by the lint cycle.
+bugs: fix the writer, not the file.
 
 ## The coordination triad
 
@@ -153,16 +157,16 @@ delegated; everyone reads incidents to avoid repeating mistakes.
 Vepol can host more than one AI agent (Claude Code, Codex, Antigravity CLI,
 and future CLI-capable agents). The discipline keeping them coherent:
 
-- **One substrate.** `~/knowledge/` plus per-project `knowledge/`.
+- **One shared memory.** `~/knowledge/` plus per-project `knowledge/`.
   No agent has private memory.
-- **One broker.** A scheduler routes new work to whichever agent
-  is healthy. If one is rate-limited or crashed, the other picks
-  up.
-- **One discipline.** Any plan above a trivial threshold goes
-  through cross-review by a second agent (see
+- **One broker.** `kb-orchestrator-run` hands scheduled work (the
+  brief, the retro, the nightly cycle) to Codex first and Claude
+  Code next. If one is rate-limited or crashed, the other picks up.
+- **One discipline.** Any spec above a trivial threshold gets one
+  review by a second agent (see
   [`cross-agent-review.md`](cross-agent-review.md)).
-- **One spec.** This page. Both agents read it as a guardrail, both
-  see it in the same knowledge base.
+- **One spec.** This page. Every agent reads the same copy, linked
+  from the hub at `~/knowledge/orchestrator-seed/docs/methodology/`.
 
 ## Anti-patterns to avoid
 
@@ -175,8 +179,9 @@ and future CLI-capable agents). The discipline keeping them coherent:
   a file. Otherwise the agents fork — what one knows, the other
   doesn't.
 - **Over-automation without a kill switch.** Every automated thing
-  has a per-project disable flag and a hub-level "stop everything"
-  command.
+  needs an off switch. Each routine has `enabled:` in
+  `personal/processes.yaml`, and each project's nightly cycle has
+  `cycle_enabled:` in its `knowledge/.orchestration.yaml`.
 - **A central registry that overrides project-local truth.** The
   biggest no. Project metadata lives in projects.
 - **A spec without tests.** Any non-trivial spec requires

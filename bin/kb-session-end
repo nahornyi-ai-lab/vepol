@@ -19,12 +19,19 @@ if [[ -z "$PROJECT" || ! -f "$PROJECT/knowledge/log.md" || -e "$PROJECT/.kb-igno
   exit 0
 fi
 
-# Hard exclusions: не писать в вику при работе в $HOME/tmp/system
+# Hard exclusions: never write to the wiki when working in $HOME/tmp/system
 case "$PROJECT" in
   "$HOME"|/tmp|/tmp/*|/private/tmp|/private/tmp/*|/usr|/usr/*|/opt|/opt/*|/etc|/etc/*)
     exit 0
     ;;
 esac
+
+# Session capture is optional (the installer asks). Without the memory
+# compiler there is nothing to run: skip quietly.
+COMPILER_DIR="$HOME/claude-memory-compiler"
+if [[ ! -f "$COMPILER_DIR/hooks/session-end.py" ]]; then
+  exit 0
+fi
 
 export CLAUDE_KB_DAILY_DIR="$PROJECT/knowledge/daily"
 export CLAUDE_KB_LOG_FILE="$PROJECT/knowledge/log.md"
@@ -51,4 +58,4 @@ if [[ -z "$UV_BIN" ]]; then
   exit 0
 fi
 
-printf '%s' "$STDIN_JSON" | "$UV_BIN" run --directory "$HOME/claude-memory-compiler" python "$HOME/claude-memory-compiler/hooks/session-end.py"
+printf '%s' "$STDIN_JSON" | "$UV_BIN" run --directory "$COMPILER_DIR" python "$COMPILER_DIR/hooks/session-end.py"

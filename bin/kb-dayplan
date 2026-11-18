@@ -28,7 +28,8 @@ Environment:
   KB_HUB                 hub root (default ~/knowledge)
   KB_CALENDAR_DISABLE=1  calendar writes and reads refuse
   KB_CALENDAR_FAKE_DIR   tests: route the calendar through the fake backend
-  TZ                     IANA zone name (default: the /etc/localtime link)
+  KB_TZ, TZ              IANA zone name, KB_TZ first (default: the /etc/localtime
+                         link); kb-agenda uses the same order, so both agree
 """
 from __future__ import annotations
 
@@ -79,9 +80,12 @@ def prompt_path() -> str:
 
 
 def local_zone_name():
-    """IANA name of the system zone: TZ if valid, else the /etc/localtime link."""
-    tz = os.environ.get("TZ", "").strip().lstrip(":")
-    if tz:
+    """IANA name of the user's zone: KB_TZ or TZ if valid, else the
+    /etc/localtime link (the same order kb-agenda uses)."""
+    for tz in (os.environ.get("KB_TZ", "").strip(),
+               os.environ.get("TZ", "").strip().lstrip(":")):
+        if not tz:
+            continue
         try:
             ZoneInfo(tz)
             return tz

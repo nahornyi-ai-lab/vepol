@@ -29,8 +29,8 @@ first time agent B has to make a decision based on what agent A
 already established, you discover that agent B doesn't know about
 it.
 
-Vepol does not allow this. The rules below enforce a shared
-substrate.
+Vepol's contract rules this out. Every agent gets the rules below
+from the hub's `AGENTS.md`, and they keep one shared memory.
 
 ## The six rules
 
@@ -41,9 +41,10 @@ single source of truth. There is no "Claude memory" folder and no
 "Codex memory" folder. There are markdown files. They live in
 shared locations. All agents read and write the same shared files.
 
-If a tool tries to introduce a per-agent private memory store
-(some agent frameworks do this), Vepol's contract is to disable
-that feature.
+If a tool keeps a per-agent private memory store (some agent
+frameworks do this), Vepol's contract is that the files win: when
+the tool's memory and the knowledge base disagree, the agent trusts
+the files and fixes or deletes the stale memory.
 
 ### 2. One write protocol
 
@@ -76,17 +77,22 @@ coordination layer.
 ### 4. Same input discipline
 
 Before doing significant work, *every* agent reads the same curated
-context:
+context. In Claude Code the `SessionStart` hook loads it; any other
+agent runs `~/knowledge/bin/kb-session-start --print --cwd "$PWD"`:
 
 - Project `AGENTS.md` (canonical) and any relevant local adapter
-  (`CLAUDE.md` for Claude Code, etc.). Antigravity CLI (`agy`) reads
+  (for example a `CLAUDE.md` that imports `AGENTS.md`: Claude Code loads
+  `AGENTS.md` itself only when there is no `CLAUDE.md` or `CLAUDE.local.md`
+  in the folder or above it). Antigravity CLI (`agy`) reads
   `AGENTS.md` natively via `agy --add-dir <path>`. All adapters point
   back to the same project schema
+- The agent card, if the project has one
 - `state.md`
-- `index.md`
 - The most recent entries in `log.md`
-- If relevant: `backlog.md`, `escalations.md`, `incidents.md`
-- If a cross-project question: hub `registry.md` and hub-level
+- Active work, open escalations, and the prevention rules and
+  ongoing items from `incidents.md`
+- On demand: `index.md`, the full `incidents.md`, and for a
+  cross-project question, hub `registry.md` and hub-level
   cross-project files
 
 Both agents have the same starting point because both agents read
@@ -121,17 +127,21 @@ Allowed:
 
 ## How the broker handles handoffs
 
-When work needs to be dispatched to "an agent," Vepol uses a broker
-that picks one of the available agents based on availability:
+When scheduled work needs "an agent" (the morning brief, the evening
+retro, the nightly cycle), Vepol hands it to a broker:
+`kb-orchestrator-run`, a small script that picks the agent.
 
-- Agent has rate limit headroom → eligible
-- Agent's CLI is healthy → eligible
-- Otherwise → fail over to the next agent
+- Codex goes first, then Claude Code. `KB_ORCHESTRATOR_BACKENDS`
+  changes the order
+- An agent that fails (usage limit, lost login, network error,
+  timeout, crash) sits out a short cooldown
+- The work fails over to the next agent
 
 The agent that picks up the work reads the same files, follows the
 same protocols, writes to the same outputs. The fact that "this
-session was Claude" or "this one was Codex" is metadata in the log,
-not a structural difference in what got done.
+session was Claude" or "this one was Codex" is metadata in
+`logs/orchestrator-run.log`, not a structural difference in what got
+done.
 
 If the broker has only one agent available (the other is
 rate-limited), the work proceeds with the available agent. The

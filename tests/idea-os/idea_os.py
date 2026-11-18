@@ -58,6 +58,8 @@ def read_post(path: Path) -> frontmatter.Post:
 
 def test_capture_creates_card_and_dashboard() -> None:
     hub = make_hub()
+    # Mixed Cyrillic/Latin input on purpose: the id slug must keep only the
+    # Latin words ("vepol-idea-intake").
     created = card.capture(
         "Сделать Vepol Idea Intake как процесс, а не список идей.",
         source="chat",
@@ -124,10 +126,30 @@ def test_capture_is_atomic_on_serializer_crash() -> None:
     ok("test_capture_is_atomic_on_serializer_crash")
 
 
+def test_dashboard_text_follows_profile_language() -> None:
+    saved = os.environ.pop("KB_LANG", None)
+    try:
+        hub = make_hub()
+        dashboard = card.render_dashboard(hub=hub).read_text(encoding="utf-8")
+        if "_Empty._" not in dashboard or "Dashboard of personal ideas." not in dashboard:
+            fail(f"dashboard without a profile is not in English:\n{dashboard}")
+            return
+        # A Russian profile must keep the exact Russian dashboard text.
+        (hub / "personal" / "profile.yaml").write_text("language: ru\n", encoding="utf-8")
+        dashboard = card.render_dashboard(hub=hub).read_text(encoding="utf-8")
+        if "_Пусто._" not in dashboard or "> Dashboard личных идей." not in dashboard:
+            fail(f"dashboard with language: ru lost its Russian text:\n{dashboard}")
+            return
+    finally:
+        if saved is not None:
+            os.environ["KB_LANG"] = saved
+    ok("test_dashboard_text_follows_profile_language")
+
+
 def test_triage_ready_and_brief() -> None:
     hub = make_hub()
     created = card.capture(
-        "Запустить идею дня в брифинге с evidence.",
+        "Run the idea of the day in the brief with evidence.",
         source="chat",
         now="2026-06-16T11:00:00+02:00",
         hub=hub,
@@ -139,7 +161,7 @@ def test_triage_ready_and_brief() -> None:
         priority="P0",
         materiality="cheap-test",
         strategic_lines=["L0", "L8"],
-        next_action="45 минут: подготовить первый idea-derived action",
+        next_action="45 minutes: prepare the first idea-derived action",
         expected_evidence="1 completed action or explicit kill decision",
         hub=hub,
     )
@@ -149,16 +171,58 @@ def test_triage_ready_and_brief() -> None:
         fail(f"triage did not make idea ready/P0: {post['status']} {post['priority']}")
         return
     brief = card.brief(limit=3, hub=hub)
-    if idea_id not in brief or "45 минут" not in brief or "Evidence:" not in brief:
+    if idea_id not in brief or "45 minutes" not in brief or "Evidence:" not in brief:
         fail(f"brief did not include ready proposal:\n{brief}")
         return
     ok("test_triage_ready_and_brief")
 
 
+def test_triage_dedupe_note_reports_a_real_title_check() -> None:
+    hub = make_hub()
+    first = card.capture("Vepol idea intake process", source="chat",
+                         now="2026-06-16T11:10:00+02:00", hub=hub)
+    body = read_post(Path(first["path"])).content
+    if "priority-profile.md" in body:
+        fail("new card still points at personal/priority-profile.md, which nothing reads")
+        return
+    card.triage(first["id"], hub=hub)
+    note = read_post(Path(first["path"])).content
+    if "no other idea cards to compare against" not in note or "No duplicate selected" in note:
+        fail(f"lone card's dedupe note is not the real result:\n{note}")
+        return
+
+    unrelated = card.capture("Garmin sleep score in the brief", source="chat",
+                             now="2026-06-16T11:20:00+02:00", hub=hub)
+    card.triage(unrelated["id"], hub=hub)
+    note = read_post(Path(unrelated["path"])).content
+    if "compared with 1 other idea card(s); no near-duplicate found" not in note:
+        fail(f"unrelated card's dedupe note is wrong:\n{note}")
+        return
+
+    dupe = card.capture("Vepol idea intake process v2", source="chat",
+                        now="2026-06-16T11:30:00+02:00", hub=hub)
+    card.triage(dupe["id"], hub=hub)
+    note = read_post(Path(dupe["path"])).content
+    if f"possible duplicate of `{first['id']}`" not in note or unrelated["id"] in note:
+        fail(f"near-duplicate title was not flagged precisely:\n{note}")
+        return
+    # Cyrillic titles are compared too (no ASCII-only slug).
+    ru_a = card.capture("Сделать голосовой дайджест утром", source="chat",
+                        now="2026-06-16T11:40:00+02:00", hub=hub)
+    ru_b = card.capture("Голосовой дайджест утром для брифа", source="chat",
+                        now="2026-06-16T11:50:00+02:00", hub=hub)
+    card.triage(ru_b["id"], hub=hub)
+    note = read_post(Path(ru_b["path"])).content
+    if f"possible duplicate of `{ru_a['id']}`" not in note:
+        fail(f"Cyrillic near-duplicate was not flagged:\n{note}")
+        return
+    ok("test_triage_dedupe_note_reports_a_real_title_check")
+
+
 def test_promotion_handoff_sets_kb_board_pointer_not_execution_state() -> None:
     hub = make_hub()
     created = card.capture(
-        "Продвинуть идею в kb-board после approval.",
+        "Promote the idea to kb-board after approval.",
         source="chat",
         now="2026-06-16T12:00:00+02:00",
         hub=hub,
@@ -202,7 +266,7 @@ def test_promotion_can_create_markdown_board_task() -> None:
     hub = make_hub()
     (hub / "backlog.md").write_text("# Backlog\n", encoding="utf-8")
     created = card.capture(
-        "Создать markdown task из идеи без приватной зависимости.",
+        "Create a markdown task from the idea with no private dependency.",
         source="chat",
         now="2026-06-16T12:30:00+02:00",
         hub=hub,
@@ -328,7 +392,7 @@ def test_promote_create_task_refuses_legacy_board() -> None:
 def test_calendar_approval_and_outcome_writeback() -> None:
     hub = make_hub()
     created = card.capture(
-        "Поставить календарный блок только после approve token.",
+        "Set a calendar block only after the approve token.",
         source="chat",
         now="2026-06-16T13:00:00+02:00",
         hub=hub,
@@ -382,15 +446,52 @@ def test_calendar_approval_and_outcome_writeback() -> None:
     ok("test_calendar_approval_and_outcome_writeback")
 
 
+def test_calendar_proposal_defaults_to_local_time_zone() -> None:
+    """Without --timezone a proposal uses KB_TZ, else the Mac's own zone (UTC
+    as last resort), never a hardcoded city."""
+    hub = make_hub()
+    created = card.capture("Block time for the zone check.", source="chat",
+                           now="2026-06-16T13:00:00+02:00", hub=hub)
+    idea_id = created["id"]
+    with patch.dict(os.environ, {"KB_TZ": "America/New_York"}):
+        card.propose_calendar(idea_id, title="Zone check", start="2026-06-17T10:00:00",
+                              end="2026-06-17T10:30:00", proposal_id="cal-tz-01", hub=hub)
+    explicit = card.propose_calendar(idea_id, title="Zone check", start="2026-06-18T10:00:00",
+                                     end="2026-06-18T10:30:00", proposal_id="cal-tz-02",
+                                     timezone="Asia/Tokyo", hub=hub)
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("KB_TZ", None)
+        os.environ.pop("TZ", None)
+        card.propose_calendar(idea_id, title="Zone check", start="2026-06-19T10:00:00",
+                              end="2026-06-19T10:30:00", proposal_id="cal-tz-03", hub=hub)
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        target = ""
+    mac_zone = target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else "UTC"
+    zones = {p["proposal_id"]: p["timezone"]
+             for p in read_post(Path(created["path"]))["calendar_proposals"]}
+    if explicit["proposal_id"] != "cal-tz-02":
+        fail("explicit calendar proposal id mismatch")
+        return
+    if zones != {"cal-tz-01": "America/New_York", "cal-tz-02": "Asia/Tokyo", "cal-tz-03": mac_zone}:
+        fail(f"calendar proposal zones: KB_TZ, explicit, then the Mac's zone expected; got {zones}")
+        return
+    ok("test_calendar_proposal_defaults_to_local_time_zone")
+
+
 def main() -> int:
     print("=== Vepol Idea Intake acceptance ===")
     test_capture_creates_card_and_dashboard()
     test_capture_is_atomic_on_serializer_crash()
+    test_dashboard_text_follows_profile_language()
     test_triage_ready_and_brief()
+    test_triage_dedupe_note_reports_a_real_title_check()
     test_promotion_handoff_sets_kb_board_pointer_not_execution_state()
     test_promotion_can_create_markdown_board_task()
     test_promote_create_task_refuses_legacy_board()
     test_calendar_approval_and_outcome_writeback()
+    test_calendar_proposal_defaults_to_local_time_zone()
     print(f"  Passed: {PASS}, Failed: {FAIL}")
     return 0 if FAIL == 0 else 1
 

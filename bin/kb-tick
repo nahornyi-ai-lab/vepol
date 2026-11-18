@@ -11,7 +11,22 @@ runs nothing.
 
 Contract: processes release 2026-06-09 (five required fields) + optional
 per-process `timeout` (D12, morning-digest-inputs-rebalance-spec-2026-07-11).
-Background runs never call NotebookLM (audio is on-demand/manual only).
+NotebookLM is reached only by the processes that declare it: the default
+schedule's morning-digest and evening-digest send their digests to NotebookLM
+(`outputs: [file, notebooklm_audio]`); kb-digest-migrate switches them to local
+audio. Every other background process stays off NotebookLM.
+
+after:<parent> waits for the parent's success that day. A disabled parent that
+is an optional input (_kb_processes.OPTIONAL_INPUT_PARENTS: mail-morning,
+mail-evening, learning, money-radar) is treated as satisfied: the child
+follows the parent's own trigger instead (walking up the chain), so switching
+off e.g. mail-morning does not silently stop the brief and everything after
+it. Any other disabled parent keeps its children waiting, as before (e.g.
+with retro disabled, evening-digest, which needs the Retro block, does not
+run).
+
+Each child gets KB_PROCESS_ID, KB_PROCESS_OUTPUTS, KB_PROCESS_BACKGROUND=1 and
+KB_PROCESS_TIMEOUT (its cap in seconds) in the environment.
 """
 from __future__ import annotations
 
@@ -25,7 +40,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _kb_processes import ProcessConfigError, load_processes  # noqa: E402
+from _kb_processes import (  # noqa: E402
+    OPTIONAL_INPUT_PARENTS,
+    ProcessConfigError,
+    load_processes,
+)
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 PLAN = HUB / "logs" / "today-plan.json"
@@ -139,17 +158,34 @@ def resolve_command(process_id: str, run: str) -> list[str] | None:
     return None
 
 
-def eligible(proc: dict, snapshot: dict, now_hm: str) -> bool:
+def eligible(proc: dict, snapshot: dict, now_hm: str,
+             by_id: dict | None = None) -> bool:
     """Trigger semantics. after:* is evaluated against the fired-state
     snapshot taken at tick start, so a dependent becomes eligible on the
     next tick after its parent succeeded for the same day — never within
-    the same tick pass as the parent."""
+    the same tick pass as the parent.
+
+    A disabled parent never fires. When it is an optional input
+    (OPTIONAL_INPUT_PARENTS, where the rule and its reasons live), it counts
+    as satisfied: the child follows the parent's own trigger (an HH:MM time,
+    on-demand, or the parent's own after:, walking up the chain). Any other
+    disabled parent keeps the child waiting, as before (the walk stops
+    there). An enabled parent keeps the usual rule. A parent that
+    is not declared at all cannot be followed and keeps the child waiting
+    (_kb_processes already rejects such a config)."""
     when = proc["when"]
+    by_id = by_id or {}
+    seen = {proc["id"]}
+    while when.startswith("after:"):
+        parent_id = when[len("after:"):]
+        parent = by_id.get(parent_id)
+        if (parent is None or parent["enabled"] or parent_id in seen
+                or parent_id not in OPTIONAL_INPUT_PARENTS):
+            return snapshot.get(fired_key(parent_id)) is True
+        seen.add(parent_id)
+        when = parent["when"]
     if when == "on-demand":
         return False
-    if when.startswith("after:"):
-        parent = when[len("after:"):]
-        return snapshot.get(fired_key(parent)) is True
     return now_hm >= when
 
 
@@ -164,19 +200,22 @@ def run_process(proc: dict, plan: dict) -> None:
     if cmd is None:
         return
 
+    # Per-process cap when declared (validated positive-bounded int by
+    # _kb_processes), else the uniform default. The child sees it as
+    # KB_PROCESS_TIMEOUT so it can finish inside it (kb-brief's health wait).
+    timeout = proc.get("timeout") or PROCESS_TIMEOUT
+
     env = dict(os.environ)
     env["KB_PROCESS_ID"] = pid
     env["KB_PROCESS_OUTPUTS"] = ",".join(proc["outputs"])
     env["KB_PROCESS_BACKGROUND"] = "1"
+    env["KB_PROCESS_TIMEOUT"] = str(timeout)
 
     # Blocking call; fired is only set on rc==0 so a crash or a failed
     # required output retries on the next tick instead of being swallowed
     # (Incident-2026-05-05). launchd's StartInterval=900 re-fires only
     # after the previous instance exits, so blocking shifts the next tick
     # rather than stacking instances.
-    # Per-process cap when declared (validated positive-bounded int by
-    # _kb_processes), else the uniform default.
-    timeout = proc.get("timeout") or PROCESS_TIMEOUT
     log(f"firing {pid}: {' '.join(cmd)} (timeout={timeout}s)")
     try:
         proc_run = subprocess.run(
@@ -208,6 +247,15 @@ def main() -> None:
     plan = load_plan()
     if plan is None or plan.get("date") != today:
         plan = regenerate_plan()
+        if plan is not None and plan.get("date") != today:
+            # kb-planner failed and left yesterday's plan, whose fired flags
+            # would block every process today. Start an empty plan for today:
+            # brief and retro check their own delivery evidence in the day
+            # file, so a delivered one is never sent twice.
+            log(f"plan is still for {plan.get('date')!r} after regen; "
+                f"starting an empty plan for {today}")
+            plan = {"date": today}
+            save_plan(plan)
         if plan is None:
             log("plan still missing after regen, abort")
             return
@@ -219,12 +267,13 @@ def main() -> None:
         return
 
     snapshot = dict(plan)
+    by_id = {proc["id"]: proc for proc in processes}
     for proc in processes:
         if not proc["enabled"]:
             continue
         if plan.get(fired_key(proc["id"])):
             continue
-        if not eligible(proc, snapshot, now_hm):
+        if not eligible(proc, snapshot, now_hm, by_id):
             continue
         run_process(proc, plan)
 

@@ -21,8 +21,12 @@ Exit codes:
     0  — {"outcome":"success","message_id":...,"audio":{...}} — Telegram
          accepted; audio is normalized to file_id/file_unique_id/duration
          plus optional file_name/mime_type/file_size/title/performer.
+    3  — {"outcome":"not_configured","error":"telegram not configured"} —
+         the token or chat id is empty or missing in the environment and in
+         .secrets; one stderr line "telegram not configured", no network call.
+         Callers that keep the MP3 treat this as "not delivered, not an error".
    20  — {"outcome":"known_rejection","error":...} — definitely unaccepted:
-         local validation, missing credentials/file, failure to reach the
+         local validation, missing file, failure to reach the
          server, or a complete Telegram HTTP/JSON rejection (ok:false,
          including a complete HTTP error body).
    21  — {"outcome":"ambiguous","error":...} — request transmission may have
@@ -42,6 +46,7 @@ from http.client import HTTPConnection, HTTPSConnection
 from urllib.parse import urlsplit
 
 EXIT_SUCCESS = 0
+EXIT_NOT_CONFIGURED = 3
 EXIT_KNOWN_REJECTION = 20
 EXIT_AMBIGUOUS = 21
 
@@ -260,9 +265,8 @@ def main(argv):
     if token:
         _SECRET_VALUES.append(token)
     if not token or not chat_id:
-        _known_rejection(
-            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set (env or %s)" % secrets_path
-        )
+        print("telegram not configured", file=sys.stderr)
+        _emit("not_configured", EXIT_NOT_CONFIGURED, error="telegram not configured")
 
     api_base = os.environ.get("KB_TG_API_BASE") or DEFAULT_API_BASE
 

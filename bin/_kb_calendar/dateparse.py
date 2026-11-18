@@ -8,6 +8,8 @@ Supported (case-insensitive, keyword may sit inside a longer phrase):
   tomorrow / tomorrow 09:00 / today
   in N days
   next <weekday>
+  Russian input, matched as written (the same forms, plus "послезавтра" =
+  the day after tomorrow):
   завтра / завтра в 09:00 / послезавтра / сегодня
   через N дней
   (в) следующий <weekday>
@@ -15,19 +17,47 @@ Supported (case-insensitive, keyword may sit inside a longer phrase):
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 from .errors import DateParseError
 
-DEFAULT_TZ = "Europe/Madrid"
+
+def _valid_zone(name: str) -> str:
+    try:
+        ZoneInfo(name)
+        return name
+    except Exception:  # noqa: BLE001 - unknown or malformed zone name
+        return ""
+
+
+def local_tz_name() -> str:
+    """The default time zone, as an IANA name: KB_TZ when set, else TZ when
+    it names a zone, else the Mac's own zone (the name behind the
+    /etc/localtime link, e.g. Europe/Berlin), else UTC. Never a hardcoded
+    city: "today" must be the user's today."""
+    for name in (os.environ.get("KB_TZ", ""), os.environ.get("TZ", "").lstrip(":")):
+        if name.strip() and _valid_zone(name.strip()):
+            return name.strip()
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        target = ""
+    if "zoneinfo/" in target and _valid_zone(target.split("zoneinfo/", 1)[1]):
+        return target.split("zoneinfo/", 1)[1]
+    return "UTC"
+
+
+DEFAULT_TZ = local_tz_name()
 DEFAULT_TIME = (9, 0)
 DEFAULT_DURATION_MIN = 15
 
 _WEEKDAYS = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,
+    # Russian weekday names (nominative and accusative), matched in user input.
     "понедельник": 0, "вторник": 1, "среда": 2, "среду": 2, "четверг": 3,
     "пятница": 4, "пятницу": 4, "суббота": 5, "субботу": 5, "воскресенье": 6,
 }
@@ -106,7 +136,7 @@ def parse_when(
     if iso is not None:
         return iso
 
-    # Relative phrases ("tomorrow", "через 10 дней", …) resolve against `now`.
+    # Relative phrases ("tomorrow", "in 10 days", …) resolve against `now`.
     now_dt = _coerce_now(now)
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=zone)
@@ -114,7 +144,8 @@ def parse_when(
 
     low = raw.lower()
 
-    # optional explicit HH:MM (won't match "10 days" — requires a colon)
+    # optional explicit HH:MM (won't match "10 days" — requires a colon);
+    # "в" is Russian for "at". The patterns below match English and Russian.
     hh, mm = default_time
     tmatch = re.search(r"(?:в\s+|at\s+)?(\d{1,2}):(\d{2})", low)
     if tmatch:

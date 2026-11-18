@@ -23,6 +23,13 @@ case "$PROJECT" in
     ;;
 esac
 
+# Session capture is optional (the installer asks). Without the memory
+# compiler there is nothing to run: skip quietly.
+COMPILER_DIR="$HOME/claude-memory-compiler"
+if [[ ! -f "$COMPILER_DIR/hooks/pre-compact.py" ]]; then
+  exit 0
+fi
+
 export CLAUDE_KB_DAILY_DIR="$PROJECT/knowledge/daily"
 export CLAUDE_KB_LOG_FILE="$PROJECT/knowledge/log.md"
 export CLAUDE_KB_NO_COMPILE=1
@@ -46,4 +53,4 @@ if [[ -z "$UV_BIN" ]]; then
   exit 0
 fi
 
-printf '%s' "$STDIN_JSON" | "$UV_BIN" run --directory "$HOME/claude-memory-compiler" python "$HOME/claude-memory-compiler/hooks/pre-compact.py"
+printf '%s' "$STDIN_JSON" | "$UV_BIN" run --directory "$COMPILER_DIR" python "$COMPILER_DIR/hooks/pre-compact.py"

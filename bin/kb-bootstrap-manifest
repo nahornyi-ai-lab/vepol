@@ -36,6 +36,11 @@ MANIFEST_PATH = HUB / ".orchestrator" / "install-manifest.json"
 LOCK_PATH = HUB / ".orchestrator" / "install-manifest.lock"
 SCHEMA_VERSION = 1
 
+# LaunchAgents that install.sh Step 6 installs when scheduled tasks are
+# accepted (com.knowledge.<name>). Keep in sync with install.sh; any other
+# shipped launchd/com.knowledge.*.plist.template is recorded as optional.
+INSTALLER_LAUNCHAGENTS = frozenset({"tick", "planner", "orchestrator-cycle", "people-review-bot"})
+
 
 def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
     """Enumerate every artifact tracked in the install manifest.
@@ -49,6 +54,7 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
       - seed/gemini/GEMINI.md — user-templated global Antigravity CLI adapter (legacy `~/.gemini/` dir; loads canonical hub)
       - seed/claude/skills/*/SKILL.md — managed skills
       - seed/launchd/com.knowledge.*.plist.template — managed-templated LaunchAgents
+        (the ones install.sh does not install carry "optional": true)
     Note: project-level GEMINI.md adapter removed 2026-05-22 — Antigravity CLI
     (`agy`) reads AGENTS.md natively via `agy --add-dir <path>`.
     """
@@ -161,12 +167,18 @@ def _build_inventory(seed: pathlib.Path, home: pathlib.Path) -> list[dict]:
         for tmpl in sorted(launchd_dir.glob("com.knowledge.*.plist.template")):
             base = tmpl.name.replace(".template", "")
             short = base.replace("com.knowledge.", "").replace(".plist", "")
-            items.append({
+            item = {
                 "artifact_id": f"launchd-{short}",
                 "category": "managed-templated",
                 "source_path": f"launchd/{tmpl.name}",
                 "install_path": str(home / "Library" / "LaunchAgents" / base),
-            })
+            }
+            if short not in INSTALLER_LAUNCHAGENTS:
+                # Shipped but never installed by install.sh (set up by hand,
+                # e.g. channel-telegram, multibot-supervisor): kb-doctor
+                # reports it as info when absent, not as a broken install.
+                item["optional"] = True
+            items.append(item)
 
     return items
 
@@ -218,6 +230,8 @@ def build_manifest(seed: pathlib.Path, home: pathlib.Path) -> dict:
             "source_hash": _sha256_file(source_path),
             "installed_hash": _sha256_file(install_path),
         }
+        if entry.get("optional"):
+            files[entry["artifact_id"]]["optional"] = True
     return {
         "schema_version": SCHEMA_VERSION,
         "installed_version": _read_version(seed) or "unknown",

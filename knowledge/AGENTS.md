@@ -1,87 +1,86 @@
-# LLM Wiki Hub — мастер-схема
+# Vepol hub — master contract
 
 ## Session startup context
 
-При каждом старте новой сессии, до первого содержательного ответа или действия, агент обязан иметь startup context: agent card, `state.md`, recent `log.md`, active work/open escalations и компактный incident-срез.
+At the start of every new session, before the first substantive answer or action, the agent must have the startup context: agent card, `state.md`, recent `log.md`, active work/open escalations, and a compact incident slice.
 
-Нормальный путь — hook `~/knowledge/bin/kb-session-start`, который отдаёт markdown bundle с `## Startup Context Manifest`. Если manifest уже есть во входном контексте:
+The normal path is the `~/knowledge/bin/kb-session-start` hook, which returns a markdown bundle with `## Startup Context Manifest`. If the manifest is already in the input context:
 
-- считать перечисленные slices уже прочитанными;
-- не перечитывать `knowledge/index.md`, полный `knowledge/incidents.md` или весь `knowledge/backlog.md` только ради формальности;
-- использовать `knowledge/index.md` только on-demand для навигации/поиска релевантных страниц;
-- открывать полный `knowledge/incidents.md` только для диагностики, risky work или когда startup-срез указывает на ongoing incident.
+- treat the listed slices as already read;
+- do not re-read `knowledge/index.md`, the full `knowledge/incidents.md` or the whole `knowledge/backlog.md` just as a formality;
+- use `knowledge/index.md` only on demand, to navigate or find relevant pages;
+- open the full `knowledge/incidents.md` only for diagnostics, risky work, or when the startup slice points to an ongoing incident.
 
-Если manifest нет (hook-less runtime), запусти `__HOME__/knowledge/bin/kb-session-start --print --cwd "$PWD"` перед содержательной работой. Ручной fallback, если скрипт недоступен: прочитать agent card по иерархии `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → явный fallback «карточки нет», `knowledge/state.md`, последние **80 физических строк** `knowledge/log.md` (`tail -n 80`, расширить до 160 если в 80 строках меньше 3 датированных записей `## [`), active work через `kb-board`, открытые эскалации и только `## Prevention rules` / `## Ongoing` из `knowledge/incidents.md` при наличии.
+If there is no manifest (a hook-less runtime), run `__HOME__/knowledge/bin/kb-session-start --print --cwd "$PWD"` before substantive work. Manual fallback if the script is unavailable: read the agent card following the hierarchy `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → an explicit "no card" fallback; `knowledge/state.md`; the last **80 physical lines** of `knowledge/log.md` (`tail -n 80`; widen to 160 if those 80 lines hold fewer than 3 dated `## [` entries); active work via `kb-board`; open escalations; and only `## Prevention rules` / `## Ongoing` from `knowledge/incidents.md`, if present.
 
-Вопрос «кто ты / представься» не является триггером чтения карточки или лога: к этому моменту startup context уже должен быть прочитан. Число 80 выбрано по локальному замеру 24 реальных project logs: `tail -20` даёт медиану 8 свежих событий, `tail -40` — 14, `tail -80` — 20; `tail -120/160` заметно раздувает контекст без пропорциональной пользы.
+A "who are you / introduce yourself" question is not a trigger to read the card or the log: by then the startup context must already be loaded. The number 80 comes from a local measurement of 24 real project logs: `tail -20` gives a median of 8 recent events, `tail -40` gives 14, `tail -80` gives 20; `tail -120/160` noticeably bloats the context without a proportional benefit.
 
-Это центральный хаб персональной базы знаний («второй мозг»). Паттерн — [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): LLM инкрементально строит и поддерживает связный набор markdown-файлов, человек курирует источники и задаёт вопросы.
+This is the central hub of the personal knowledge base (a "second brain"). The pattern is [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): the LLM incrementally builds and maintains a linked set of markdown files; the human curates the sources and asks the questions.
 
 ## Telegram messaging — mention placement (hard rule)
 
-Telegram user mention token (`at` sign + bot username, for example `user_<role>_bot`) ставится **только в конец сообщения**, после полного контекста. Никогда не в начале и не в середине. Причина: Telegram split длинных сообщений → если mention-токен в первом чанке, бот триггерится до того как контекст из последующих чанков дойдёт, и работает на partial context (incident 2026-05-16). Просто упоминание агента в плане/обсуждении без вызова — пиши имя без trigger-токена («project-bot», «hub», «family»). **Правило также применяется к supervisor-prefix:** `_kb_multibot/reply.py::append_user_mention()` теперь ставит mention-токен trigger user в конец reply, а не в начало (фикс 2026-05-17, incident `supervisor-prefix-half-fix`).
+A Telegram user mention token (`at` sign + bot username, for example `user_<role>_bot`) goes **only at the end of the message**, after the full context. Never at the start or in the middle. Reason: Telegram splits long messages → if the mention token is in the first chunk, the bot triggers before the context from the later chunks arrives, and works on partial context (incident 2026-05-16). When you only mention an agent in a plan or discussion without calling it, write the name without the trigger token ("project-bot", "hub", "family"). **The rule also applies to the supervisor prefix:** `_kb_multibot/reply.py::append_user_mention()` now puts the trigger user's mention token at the end of the reply, not at the start (fix 2026-05-17, incident `supervisor-prefix-half-fix`).
 
-## Архитектура
+## Architecture
 
-Три слоя:
+Three layers:
 
-1. **Raw sources** — immutable источники (статьи, выгрузки, транскрипты, PDF, картинки). LLM читает, не меняет.
-2. **Wiki (knowledge)** — markdown, который LLM пишет и поддерживает.
-   - **Локальная вика проекта**: `<project>/knowledge/` — физически живёт внутри проекта, рядом с кодом проекта.
-   - **Глобальные категории хаба**: `~/knowledge/{concepts,people,companies,solutions}/` — то, что пересекает проекты.
-3. **Схема (Universal Agent Entrypoint, 2026-05-19; Antigravity CLI rollout 2026-05-21)** — правила:
-   - **Canonical, vendor-neutral**: `~/knowledge/AGENTS.md` (этот файл) — hub-level контракт; `<project>/AGENTS.md` — project overlay со специфичными правилами. Полная политика живёт здесь, не в runtime-файлах.
-   - **Adapter files (тонкие, ≤ 30 строк)**: `CLAUDE.md` (Claude Code), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, через `read: AGENTS.md`). Каждый — bootloader, который только указывает на канонический `AGENTS.md` и держит **только** runtime-specific caveats. Не отдельная политика. **Antigravity CLI (`agy`)** читает project `AGENTS.md` нативно при запуске с `--add-dir <path>` (verified 2026-05-22 marker-test: agy v1.0.0 с `--add-dir` pre-loads и `AGENTS.md`, и `GEMINI.md` из указанной директории в системный промпт через cascadeManager; без `--add-dir` — workspace игнорируется, грузится только global `~/.gemini/GEMINI.md`). Для удобства — shell-функция `agy-here() { __HOME__/.local/bin/agy --add-dir "$PWD" "$@"; }` в `~/.zshrc`. Project `GEMINI.md` adapter избыточен (canonical AGENTS.md загружается так же), удалены 2026-05-21.
-   - **Identity layer (отдельный артефакт)**: `<project>/knowledge/agents/agent-card.md` — карточка роли проекта. Не заменяет AGENTS.md, дополняет.
-   - **Полная спецификация** rollout'а — `example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Раскатано 2026-05-19. Migration Gemini CLI → Antigravity CLI (`agy`) — `example-project/knowledge/decisions/antigravity-cli-migration-2026-05-21.md` (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18). Guard — `kb-doctor agent-entrypoint --strict`.
+1. **Raw sources** — immutable sources (articles, exports, transcripts, PDFs, images). The LLM reads them and never changes them.
+2. **Wiki (knowledge)** — markdown that the LLM writes and maintains.
+   - **Local project wiki**: `<project>/knowledge/` — physically lives inside the project, next to the project's code.
+   - **Global hub categories**: `~/knowledge/{concepts,people,companies,solutions}/` — whatever cuts across projects.
+3. **Schema (Universal Agent Entrypoint, 2026-05-19; Antigravity CLI rollout 2026-05-21)** — the rules:
+   - **Canonical, vendor-neutral**: `~/knowledge/AGENTS.md` (this file) — the hub-level contract; `<project>/AGENTS.md` — a project overlay with project-specific rules. The full policy lives here, not in runtime files.
+   - **Adapter files (thin, ≤ 30 lines)**: `CLAUDE.md` (Claude Code — only the hub keeps one, `~/knowledge/CLAUDE.md`; Claude Code 2.1.277+ reads a project's `AGENTS.md` natively when no `CLAUDE.md` or `CLAUDE.local.md` sits in the project or a folder above it, so `new-wiki` creates no project `CLAUDE.md`), `.github/copilot-instructions.md` (Copilot), `.cursor/rules/*.mdc` (Cursor), `.windsurf/rules/*.md` (Windsurf), `.clinerules/` (Cline), `.aider.conf.yml` (Aider, via `read: AGENTS.md`). Each one is a bootloader that only points to the canonical `AGENTS.md` and holds **only** runtime-specific caveats. Not a separate policy. **Antigravity CLI (`agy`)** reads the project `AGENTS.md` natively when started with `--add-dir <path>` (verified 2026-05-22 by a marker test: agy v1.0.0 with `--add-dir` pre-loads both `AGENTS.md` and `GEMINI.md` from the given directory into the system prompt via cascadeManager; without `--add-dir` the workspace is ignored and only the global `~/.gemini/GEMINI.md` loads). For convenience there is a shell function `agy-here() { __HOME__/.local/bin/agy --add-dir "$PWD" "$@"; }` in `~/.zshrc`. A project `GEMINI.md` adapter is redundant (the canonical AGENTS.md loads the same way); removed 2026-05-21.
+   - **Identity layer (a separate artifact)**: `<project>/knowledge/agents/agent-card.md` — the project's role card. It does not replace AGENTS.md; it complements it.
+   - **Full specification** of the rollout — `example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md` + `universal-agent-entrypoint-rollout-spec.md`. Rolled out 2026-05-19. Migration from Gemini CLI to Antigravity CLI (`agy`) — `example-project/knowledge/decisions/antigravity-cli-migration-2026-05-21.md` (Gemini CLI free/Pro/Ultra deprecated by 2026-06-18). Guard — `kb-doctor agent-entrypoint --strict`.
 
-## Структура хаба
+## Hub structure
 
 ```
 ~/knowledge/
-├── AGENTS.md          # мастер-схема (этот файл)
-├── registry.md        # реестр всех проектов с путями и статусом
-├── index.md           # глобальный тематический индекс
-├── log.md             # глобальный лог активности
-├── raw/               # хаб-уровневые источники (не привязанные к проекту)
-├── concepts/          # кросс-проектные концепты (аутрич, ценообразование, UX, паттерны…)
-├── people/            # люди, встречающиеся в разных проектах
-├── companies/         # клиенты, партнёры, конкуренты
-├── solutions/         # «интересные решения» — сниппеты, находки, реиспользуемые куски
-├── projects/          # СИМЛИНКИ в knowledge/ каждого проекта
+├── AGENTS.md          # master contract (this file)
+├── registry.md        # registry of all projects with paths and status
+├── index.md           # global topic index
+├── log.md             # global activity log
+├── raw/               # hub-level sources (not tied to a project)
+├── concepts/          # cross-project concepts (outreach, pricing, UX, patterns…)
+├── people/            # people who show up across projects
+├── companies/         # clients, partners, competitors
+├── solutions/         # "interesting solutions": snippets, finds, reusable pieces
+├── projects/          # SYMLINKS to each project's knowledge/
 │   └── <slug> → /absolute/path/to/<project>/knowledge
-├── _template/         # шаблон нового проекта
+├── _template/         # template for a new project
 └── bin/
-    ├── new-wiki       # скрипт: bootstrap вики в новом проекте
-    └── kb-search      # скрипт: ripgrep по всей базе знаний
+    ├── new-wiki       # script: bootstrap a wiki in a new project
+    └── kb-search      # script: ripgrep across the whole knowledge base
 ```
 
-## Структура локальной вики проекта
+## Local project wiki structure
 
-**Вся вика проекта живёт в одной подпапке `<project>/knowledge/`**, отделённой от кода. Это позволяет симлинку в хабе указывать только на `knowledge/`, не затаскивая `node_modules`, `.git` и прочее.
+**The whole project wiki lives in one subfolder, `<project>/knowledge/`**, separate from the code. This lets the hub symlink point only at `knowledge/` without dragging in `node_modules`, `.git` and the rest.
 
 ```
 <project>/
-├── AGENTS.md                # локальная схема (наследует ~/knowledge/AGENTS.md)
-├── CLAUDE.md                # Claude Code adapter → AGENTS.md (≤30 строк)
-├── knowledge/               # ВСЁ wiki-содержание — изолировано от кода
-│   ├── README.md            # 1–2 предложения: что это, в каком статусе
-│   ├── index.md             # каталог страниц
-│   ├── log.md               # лог проекта
-│   ├── state.md             # текущее состояние
-│   ├── backlog.md           # задачи от хаба/владельца — проект исполняет
-│   ├── escalations.md       # ask-и проекта наверх (к хабу/владельцу)
-│   ├── incidents.md         # ошибки, root cause, фиксы, prevention rules, автоматизации
-│   ├── strategies.md        # стратегия + активные гипотезы + принципы проекта (обновляется агентом)
-│   ├── raw/                 # immutable источники
-│   │   └── assets/          # картинки (Obsidian Web Clipper)
-│   ├── sources/             # саммари по каждому raw-документу
-│   ├── agents/              # одна карточка проекта: agent-card.md (общая для Claude Code / Codex / Antigravity CLI / любого будущего runtime; identity привязана к роли проекта, не к вендору)
-│   └── <категории>/         # специфичные для проекта: icp/, offers/, channels/, …
-└── <code-dirs>/             # site/, … — код проекта, лежит сиблингами к knowledge/
+├── AGENTS.md                # local schema (inherits ~/knowledge/AGENTS.md); Claude Code, Codex and agy read it directly
+├── knowledge/               # ALL wiki content — isolated from the code
+│   ├── README.md            # 1–2 sentences: what this is, what state it is in
+│   ├── index.md             # page catalog
+│   ├── log.md               # project log
+│   ├── state.md             # current state
+│   ├── backlog.md           # tasks from the hub/owner — the project executes them
+│   ├── escalations.md       # the project's asks upward (to the hub/owner)
+│   ├── incidents.md         # errors, root cause, fixes, prevention rules, automations
+│   ├── strategies.md        # strategy + active hypotheses + project principles (updated by the agent)
+│   ├── raw/                 # immutable sources
+│   │   └── assets/          # images (Obsidian Web Clipper)
+│   ├── sources/             # a summary for each raw document
+│   ├── agents/              # one project card: agent-card.md (shared by Claude Code / Codex / Antigravity CLI / any future runtime; identity is tied to the project role, not the vendor)
+│   └── <categories>/        # project-specific: icp/, offers/, channels/, …
+└── <code-dirs>/             # site/, … — project code, kept as siblings of knowledge/
 ```
 
-**`backlog.md` / `escalations.md` / `incidents.md`** — обязательная триада координации. Мастер-описание формата и правил разграничения живёт в этом `AGENTS.md`; runtime-native файлы (`CLAUDE.md` и др.) только адаптеры к нему.
+**`backlog.md` / `escalations.md` / `incidents.md`** — the mandatory coordination triad. The master description of the format and of the rules that tell them apart lives in this `AGENTS.md`; runtime-native files (`CLAUDE.md` and others) are only adapters to it.
 
 ### Task board protocol
 
@@ -103,61 +102,61 @@ Rules:
 
 For non-trivial work, the path is mandatory: research -> one lightweight independent spec review -> owner-approved spec -> `knowledge/spec-approvals.md` with exact `spec-contract` hash -> build plan -> RED tests with mandatory E2E path -> implementation. The reviewer reads the relevant code/API and returns `GO`, at most three questions, or a proven logical `BLOCK`. A changed hash alone never triggers another review. The owner can approve in chat; the active agent records the decision as scribe. Material scenario drift after approval returns to one lightweight review and owner approval.
 
-**`strategies.md`** — «куда двигаемся и почему» + проверяемые гипотезы о собственной работе агента. Обновляется самим проектом (не хабом): раз в неделю через skill `agent-review` (когда он появится), или при значимом pivot'е. Формат — в `_template/knowledge/strategies.md`. Конвенция лога для стратегии/гипотез/экспериментов: `## [YYYY-MM-DD] strategy | <project> | ...`, `## [YYYY-MM-DD] hypothesis | <project> | ...`, `## [YYYY-MM-DD] experiment | <project> | start|result | ...`.
+**`strategies.md`** — "where we are heading and why" + testable hypotheses about the agent's own work. The project updates it itself (not the hub): once a week via the `agent-review` skill (once that skill exists), or on a significant pivot. Format — in `_template/knowledge/strategies.md`. Log convention for strategy/hypotheses/experiments: `## [YYYY-MM-DD] strategy | <project> | ...`, `## [YYYY-MM-DD] hypothesis | <project> | ...`, `## [YYYY-MM-DD] experiment | <project> | start|result | ...`.
 
-**`agents/`** — карточка роли проекта. Полная схема, имя файла, поведение при старте сессии, иерархия project→baseline→generic, multi-orchestrator edit protocol — в разделе [«Agent self-identification»](#agent-self-identification) ниже. Короткая версия: **один файл `agent-card.md` на проект**, идентичность привязана к роли (а не к runtime), runtime-различия (Claude Code / Codex / Antigravity CLI) живут в секции `## Operating notes` внутри карточки.
+**`agents/`** — the project's role card. The full schema, the file name, session-start behavior, the project→baseline→generic hierarchy and the multi-orchestrator edit protocol are in the ["Agent self-identification"](#agent-self-identification) section below. Short version: **one `agent-card.md` file per project**, identity is tied to the role (not the runtime), and runtime differences (Claude Code / Codex / Antigravity CLI) live in the `## Operating notes` section inside the card.
 
 ### State contract
 
-`state.md` — текущая приборная панель проекта, не лог и не архив. Он отвечает на вопрос: **где мы сейчас?**
+`state.md` is the project's current dashboard, not a log and not an archive. It answers one question: **where are we now?**
 
-- Писать в настоящем времени, overwrite-only: когда реальность меняется, заменить устаревшую строку.
-- Исторические даты, `since`, `fixed`, `shipped`, test proof, review result, incident narrative, resolved blockers and old snapshots go to `log.md`, `reports/`, `decisions/`, `strategies.md`, `sources/`, or entity pages.
+- Write in the present tense, overwrite-only: when reality changes, replace the outdated line.
+- Historical dates, `since`, `fixed`, `shipped`, test proof, review result, incident narrative, resolved blockers and old snapshots go to `log.md`, `reports/`, `decisions/`, `strategies.md`, `sources/`, or entity pages.
 - Current dates are allowed for `Last Updated`, active deadlines, active offers, metric timestamps, and source freshness.
 - State edit rule: first record the event in `log.md` when it matters, then leave only the current truth in `state.md`.
 
-**Ключевое правило**: всё, что LLM пишет или читает как «знание», живёт внутри `knowledge/`. Всё, что является рабочим кодом/контентом/артефактом — сиблинги к `knowledge/`.
+**Key rule**: everything the LLM writes or reads as "knowledge" lives inside `knowledge/`. Everything that is working code, content or an artifact sits next to `knowledge/` as a sibling.
 
-**Почему нельзя смешивать**: Obsidian-вольт хаба через симлинки видит именно `knowledge/`. Если вики-файлы разбросать вне этой папки — Obsidian их не увидит (или увидит вместе с `node_modules`).
+**Why you must not mix them**: through the symlinks, the hub's Obsidian vault sees exactly `knowledge/`. If wiki files are scattered outside this folder, Obsidian will not see them (or will see them together with `node_modules`).
 
 ## Universal Agent Entrypoint
 
-Канонический контракт принят 2026-05-19 (`example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md`, cross-review у Codex/Claude/Gemini), раскатан там же (`...-rollout-spec.md`, `...-implementation-plan-2026-05-19.md`). Этот раздел — мастер-формулировка для машины.
+The canonical contract was adopted on 2026-05-19 (`example-project/knowledge/decisions/universal-agent-entrypoint-2026-05-19.md`, cross-reviewed by Codex/Claude/Gemini); its rollout is documented alongside it (`...-rollout-spec.md`, `...-implementation-plan-2026-05-19.md`). This section is the machine-wide master wording.
 
 ### Canonical vs adapter
 
-- **Canonical** = `AGENTS.md` (hub + project). Vendor-neutral, держит **всю** общую политику. Любая runtime читает это и подчиняется.
-- **Adapter** = runtime-native файл (`CLAUDE.md`, `.github/copilot-instructions.md`, `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.clinerules/`, `.aider.conf.yml`, …). Тонкий bootloader: ссылается на канонический `AGENTS.md` и содержит **только** runtime-specific caveats. **Не** отдельная политика и **не** дубль AGENTS.md.
-- **Antigravity CLI (`agy`)** — project-level adapter не нужен: canonical `AGENTS.md` загружается нативно через `agy --add-dir <path>` (verified 2026-05-22). Стандартный запуск — `agy-here` shell-function = `agy --add-dir "$PWD"`. Global `~/.gemini/GEMINI.md` остаётся как fallback для запусков без `--add-dir`.
+- **Canonical** = `AGENTS.md` (hub + project). Vendor-neutral, holds **all** of the shared policy. Every runtime reads it and follows it.
+- **Adapter** = a runtime-native file (`CLAUDE.md`, `.github/copilot-instructions.md`, `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.clinerules/`, `.aider.conf.yml`, …). A thin bootloader: it points to the canonical `AGENTS.md` and contains **only** runtime-specific caveats. **Not** a separate policy and **not** a copy of AGENTS.md.
+- **Antigravity CLI (`agy`)** — no project-level adapter is needed: the canonical `AGENTS.md` loads natively via `agy --add-dir <path>` (verified 2026-05-22). The standard launch is the `agy-here` shell function = `agy --add-dir "$PWD"`. The global `~/.gemini/GEMINI.md` stays as a fallback for launches without `--add-dir`.
 
 ### Adapter contract
 
-Adapter валиден только если:
+An adapter is valid only if:
 
-- Существует потому, что runtime имеет native instruction-file convention.
-- Указывает на (или импортирует) релевантный канонический `AGENTS.md`.
-- Содержит **только** runtime-specific caveats.
-- Не дублирует большие блоки политики из AGENTS.md.
-- **≤ 30 непустых строк.** Хард-кап, без escape-hatch.
+- It exists because the runtime has a native instruction-file convention.
+- It points to (or imports) the relevant canonical `AGENTS.md`.
+- It contains **only** runtime-specific caveats.
+- It does not duplicate large blocks of policy from AGENTS.md.
+- **≤ 30 non-empty lines.** A hard cap, with no escape hatch.
 
-Required adapters прямо сейчас: `CLAUDE.md`. Опциональные (создаются только когда соответствующий runtime реально используется в проекте): Copilot / Cursor / Windsurf / Cline / Aider — список выше. **Antigravity CLI (`agy`)** не требует project-level adapter — читает project `AGENTS.md` нативно через `agy --add-dir <path>` (canonical). Legacy `GEMINI.md` adapter удалён 2026-05-21 (deprecation Gemini CLI free/Pro/Ultra by 2026-06-18; agy унаследовал GEMINI.md loader, но дублировать его при наличии AGENTS.md бессмысленно).
+Required adapters right now: only the hub's `~/knowledge/CLAUDE.md` (installed by `install.sh`; it imports `AGENTS.md`). A project needs no Claude Code adapter: Claude Code 2.1.277+ reads the project `AGENTS.md` natively when no `CLAUDE.md` or `CLAUDE.local.md` sits in the project or a folder above it, so `new-wiki` stopped creating a project `CLAUDE.md` on 2026-10-01. On an older Claude Code, copy `~/knowledge/_template/CLAUDE.md` into the project and put the project name in its title. Optional ones (created only when the matching runtime is actually used in the project): Copilot / Cursor / Windsurf / Cline / Aider — see the list above. **Antigravity CLI (`agy`)** needs no project-level adapter — it reads the project `AGENTS.md` natively via `agy --add-dir <path>` (canonical). The legacy `GEMINI.md` adapter was removed on 2026-05-21 (Gemini CLI free/Pro/Ultra deprecated by 2026-06-18; agy inherited the GEMINI.md loader, but duplicating it when AGENTS.md exists makes no sense).
 
-### Precedence (6 уровней)
+### Precedence (6 levels)
 
-При конфликте инструкций — побеждает более локальная, кроме случаев нарушения safety, KB write-back-дисциплины или явной user direction:
+When instructions conflict, the more local one wins, except where that would break safety, KB write-back discipline, or an explicit user direction:
 
-1. Explicit user instruction для текущей задачи.
+1. Explicit user instruction for the current task.
 2. Nearest subdirectory `AGENTS.md`.
 3. Project root `AGENTS.md`.
 4. Hub `~/knowledge/AGENTS.md`.
 5. Runtime adapter caveats (`CLAUDE.md`, …).
-6. Personal/global vendor defaults (`~/.claude/CLAUDE.md`, `~/.config/codex/AGENTS.md`, `~/.gemini/GEMINI.md` для Antigravity CLI, etc.).
+6. Personal/global vendor defaults (`~/.claude/CLAUDE.md`, `~/.config/codex/AGENTS.md`, `~/.gemini/GEMINI.md` for Antigravity CLI, etc.).
 
-**KB wins**: durable KB-факты (`~/knowledge/`, `<project>/knowledge/`) **всегда** побеждают transient runtime memory. Если recall из памяти runtime конфликтует с тем, что написано в файлах — доверяем файлам и обновляем/удаляем устаревшую память.
+**KB wins**: durable KB facts (`~/knowledge/`, `<project>/knowledge/`) **always** win over transient runtime memory. If something recalled from runtime memory conflicts with what the files say, trust the files and update or delete the stale memory.
 
-### Clean-session probe для нового runtime
+### Clean-session probe for a new runtime
 
-Прежде чем подключить новый runtime/CLI к проекту, прогнать probe из cwd проекта:
+Before connecting a new runtime/CLI to a project, run the probe from the project's cwd:
 
 ```text
 Before doing any work, answer in one paragraph:
@@ -167,380 +166,381 @@ Before doing any work, answer in one paragraph:
 4. What should you do if your runtime memory conflicts with the KB?
 ```
 
-Acceptance — ответ должен содержать все эти подстроки:
+Acceptance: the answer must contain all of these substrings:
 
 - hub `~/knowledge/`
 - project `knowledge/`
 - `AGENTS.md`
-- одна durable write-back точка — `log.md`, `backlog.md` или `incidents.md`
-- литерал `KB wins`
+- one durable write-back point — `log.md`, `backlog.md` or `incidents.md`
+- the literal `KB wins`
 
-Если runtime не установлен — `backlog.md` follow-up. Если установлен и не прошёл — incident в `incidents.md`, **rollout не считается завершённым**.
+If the runtime is not installed — a `backlog.md` follow-up. If it is installed and fails — an incident in `incidents.md`, and **the rollout does not count as complete**.
 
-### Onboarding нового runtime
+### Onboarding a new runtime
 
-1. Найти native instruction mechanism в официальной документации runtime.
-2. Создать тонкий adapter под contract выше **или** сконфигурировать runtime читать `AGENTS.md` напрямую.
-3. Добавить строку в KB adapter registry (см. `~/knowledge/concepts/`, если зарегистрирован).
-4. Прогнать clean-session probe.
-5. Зафиксировать результат в `log.md` проекта.
+1. Find the native instruction mechanism in the runtime's official documentation.
+2. Create a thin adapter under the contract above **or** configure the runtime to read `AGENTS.md` directly.
+3. Add a row to the KB adapter registry (see `~/knowledge/concepts/`, if one is registered).
+4. Run the clean-session probe.
+5. Record the result in the project's `log.md`.
 
 ### Guard
 
-`kb-doctor agent-entrypoint --strict` — детерминированный лит-чек. Проверяет:
+`kb-doctor agent-entrypoint --strict` is a deterministic lint check of the hub. It verifies that:
 
-- Adapter существует для enabled runtime в проекте (сейчас — только `CLAUDE.md` required).
-- Adapter ≤ 30 строк.
-- Adapter ссылается на канонический `AGENTS.md`.
-- Нет bare `@`-токенов в `~/.gemini/GEMINI.md` и любых файлах, которые читает Antigravity CLI — bare at-sign + identifier интерпретируется как file import.
-- Нет дубликатов политики между AGENTS.md и адаптером.
+- The hub `~/knowledge/AGENTS.md` (P0 when missing) and `~/knowledge/_template/AGENTS.md` exist.
+- The one required adapter, the hub `~/knowledge/CLAUDE.md`, exists. Other adapters it finds (`~/knowledge/_template/CLAUDE.md`, a legacy `GEMINI.md`) are checked the same way when present.
+- Each adapter is ≤ 30 non-empty lines (the cap keeps policy from being duplicated into it) and references the canonical `AGENTS.md`.
+- There are no bare `@` tokens in the hub or template `AGENTS.md`, which Antigravity CLI loads — a bare at-sign + identifier is interpreted as a file import.
+- `new-wiki` and `kb-bootstrap-manifest` still carry `AGENTS.md` into new projects and the install manifest.
 
-Запускается локально и в `kb-doctor` cron-проходе. **Любой свежий P0/P1 — блокер на merge / запись в log.md `rollout completed`.**
+Run it after changing a contract, an adapter or a template. Exit code: 2 on any P0; with `--strict`, 1 on any P1. **Any fresh P0/P1 blocks the merge / the `rollout completed` entry in log.md.**
 
 ### Failure modes
 
-| Сценарий | Симптом | Mitigation |
+| Scenario | Symptom | Mitigation |
 |----------|---------|-----------|
-| Adapter drift | Runtime-файл растёт в отдельную политику | `kb-doctor agent-entrypoint`: adapter-line-cap + content-check |
-| Double-load | `CLAUDE.md` и `AGENTS.md` дублируют одни и те же длинные правила | Adapter contract: не дублировать; политика только в AGENTS.md |
-| Missing hub master | Project-файлы ссылаются на `~/knowledge/AGENTS.md`, а его нет | Hub-AGENTS.md создан 2026-05-19; doctor проверяет наличие |
-| Antigravity at-sign import false positive | Bare at-sign + identifier в `~/.gemini/GEMINI.md` или любом файле, читаемом `agy`, интерпретируется как file import (наследие от Gemini CLI) | doctor: regex на bare at-sign-токены вне code-fence; экранировать как `` `@`-mention `` |
-| Antigravity skips workspace context | `agy` запущен без `--add-dir` → workspace `AGENTS.md`/`GEMINI.md` игнорируется (verified 2026-05-22, `workspaceDirs=[]` в логе) | Всегда запускать через `agy-here` (alias на `agy --add-dir "$PWD"`); канонический hub доступен через `~/.gemini/GEMINI.md` import как fallback |
-| Seed/install drift | Live hub OK, но fresh installs ставят старую `CLAUDE.md`-centric схему | `~/knowledge/_template/`, `vepol-prep/_template/`, `install.sh`, `kb-seed-sync`, `kb-bootstrap-manifest` — все покрыты тестами |
-| Silent non-loading | Runtime поддерживает AGENTS.md только в некоторых режимах/версиях | clean-session probe при онбординге; incident при провале |
-| Precedence ambiguity | Nested файлы или global memory конфликтуют с project rules | Шесть уровней precedence выше; KB wins при конфликте с runtime memory |
+| Adapter drift | The runtime file grows into a separate policy | `kb-doctor agent-entrypoint`: adapter-line-cap + content-check |
+| Double-load | `CLAUDE.md` and `AGENTS.md` duplicate the same long rules | Adapter contract: no duplication; policy lives only in AGENTS.md |
+| Missing hub master | Project files reference `~/knowledge/AGENTS.md`, but it does not exist | Hub AGENTS.md created 2026-05-19; doctor checks that it exists |
+| Antigravity at-sign import false positive | A bare at-sign + identifier in `~/.gemini/GEMINI.md` or in any file that `agy` reads is interpreted as a file import (inherited from Gemini CLI) | doctor: regex for bare at-sign tokens in the hub and template `AGENTS.md` (code spans included); reword, or escape as `` `@`-mention `` |
+| Antigravity skips workspace context | `agy` started without `--add-dir` → the workspace `AGENTS.md`/`GEMINI.md` is ignored (verified 2026-05-22, `workspaceDirs=[]` in the log) | Always launch through `agy-here` (alias for `agy --add-dir "$PWD"`); the canonical hub is reachable through the `~/.gemini/GEMINI.md` import as a fallback |
+| Seed/install drift | Live hub is fine, but fresh installs get the old `CLAUDE.md`-centric schema | `~/knowledge/_template/`, the Vepol repo's `_template/`, `install.sh`, `new-wiki`, `kb-bootstrap-manifest` — all covered by tests |
+| Silent non-loading | The runtime supports AGENTS.md only in some modes/versions | clean-session probe at onboarding; incident on failure |
+| Precedence ambiguity | Nested files or global memory conflict with project rules | The six precedence levels above; KB wins in a conflict with runtime memory |
 
-## Параллельная оркестрация
+## Parallel orchestration
 
-Хаб допускает **нескольких оркестраторов одновременно**: Claude Code, Codex, Antigravity CLI (`agy`) и будущие CLI-агенты работают не как отдельные «умы», а как разные интерфейсы к **одной и той же** knowledge-системе.
+The hub allows **several orchestrators at once**: Claude Code, Codex, Antigravity CLI (`agy`) and future CLI agents work not as separate "minds" but as different interfaces to **one and the same** knowledge system.
 
-Из этого следуют жёсткие правила:
+Hard rules follow from this:
 
-- Нет отдельной памяти под каждого оркестратора. Источник правды всегда один: `~/knowledge/` и проектные `knowledge/`.
-- Любой агент перед работой использует тот же startup bundle, который формирует `kb-session-start`: agent card, project state, recent log, active work/open escalations, compact prevention/ongoing incident slice, CLI roster/recent daily при наличии. Если bundle уже пришёл с `Startup Context Manifest`, эти срезы считаются прочитанными; `index.md` и полный `incidents.md` открываются on-demand.
-- Любой агент после значимой работы обязан оставить след в той же системе: `log.md` для событий и решений, `state.md` для изменившегося статуса, тематические страницы для нового знания, `incidents.md` для поломок и ручных обходов.
-- Если у конкретного инструмента нет автоматических хуков SessionStart/SessionEnd, агент компенсирует это вручную. Отсутствие автоматики не освобождает от дисциплины памяти.
-- Цель — **zero split-brain**: любой второй оркестратор должен уметь продолжить работу только по файлам, без доступа к прошлому чату.
+- There is no separate memory per orchestrator. There is always one source of truth: `~/knowledge/` and the project `knowledge/` folders.
+- Before working, every agent uses the same startup bundle that `kb-session-start` builds: agent card, project state, recent log, active work/open escalations, compact prevention/ongoing incident slice, and the CLI roster/recent daily when available. If the bundle already came with a `Startup Context Manifest`, these slices count as read; `index.md` and the full `incidents.md` are opened on demand.
+- After significant work, every agent must leave a trace in the same system: `log.md` for events and decisions, `state.md` for a changed status, topic pages for new knowledge, `incidents.md` for breakages and manual workarounds.
+- If a tool has no automatic SessionStart/SessionEnd hooks, the agent makes up for it by hand. Missing automation does not excuse anyone from memory discipline.
+- The goal is **zero split-brain**: any second orchestrator must be able to continue the work from the files alone, without access to the previous chat.
 
 ## Cross-Orchestrator CLI Launch Matrix
 
-Любой project agent на этой машине должен знать, что Vepol уже умеет запускать локальные CLI-инструменты: Claude Code, Codex, Antigravity CLI (`agy`), OpenCode, Grok и NotebookLM. Перед ответом «не могу запустить другого агента/инструмент» агент обязан открыть [`~/knowledge/solutions/cli-agent-runtime-launch.md`](solutions/cli-agent-runtime-launch.md), проверить локальный binary/smoke probe и выбрать подходящий launcher из матрицы.
+Every project agent on this machine must know that Vepol can already launch local CLI tools: Claude Code, Codex, Antigravity CLI (`agy`), OpenCode, Grok and NotebookLM. Before answering "I can't launch another agent/tool", the agent must open the live roster `~/knowledge/.active-roster.md` (see below), check the local binary with a smoke probe, and pick a suitable launcher using the rule below. If this hub also keeps a local launch matrix at `~/knowledge/solutions/cli-agent-runtime-launch.md` (optional; the installer does not ship one), read it for the exact invocations and flags.
 
-Короткое правило: Claude Code — MCP/skills/project execution; Codex — adversarial review/code diagnosis; Antigravity — Gemini-family independent pass with `--add-dir`; Grok CLI — canonical current/social/X/Reddit research pass and explicit Grok pass; OpenCode — non-canonical fallback/legacy surface only; NotebookLM — production recap/audio/artifacts after synthesis. Для delegated research prompt должен требовать durable write-back в `knowledge/sources/` или `knowledge/reports/`, а не возвращать знание только в чат.
+Short rule: Claude Code — MCP/skills/project execution; Codex — adversarial review/code diagnosis; Antigravity — Gemini-family independent pass with `--add-dir`; Grok CLI — canonical current/social/X/Reddit research pass and explicit Grok pass; OpenCode — non-canonical fallback/legacy surface only; NotebookLM — production recap/audio/artifacts after synthesis. For delegated research, the prompt must require durable write-back to `knowledge/sources/` or `knowledge/reports/`, rather than returning the knowledge only in the chat.
 
-**Живой ростер CLI (per-machine).** Какие из этих инструментов реально установлены на ЭТОЙ машине и когда какой звать — в автогенерируемом файле `knowledge/.active-roster.md` (для хаба — `~/knowledge/.active-roster.md`). Его собирает `kb-cli-roster` из декларативного реестра `~/knowledge/.orchestrator/cli-tools.tsv` и инжектит в каждую Claude/Codex-сессию через SessionStart-хук. Оркестраторы без хука (agy и др.) читают `.active-roster.md` напрямую при старте. Файл негит (под `knowledge/` ignore) — git-churn нет. Добавить будущий CLI = одна строка в реестре. Полные вызовы/флаги — в матрице выше.
+**Live CLI roster (per machine).** Which of these tools are actually installed on THIS machine, and when to call which, is in the auto-generated file `knowledge/.active-roster.md` (for the hub, `~/knowledge/.active-roster.md`). `kb-cli-roster` builds it from the declarative registry `~/knowledge/.orchestrator/cli-tools.tsv` and injects it into every Claude/Codex session through the SessionStart hook. Orchestrators without the hook (agy and others) read `.active-roster.md` directly at startup. The file is not tracked by git (ignored under `knowledge/`), so there is no git churn. Adding a future CLI = one line in the registry. Exact invocations/flags — in the local launch matrix above, when it exists.
 
 ## Agent self-identification
 
-«Карточка агента» = одна Markdown-страница, где описана **роль проекта**: что я тут делаю, на чём специализируюсь, какие у меня скиллы, кого зову как сабагентов, чего не делаю. При каждом старте новой сессии любой оркестратор обязан найти и прочитать карточку по иерархии ниже до первого содержательного ответа. Это не ленивое действие по вопросу «кто ты / представься»: такой вопрос только использует уже прочитанный `## Self-introduction` карточки вместо generic-описания вендора.
+An "agent card" is one Markdown page that describes the **project's role**: what I do here, what I specialize in, which skills I have, whom I call as subagents, and what I don't do. At the start of every new session, any orchestrator must find and read the card following the hierarchy below, before the first substantive answer. This is not a lazy action triggered by a "who are you / introduce yourself" question: such a question only reuses the card's already-read `## Self-introduction` instead of the vendor's generic description.
 
-`agent-card.md` — полный startup-loaded паспорт роли проекта. Его нельзя намеренно резать при нормальной работе. Generic process policy belongs in `AGENTS.md`; the card contains project-specific identity, scope, boundaries, skills, subagents, and runtime deltas. `inherits: hub-baseline@<version>` is a provenance/policy pointer, not runtime merge semantics: if project card exists, it still must stand alone.
+`agent-card.md` is the full, startup-loaded passport of the project's role. Do not deliberately trim it during normal work. Generic process policy belongs in `AGENTS.md`; the card contains project-specific identity, scope, boundaries, skills, subagents, and runtime deltas. `inherits: hub-baseline@<version>` is a provenance/policy pointer, not runtime merge semantics: if project card exists, it still must stand alone.
 
-Этот раздел — единственный канон конвенции для всех проектов на машине.
+This section is the single canonical convention for every project on the machine.
 
-### Где живёт карточка
+### Where the card lives
 
 ```
-<project>/knowledge/agents/agent-card.md   # фиксированное имя
+<project>/knowledge/agents/agent-card.md   # fixed name
 ```
 
-- **Одна карточка на проект, не одна на runtime.** Идентичность привязана к роли в проекте, исполнителей может быть несколько (Claude Code, Codex, Antigravity CLI, любой будущий runtime).
-- Runtime-различия, если важны, идут в `## Operating notes` внутри карточки. Никаких отдельных per-runtime файлов.
-- В `index.md` проекта появляется секция `## Agents` с одной ссылкой на `agents/agent-card.md`.
-- `AGENTS.md` проекта **не дублирует** карточку — даёт одно-два предложения и ссылается.
+- **One card per project, not one per runtime.** Identity is tied to the role in the project; there can be several executors (Claude Code, Codex, Antigravity CLI, any future runtime).
+- Runtime differences, if they matter, go into `## Operating notes` inside the card. No separate per-runtime files.
+- The project's `index.md` gets an `## Agents` section with one link to `agents/agent-card.md`.
+- The project's `AGENTS.md` **does not duplicate** the card — it gives one or two sentences and links to it.
 
-### Frontmatter (обязательные поля)
+### Frontmatter (required fields)
 
-| Поле | Тип | Назначение |
+| Field | Type | Purpose |
 |------|-----|-----------|
 | `schema_version` | string | card schema marker for new cards, currently `agent-card/v1` |
-| `inherits` | string | provenance/policy pointer such as `hub-baseline@0.4.0`; not runtime merge |
-| `name` | string (slug) | id проекта/роли в `knowledge/agents/`, lowercase-kebab, совпадает с `<slug>` или `<slug>-<role>` |
-| `display_name` | string | человекочитаемое имя роли («example-project orchestrator», не «Claude Code в example-project») |
-| `version` | string | semver карточки, **bump patch при любой правке frontmatter** |
-| `description` | string | **routing-trigger**, начинается с глагола («Use proactively when…»). Это не лейбл. |
-| `role` | string | позиция в команде (одно предложение) |
-| `goal` | string | что достигаем (одно предложение) |
-| `boundaries` | string[] | чего **не** делает (явные границы) |
-| `skills` | array | `id` / `name` / `description` / `tags` — дискретные способности |
-| `subagents` | array | `name` / `purpose` — кого зовём (runtime-specific roster — в Operating notes) |
-| `tools` | string[] | инструменты, на которые опирается роль |
+| `inherits` | string | provenance/policy pointer in the form `hub-baseline@<version>` (for example, hub-baseline version 0.4.0); not runtime merge |
+| `name` | string (slug) | project/role id in `knowledge/agents/`, lowercase-kebab, matches `<slug>` or `<slug>-<role>` |
+| `display_name` | string | human-readable role name ("example-project orchestrator", not "Claude Code in example-project") |
+| `version` | string | card semver; **bump patch on any frontmatter edit** |
+| `description` | string | **routing trigger**, starts with a verb ("Use proactively when…"). It is not a label. |
+| `role` | string | position in the team (one sentence) |
+| `goal` | string | what we are achieving (one sentence) |
+| `boundaries` | string[] | what it does **not** do (explicit boundaries) |
+| `skills` | array | `id` / `name` / `description` / `tags` — discrete capabilities |
+| `subagents` | array | `name` / `purpose` — whom we call (the runtime-specific roster goes in Operating notes) |
+| `tools` | string[] | tools the role relies on |
 
-Опциональные (для будущей A2A-экспортируемости): `provider.organization`, `provider.url`, `url`, `documentation_url`, `capabilities.*`, `security_schemes`, `default_input_modes`, `default_output_modes`.
+Optional (for future A2A exportability): `provider.organization`, `provider.url`, `url`, `documentation_url`, `capabilities.*`, `security_schemes`, `default_input_modes`, `default_output_modes`.
 
-### Body (обязательные секции, exact-match заголовки)
+### Body (required sections, exact-match headings)
 
 ```markdown
 # <display_name>
 
 ## Self-introduction
-Одно-два предложения от первого лица: «Я — <role>. Я занимаюсь <goal>». После обязательного стартового чтения карточки этот текст используется как canonical self-introduction, в том числе для явного вопроса «кто ты?». Явно отметить: «карточка одна, исполнителей может быть несколько; runtime-различия — в Operating notes».
+One or two first-person sentences: "I am <role>. I work on <goal>." After the mandatory startup read of the card, this text is the canonical self-introduction, including for an explicit "who are you?" question. State explicitly: "there is one card, there can be several executors; runtime differences are in Operating notes".
 
 ## Specialization
-3-7 строк: на чём агент специализируется **именно в этом проекте** (не вообще). Что отличает работу здесь от работы в других проектах на машине.
+3-7 lines: what the agent specializes in **in this project specifically** (not in general). What sets the work here apart from work in other projects on the machine.
 
 ## Skills
-Расширение `frontmatter.skills` — по скиллу абзац: триггер, действие, результат.
+Expands `frontmatter.skills` — one paragraph per skill: trigger, action, result.
 
 ## Subagents
-Кого зовём и на что. Зеркалит `frontmatter.subagents`. Runtime-specific roster — в Operating notes.
+Whom we call and what for. Mirrors `frontmatter.subagents`. The runtime-specific roster goes in Operating notes.
 
 ## Boundaries
-Расширение `frontmatter.boundaries` — почему именно эти границы и что делать вместо.
+Expands `frontmatter.boundaries` — why exactly these boundaries and what to do instead.
 
 ## Operating notes
-Опциональная. Где живут state/log/incidents, проектные привычки, **runtime-specific notes** (что доступно Claude Code, что — Codex, что — Antigravity CLI). Если нечего сказать — секция опускается.
+Optional. Where state/log/incidents live, project habits, **runtime-specific notes** (what is available to Claude Code, what to Codex, what to Antigravity CLI). If there is nothing to say, omit the section.
 ```
 
-Контракт: заголовок секции — ровно `## <Name>`, без суффиксов («(детально)», «(опц.)»). Пометки про опциональность — в теле, не в заголовке. Lint-тест: `^## (Self-introduction|Specialization|Skills|Subagents|Boundaries)$`.
+Contract: a section heading is exactly `## <Name>`, with no suffixes ("(detailed)", "(opt.)"). Notes about a section being optional go in the body, not in the heading. Lint test: `^## (Self-introduction|Specialization|Skills|Subagents|Boundaries)$`.
 
-### Иерархия при старте сессии (project → baseline → generic)
+### Session-start hierarchy (project → baseline → generic)
 
-1. `<project>/knowledge/agents/agent-card.md` — project-level, **выигрывает**.
-2. `~/knowledge/agents/agent-card.md` — baseline для машины (fallback). _Опционально, может отсутствовать._
-3. Если ни одного нет — generic-описание вендора **с явным указанием** «В этом проекте карточки нет. Завести?».
+1. `<project>/knowledge/agents/agent-card.md` — project level, **wins**.
+2. `~/knowledge/agents/agent-card.md` — the machine baseline (fallback). _Optional, may be absent._
+3. If neither exists — the vendor's generic description **with an explicit note**: "There is no agent card in this project. Create one?".
 
-Политика — **replace, не merge**: если есть project-level, baseline не подмешивается. Merge-семантика — future.
+The policy is **replace, not merge**: if a project-level card exists, the baseline is not mixed in. Merge semantics — future.
 
 ### Multi-orchestrator edit protocol
 
-Карточку правят только агенты (через `@`-mention соответствующего бота в Telegram; человек руками в файл не лезет). Правила:
+Only agents edit the card (through an `@`-mention of the matching bot in Telegram; the human does not edit the file by hand). Rules:
 
-1. **Append/patch scope.** Правка — точечная (один скилл, одна граница, одно поле). Не переписывание целиком.
-2. **Version bump.** При **любой** правке frontmatter — инкремент `version` (semver patch). Это даёт детектируемость конфликта при diff.
-3. **Conflict resolution.** Если два оркестратора правят одновременно и файл показывает конфликт — никто не перезаписывает молча. Конфликт фиксируется в `knowledge/incidents.md` строкой `agent-card conflict: <runtime>, <date>, <fields>`, resolution обсуждается человеком или эскалируется в `escalations.md`.
-4. **Ownership.** В первой версии нет formal ownership: любой оркестратор может править карточку. Закреплять «Codex владеет X, Claude — Y» — только при появлении реальных конфликтов, не раньше.
+1. **Append/patch scope.** An edit is targeted (one skill, one boundary, one field). Not a full rewrite.
+2. **Version bump.** On **any** frontmatter edit, increment `version` (semver patch). This makes a conflict detectable in a diff.
+3. **Conflict resolution.** If two orchestrators edit at the same time and the file shows a conflict, nobody overwrites it silently. The conflict is recorded in `knowledge/incidents.md` as the line `agent-card conflict: <runtime>, <date>, <fields>`; the resolution is worked out with a human or escalated to `escalations.md`.
+4. **Ownership.** The first version has no formal ownership: any orchestrator may edit the card. Pin down "Codex owns X, Claude owns Y" only when real conflicts appear, not before.
 
 ### Startup enforcement
 
-Чтение `agent-card.md` при старте — обязательный startup contract, не troubleshooting escalation. Runtime'ы с SessionStart-hook должны класть найденную карточку в системный контекст до первого turn'а. Runtime'ы без hook'а обязаны прочитать карточку напрямую в начале сессии, до ответа пользователю или выполнения задачи. На вопрос «кто ты / представься» нельзя впервые загружать карточку: к этому моменту она уже должна быть прочитана, либо отсутствие карточки должно быть явно зафиксировано.
+Reading `agent-card.md` at startup is a mandatory startup contract, not a troubleshooting escalation. Runtimes with a SessionStart hook must put the card they find into the system context before the first turn. Runtimes without a hook must read the card directly at the start of the session, before answering the user or doing the task. A "who are you / introduce yourself" question must never be the first time the card is loaded: by then it must already be read, or the missing card must be explicitly recorded.
 
 ### Failure modes
 
-| Сценарий | Симптом | Mitigation |
+| Scenario | Symptom | Mitigation |
 |----------|---------|-----------|
-| Карточка отсутствует | Identity-drift | При старте — агент явно говорит «карточки нет, завести?» |
-| `description` — лейбл, не trigger | Auto-delegation не работает | Lint `kb-doctor agent-cards` (future): проверка что `description` начинается с глагола |
-| Карточка дублирует `AGENTS.md` | Drift между двумя источниками | `AGENTS.md` ссылается на карточку, не дублирует |
-| Карточка копирует generic policy вместо project identity | Card bloat, stale duplicated rules | Replace copied policy with a link or `inherits`; keep only project-specific meaning |
-| Per-runtime файлы (legacy) | Split-brain между Claude и Codex | Смержить в `agent-card.md`, удалить старые файлы, version bump, запись в `log.md` |
-| Карточка привязана к вендору в `display_name` («Codex — X») | Identity ломается при смене runtime | `display_name` = роль проекта; вендор — только в `## Operating notes` |
-| Frontmatter ломает YAML | Карточку не прочитать | `python -c "import yaml; yaml.safe_load(open('....md').read().split('---')[1])"` |
+| Card is missing | Identity drift | At startup the agent says explicitly "there is no agent card, create one?" |
+| `description` is a label, not a trigger | Auto-delegation does not work | Lint `kb-doctor agent-cards` (future): check that `description` starts with a verb |
+| Card duplicates `AGENTS.md` | Drift between two sources | `AGENTS.md` links to the card and does not duplicate it |
+| Card copies generic policy instead of project identity | Card bloat, stale duplicated rules | Replace copied policy with a link or `inherits`; keep only project-specific meaning |
+| Per-runtime files (legacy) | Split-brain between Claude and Codex | Merge into `agent-card.md`, delete the old files, version bump, entry in `log.md` |
+| Card tied to a vendor in `display_name` ("Codex — X") | Identity breaks when the runtime changes | `display_name` = the project role; the vendor only in `## Operating notes` |
+| Frontmatter breaks YAML | The card cannot be read | `python -c "import yaml; yaml.safe_load(open('....md').read().split('---')[1])"` |
 
-### Когда заводить карточку
+### When to create a card
 
-- Новый проект через `new-wiki` → `knowledge/agents/_example.md` создаётся автоматически. Первый агент при старте сессии видит «карточки нет» → копирует `_example.md` → `agent-card.md`, заполняет под проект, делает commit-в-вику.
-- Существующий проект без карточки → агент при первой содержательной задаче спрашивает: «Завести `agent-card.md` сейчас?». Если да — заполняет; если нет — отмечает в `backlog.md`.
+- New project via `new-wiki` → `knowledge/agents/_example.md` is created automatically. The first agent at session start sees "no card" → copies `_example.md` → `agent-card.md`, fills it in for the project, and saves it in the wiki.
+- Existing project without a card → at the first substantive task the agent asks: "Create `agent-card.md` now?". If yes, it fills it in; if no, it notes this in `backlog.md`.
 
 ## Development Loop
 
-Единый процесс для **любого** агента (Claude Code / Codex / Antigravity / любой будущий) при новой разработке. Канон — [`vepol-prep/docs/methodology/development-loop.md`](https://github.com/nahornyi-ai-lab/vepol/blob/main/docs/methodology/development-loop.md); тут — компакт, которому агенты следуют нативно из этого файла. Claude-скилл `development-loop` — тонкий адаптер на этот же процесс.
+One process for **any** agent (Claude Code / Codex / Antigravity / any future one) doing new development. The canon is [`docs/methodology/development-loop.md`](https://github.com/nahornyi-ai-lab/vepol/blob/main/docs/methodology/development-loop.md) in the Vepol repo; here is the compact version that agents follow natively from this file. The Claude skill `development-loop` is a thin adapter for the same process.
 
-0. **Scope + Definition of Done.** Классифицировать работу и записать что значит «done» (acceptance + как проверим). *Trivial* (опечатка/док, bump зависимости, один файл, blast radius=0) → пропустить фазы 1 и 4, строка `research | skipped | trivial` в `log.md`, но всё равно верифицировать. **Never-trivial независимо от размера диффа:** security/auth, licensing, миграции/удаление данных, install-скрипты и хуки, логика task-board/scheduler, user-facing поведение, публичные доки/артефакты, влияющие на install/usage/контракт/claims/методологию (чистые typo-правки доков — trivial-eligible). *Non-trivial* (>~30 мин, новая фича/зависимость/инфра, cross-subsystem, трудно откатить, или из never-trivial списка) → полный loop.
-1. **Research-first (reuse-or-build).** Найти что уже есть для переиспользования/копирования (KB, другие проекты, мир). Фан-аут на агентов **только для реально независимых вопросов** (`grok` — когда нужен текущий X/Reddit). Запись: `candidates / decision: reuse|adapt|build / why`. Не строить то, что есть.
-2. **Дизайн.** Полный ТРИЗ (контрадикция → ИКР → разрешение, `triz-for-design.md`) — только для материальных решений или явного trade-off-конфликта из research; иначе лёгкий блок «2–3 альтернативы + почему эта». Искусственные «противоречия» ради галочки — анти-паттерн.
-3. **Спецификация** до кода → `knowledge/decisions/`, с acceptance, failure modes, обязательным E2E и списком прочитанных файлов кода/API/схем (`spec-driven-workflow.md`).
-4. **Лёгкий review спеки — ровно один независимый reviewer, один проход, до owner approval.** Reviewer обязан прочитать спеку и относящийся к ней реальный код/API. Он проверяет только выполнимость заявленного пути, совпадение параметров, выбор между существующими адресами/путями и неопределённые ветки текущего сценария. Формат: `GO / QUESTIONS / BLOCK`; вопросов максимум три. `BLOCK` допустим только при прямой доказуемой логической несовместимости с ссылкой `file:line`, делающей сценарий невозможным. Не расширять scope через security-hardening, observability, масштабирование, rollback, будущие сценарии, стиль, документацию или дополнительные тесты, если они не входят в заявленный scope. После `GO` или ответов автора на `QUESTIONS` повторный review запрещён: новый hash сам по себе ничего не инвалидирует. После настоящего `BLOCK` допустима одна delta-проверка только исходного пункта (`RESOLVED / STILL BLOCKED`) без новых находок. Ревьюер недоступен → зафиксировать попытку и отдать решение владельцу, не запускать каскад замен.
-5. **Тесты → имплементация.** Red → green → ревизии. Маленькие проверяемые шаги. Пустой/упавший вывод = провал, не «нет результата».
-6. **KB write-back в файлы, не в память.** decision/spec → `knowledge/decisions/`; факты → `sources/`/`concepts/`/`solutions/`/`state.md`/`strategies.md`; строка → `log.md`. Durable-страницы, созданные до прохождения фазы 7 — `status: draft`, при close → `stable` (append-only следы log/backlog/incidents — без маркера).
-7. **Verify + close.** Автор строит acceptance-матрицу: каждый критерий → воспроизводимое evidence → verdict. Рантайм-поведение (installer/hook/scheduler/UX) проверяется живым smoke, не только unit/lint. Затем `kb-doctor` (нет свежих P0/P1) и `kb-board close ... --claim-id`. Evidence до заявления «готово».
-8. **Showcase.** Отгруженная материальная работа с user-visible ценностью → NotebookLM видео-пересказ («что/зачем/как применить») как заготовка для соцсетей (TikTok, YouTube). Деливерабл = notebook/artifact ID, локально не качать, постит человек. Внутренняя сантехника → `showcase | skipped | internal` в `log.md`.
+0. **Scope + Definition of Done.** Classify the work and write down what "done" means (acceptance + how we will check it). *Trivial* (typo/doc, dependency bump, one file, blast radius=0) → skip phases 1 and 4, add the line `research | skipped | trivial` to `log.md`, but still verify. **Never trivial, whatever the diff size:** security/auth, licensing, migrations/data deletion, install scripts and hooks, task-board/scheduler logic, user-facing behavior, public docs/artifacts that affect install/usage/contract/claims/methodology (pure doc typo fixes are trivial-eligible). *Non-trivial* (>~30 min, a new feature/dependency/infra, cross-subsystem, hard to roll back, or on the never-trivial list) → the full loop.
+1. **Research-first (reuse-or-build).** Find what already exists to reuse or copy (KB, other projects, the world). Fan out to agents **only for truly independent questions** (`grok` when you need current X/Reddit). Record: `candidates / decision: reuse|adapt|build / why`. Do not build what already exists.
+2. **Design.** Full TRIZ (contradiction → ideal final result → resolution, `triz-for-design.md`) only for material decisions or an explicit trade-off conflict found in research; otherwise a light "2–3 alternatives + why this one" block. Artificial "contradictions" just to tick a box are an anti-pattern.
+3. **Specification** before code → `knowledge/decisions/`, with acceptance, failure modes, a mandatory E2E and a list of the code/API/schema files that were read (`spec-driven-workflow.md`).
+4. **Lightweight spec review — exactly one independent reviewer, one pass, before owner approval.** The reviewer must read the spec and the real code/API it relates to. The reviewer checks only: whether the stated path is feasible, whether the parameters match, the choice between existing addresses/paths, and undefined branches of the current scenario. Format: `GO / QUESTIONS / BLOCK`; at most three questions. `BLOCK` is allowed only for a direct, provable logical incompatibility, cited as `file:line`, that makes the scenario impossible. Do not expand the scope with security hardening, observability, scaling, rollback, future scenarios, style, documentation or extra tests unless they are part of the stated scope. After `GO`, or after the author answers the `QUESTIONS`, a repeat review is forbidden: a new hash by itself invalidates nothing. After a genuine `BLOCK`, one delta check of only the original item is allowed (`RESOLVED / STILL BLOCKED`), with no new findings. Reviewer unavailable → record the attempt and hand the decision to the owner; do not start a cascade of replacement reviewers.
+5. **Tests → implementation.** Red → green → revisions. Small, verifiable steps. Empty or failed output = failure, not "no result".
+6. **KB write-back to files, not to memory.** decision/spec → `knowledge/decisions/`; facts → `sources/`/`concepts/`/`solutions/`/`state.md`/`strategies.md`; a line → `log.md`. Durable pages created before phase 7 passes get `status: draft`, switched to `stable` at close (append-only traces in log/backlog/incidents carry no marker).
+7. **Verify + close.** The author builds an acceptance matrix: each criterion → reproducible evidence → verdict. Runtime behavior (installer/hook/scheduler/UX) is checked with a live smoke, not only unit/lint. Then `kb-doctor` (no fresh P0/P1) and `kb-board close ... --claim-id`. Evidence comes before claiming "done".
+8. **Showcase.** Shipped material work with user-visible value → a NotebookLM video recap ("what / why / how to apply it") as raw material for social media (TikTok, YouTube). Deliverable = notebook/artifact ID; do not download it locally; the human does the posting. Internal plumbing → `showcase | skipped | internal` in `log.md`.
 
-**Инциденты учат цикл:** запись о сломавшейся отгруженной работе в `incidents.md` обязана содержать `loop-phase-failed: <0…8>`, почему спека/лёгкий review/тесты/верификация пропустили дефект, и prevention rule. Одна фаза фейлит дважды → правится сам цикл.
+**Incidents teach the loop:** an `incidents.md` entry about broken shipped work must contain `loop-phase-failed: <0…8>`, why the spec/lightweight review/tests/verification missed the defect, and a prevention rule. If one phase fails twice → fix the loop itself.
 
-**Task-board триггер (enforcement для не-Claude):** перед переводом задачи в `In Progress` агент обязан убедиться, что спека есть в `knowledge/decisions/`, прошла ровно один лёгкий независимый review и получила owner approval; иначе первая подзадача — написать спеку. `agy` запускать через `agy --add-dir "$PWD"`, чтобы он читал проектный `AGENTS.md`. Детерминированные guards (`kb-board`/`kb-doctor dev-loop-audit`) — отдельная tracked-задача; до их появления правила enforced инструкцией и владельцем.
+**Task-board trigger (enforcement for non-Claude runtimes):** before moving a task to `In Progress`, the agent must make sure the spec exists in `knowledge/decisions/`, has passed exactly one lightweight independent review and has owner approval; otherwise the first subtask is to write the spec. Launch `agy` as `agy --add-dir "$PWD"` so that it reads the project `AGENTS.md`. Deterministic guards (`kb-board`/`kb-doctor dev-loop-audit`) are a separate tracked task; until they exist, the rules are enforced by instruction and by the owner.
 
-## Операции
+## Operations
 
-### Ingest — положить новый источник
+### Ingest — add a new source
 
-1. Прочитать источник целиком.
-2. Обсудить ключевые take-aways (не молча).
-3. Написать саммари в `knowledge/sources/<slug>.md` с фронтматтером:
+1. Read the source in full.
+2. Discuss the key takeaways (not silently).
+3. Write a summary to `knowledge/sources/<slug>.md` with frontmatter:
    ```yaml
    ---
    title: "..."
-   source: "url или путь к raw/"
+   source: "url or path to raw/"
    date_ingested: 2026-04-13
    type: article|paper|transcript|dataset|image|conversation
    tags: [...]
    ---
    ```
-4. Обновить релевантные страницы (entities, concepts, state). Один источник обычно задевает 5–15 страниц.
-5. Если источник касается нескольких проектов → обновить ещё и хаб (`~/knowledge/concepts/`, `companies/`, и т.д.).
-6. Записать строку в `knowledge/log.md` (локальный + хаб, если кросс-проект).
-7. Обновить `knowledge/index.md` если появилась новая страница.
+4. Update the relevant pages (entities, concepts, state). One source usually touches 5–15 pages.
+5. If the source concerns several projects → also update the hub (`~/knowledge/concepts/`, `companies/`, etc.).
+6. Add a line to `knowledge/log.md` (local + hub, if cross-project).
+7. Update `knowledge/index.md` if a new page appeared.
 
-### Query — ответ на вопрос
+### Query — answer a question
 
-1. Прочитать `index.md` (сначала локальный, потом хаб, если вопрос кросс-проектный).
-2. Можно использовать `~/knowledge/bin/kb-search "<query>"` для быстрого ripgrep по всей базе.
-3. Пройти по найденным страницам, прочитать релевантные, проверить раздел «Sources» на устаревание.
-4. Ответить с цитатами (`[[wiki-link]]` или путь + якорь).
-5. **Если ответ ценный — зафайлить его обратно в вики** как новую страницу (comparison, synthesis, analysis). Не давать знанию уйти в чат-историю.
-6. Обновить `log.md`.
+1. Read `index.md` (the local one first, then the hub's if the question is cross-project).
+2. You can use `~/knowledge/bin/kb-search "<query>"` for a fast ripgrep across the whole base.
+3. Go through the pages found, read the relevant ones, check their "Sources" section for staleness.
+4. Answer with citations (`[[wiki-link]]` or path + anchor).
+5. **If the answer is valuable, file it back into the wiki** as a new page (comparison, synthesis, analysis). Do not let knowledge disappear into chat history.
+6. Update `log.md`.
 
-### Lint — периодический хелсчек
+### Lint — periodic health check
 
-По команде пользователя («пролинтуй вики»):
+On the user's command ("lint the wiki"):
 
-- Найти противоречия между страницами.
-- Найти orphan pages (нет входящих ссылок).
-- Найти упоминания концептов без своей страницы.
-- Найти устаревшие claims.
-- Предложить вопросы для исследования и источники, которых не хватает.
-- Записать отчёт в `log.md` как `lint`-запись.
+- Find contradictions between pages.
+- Find orphan pages (no incoming links).
+- Find concepts that are mentioned but have no page of their own.
+- Find outdated claims.
+- Suggest research questions and missing sources.
+- Write the report to `log.md` as a `lint` entry.
 
-## Формат лога
+## Log format
 
-Каждая запись начинается с единого префикса — лог должен быть grep-friendly:
+Every entry starts with the same prefix — the log must be grep-friendly:
 
 ```
 ## [2026-04-13] ingest | <slug> | "Karpathy LLM Wiki gist"
-## [2026-04-13] query | <slug> | "как измерять конверсию аутрича"
-## [2026-04-13] experiment | <slug> | start | "Cold email v2 с кейсами"
-## [2026-04-13] experiment | <slug> | result | "Cold email v2: reply rate 4.2% (было 1.8%)"
-## [2026-04-13] lint | <slug> | "3 orphan pages, 1 противоречие"
-## [2026-04-13] hub | hub | "Создан хаб ~/knowledge"
+## [2026-04-13] query | <slug> | "how to measure outreach conversion"
+## [2026-04-13] experiment | <slug> | start | "Cold email v2 with case studies"
+## [2026-04-13] experiment | <slug> | result | "Cold email v2: reply rate 4.2% (was 1.8%)"
+## [2026-04-13] lint | <slug> | "3 orphan pages, 1 contradiction"
+## [2026-04-13] hub | hub | "Created the ~/knowledge hub"
 ```
 
-Быстрый просмотр: `grep "^## \[" ~/knowledge/log.md | tail -20`
+Quick view: `grep "^## \[" ~/knowledge/log.md | tail -20`
 
-## Реестр проектов
+## Project registry
 
-`~/knowledge/registry.md` — единый источник правды о том, **какие проекты существуют и где они лежат**. Поля каждой записи:
+`~/knowledge/registry.md` is the single source of truth about **which projects exist and where they live**. The fields of each entry:
 
-- slug (kebab-case, используется в симлинках)
-- абсолютный путь
-- статус вики: `live` / `seeded` / `no-wiki` / `archived`
-- категория: `lab` / `pet` / `order` / `personal`
-- одна строчка описания
-- теги
+- slug (kebab-case, used in symlinks)
+- absolute path
+- wiki status: `live` / `seeded` / `no-wiki` / `archived`
+- category: `lab` / `pet` / `order` / `personal`
+- a one-line description
+- tags
 
-Реестр обновляется при каждом новом проекте или изменении статуса.
+The registry is updated for every new project and every status change.
 
-## Кросс-проектный поиск
+## Cross-project search
 
-Два уровня:
+Two levels:
 
-1. **Obsidian vault** в `~/knowledge/`. Благодаря симлинкам в `projects/`, поиск и graph view работают через все проекты. Идеально для визуальной навигации и `[[wiki-links]]` через границы проектов.
+1. **Obsidian vault** in `~/knowledge/`. Thanks to the symlinks in `projects/`, search and graph view work across all projects. Ideal for visual navigation and for `[[wiki-links]]` across project boundaries.
 
-2. **CLI**: `~/knowledge/bin/kb-search "<query>"` — ripgrep по markdown во всех симлинкнутых проектах + хаб-уровневые файлы. Быстро, без запуска Obsidian.
+2. **CLI**: `~/knowledge/bin/kb-search "<query>"` — ripgrep over markdown in all symlinked projects + hub-level files. Fast, with no need to start Obsidian.
 
-   Примеры:
+   Examples:
    ```
-   kb-search "cold email"            # найти все упоминания
-   kb-search "reply rate" --project <slug>   # только в одном проекте
+   kb-search "cold email"            # find every mention
+   kb-search "reply rate" --project <slug>   # only in one project
    ```
 
-## Языковая конвенция
+## Language convention
 
-- **Содержание страниц** — русский.
-- **Пути, имена файлов, идентификаторы, теги, frontmatter keys** — английский, kebab-case для файлов, snake_case для тегов.
-- **Термины без хороших русских эквивалентов** — оставляем английскими (ICP, funnel, cold outreach, CTR, MCP, …).
-- **Код и технические сниппеты** — английские комментарии.
+- **Page content** — the user's language (`language` in `~/knowledge/personal/profile.yaml`).
+- **Paths, file names, identifiers, tags, frontmatter keys** — English; kebab-case for files, snake_case for tags.
+- **Terms without a good equivalent in the user's language** — keep them in English (ICP, funnel, cold outreach, CTR, MCP, …).
+- **Code and technical snippets** — English comments.
 
-## Что нельзя
+## What not to do
 
-- **Никогда не модифицировать `raw/`.** Источники immutable. Если источник плохой — отметить это на соответствующей вики-странице, но не трогать оригинал.
-- **Никаких заявлений без источника.** Каждый факт должен иметь ссылку либо на `raw/`, либо на другую вики-страницу с цепочкой к raw.
-- **Не писать в вики спекуляции без пометки.** Если это гипотеза — явно `> [!hypothesis]` или в разделе «Open questions».
-- **Не дублировать знание между локальной вики и хабом.** Правило: применимо ≥2 проектам → в хаб (`concepts/`, `people/`, `companies/`, `solutions/`). Только одному → локально.
-- **Не смешивать код и вики.** Код проекта лежит сиблингами к `knowledge/`, не внутри него.
-- **Не создавать страницы «про запас».** Только если есть что сказать прямо сейчас.
+- **Never modify `raw/`.** Sources are immutable. If a source is bad, note that on the matching wiki page, but do not touch the original.
+- **No claims without a source.** Every fact must link either to `raw/` or to another wiki page with a chain back to raw.
+- **Do not write speculation into the wiki without marking it.** If it is a hypothesis, mark it explicitly with `> [!hypothesis]` or put it under "Open questions".
+- **Do not duplicate knowledge between the local wiki and the hub.** Rule: applies to ≥2 projects → the hub (`concepts/`, `people/`, `companies/`, `solutions/`). Only to one → local.
+- **Do not mix code and wiki.** Project code sits next to `knowledge/` as siblings, not inside it.
+- **Do not create pages "just in case".** Only when there is something to say right now.
 
-## Новый проект
+## New project
 
 ```
-~/knowledge/bin/new-wiki <path-to-project> [slug] [category]
+~/knowledge/bin/new-wiki <path-to-project> [slug] [category] [description]
 ```
 
-Что делает:
-1. Создаёт в проекте `AGENTS.md`, `CLAUDE.md` (из `_template/`) и `knowledge/` со всей структурой (`README.md`, `index.md`, `log.md`, `state.md`, `raw/assets/`, `sources/`).
-2. Добавляет симлинк `~/knowledge/projects/<slug>` → `<project>/knowledge`.
-3. Вписывает строчку в лог хаба.
-4. Просит вручную обновить `registry.md` (описание, статус).
+What it does:
+1. Creates `AGENTS.md` (from `_template/`) and `knowledge/` with the full structure (`README.md`, `index.md`, `log.md`, `state.md`, `backlog.md`, `escalations.md`, `incidents.md`, `strategies.md`, `reports/`, `agents/_example.md`, `.orchestration.yaml`, `raw/assets/`, `sources/`, `daily/`) in the project. It creates no `CLAUDE.md`: Claude Code reads the project `AGENTS.md` directly (see the adapter contract above).
+2. Adds `knowledge/` and `.kb-ignore` to the project's `.gitignore`.
+3. Adds the symlink `~/knowledge/projects/<slug>` → `<project>/knowledge`.
+4. Writes a line to the hub log.
+5. Registers the project as `seeded` in `~/knowledge/registry.md`: a hand-written registry gets one row in its projects table (re-running adds no second row). When the registry does not exist yet, or is generated by `kb-rebuild-registry`, it changes nothing and prints how to register the project instead. Set the status to `live` once the wiki is in use.
 
-## Спеки агентов vs код агентов
+## Agent specs vs agent code
 
-Важная конвенция для AI-проектов (таких как `<slug>`): спеки агентов (markdown) живут в `knowledge/agent-specs/`, а реальный код агентов (Python/TS) — в корне проекта, например `<project>/agents/`. Имена разные, чтобы не сталкиваться. Причина: спеки — это знание (кто что делает, какие промпты, метрики качества), а код — это инструмент. Они эволюционируют с разной скоростью и по разным правилам (знание ingestible, код тестируемый).
+An important convention for AI projects (such as `<slug>`): agent specs (markdown) live in `knowledge/agent-specs/`, while the real agent code (Python/TS) lives in the project root, for example `<project>/agents/`. The names differ so they do not collide. Reason: specs are knowledge (who does what, which prompts, quality metrics), while code is a tool. They evolve at different speeds and by different rules (knowledge is ingestible, code is testable).
 
 ## Obsidian
 
-Vault открывается **на уровне `~/knowledge/`**. Благодаря симлинкам в `projects/`, графовое представление и `[[wiki-links]]` работают через все проекты сразу. Код проектов (`node_modules`, `.git`, исходники) физически недоступен через симлинк — мы указываем на `knowledge/`, а не на корень проекта.
+The vault is opened **at the `~/knowledge/` level**. Thanks to the symlinks in `projects/`, the graph view and `[[wiki-links]]` work across all projects at once. Project code (`node_modules`, `.git`, sources) is physically out of reach through the symlink: we point at `knowledge/`, not at the project root.
 
-Файл `~/knowledge/.obsidian/app.json` содержит `userIgnoreFilters` как дополнительную гигиену.
+The file `~/knowledge/.obsidian/app.json` contains `userIgnoreFilters` as extra hygiene.
 
-## Auto-capture сессий (claude-memory-compiler)
+## Session auto-capture (claude-memory-compiler)
 
-В проектах, где уже есть `<project>/knowledge/log.md`, Codex и Claude Code сессии **автоматически захватываются** через [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler). Antigravity CLI (`agy`) хука пока не имеет — после стабилизации экосистемы (curl-installed v1.0.0 from 2026-05-19) добавить аналогичный adapter:
+In projects that already have `<project>/knowledge/log.md`, Codex and Claude Code sessions are **captured automatically** through [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler). Antigravity CLI (`agy`) has no hook yet — once its ecosystem stabilizes (curl-installed v1.0.0 from 2026-05-19), add a similar adapter:
 
-**SessionStart** — хук `~/knowledge/bin/kb-session-start` формирует manifest-aware startup bundle: agent card, `state.md`, recent `log.md`, active work/open escalations, compact prevention/ongoing incident slice, CLI roster/recent `daily/` при наличии бюджета. `index.md` и полный `incidents.md` не грузятся на старте; они остаются on-demand навигацией/диагностикой.
+**SessionStart** — the `~/knowledge/bin/kb-session-start` hook builds a manifest-aware startup bundle: agent card, `state.md`, recent `log.md`, active work/open escalations, compact prevention/ongoing incident slice, and the CLI roster/recent `daily/` when the budget allows. `index.md` and the full `incidents.md` are not loaded at startup; they remain on-demand navigation/diagnostics.
 
-**SessionEnd / PreCompact** — хуки `kb-session-end` / `kb-pre-compact` экспортят:
+**SessionEnd / PreCompact** — the `kb-session-end` / `kb-pre-compact` hooks export:
 - `CLAUDE_KB_DAILY_DIR=<project>/knowledge/daily`
 - `CLAUDE_KB_LOG_FILE=<project>/knowledge/log.md`
 - `CLAUDE_KB_NO_COMPILE=1`
 
-Делегируют в `~/claude-memory-compiler/hooks/session-end.py` (upstream), который парсит transcript и спавнит `flush.py` (патчен) фоновым процессом. Flush вызывает Claude Agent SDK (`~$0.02-0.05`), извлекает Context / Decisions / Lessons / Action Items из сессии, и пишет:
+They delegate to `~/claude-memory-compiler/hooks/session-end.py` (upstream), which parses the transcript and spawns `flush.py` (patched) as a background process. Flush calls the Claude Agent SDK (`~$0.02-0.05`), extracts Context / Decisions / Lessons / Action Items from the session, and writes:
 
-1. **Полный extract** → `<project>/knowledge/daily/YYYY-MM-DD.md` (append, one `### Session (HH:MM)` per session)
-2. **Одну строку** → `<project>/knowledge/log.md` в формате `## [YYYY-MM-DD HH:MM] session | <summary>` + `Details: [[daily/YYYY-MM-DD]]`
+1. **The full extract** → `<project>/knowledge/daily/YYYY-MM-DD.md` (append, one `### Session (HH:MM)` per session)
+2. **One line** → `<project>/knowledge/log.md` in the format `## [YYYY-MM-DD HH:MM] session | <summary>` + `Details: [[daily/YYYY-MM-DD]]`
 
-**Что не трогается:** `state.md`, `index.md`, `raw/`, категории (icp/, offers/, channels/, ...) — всё это курируется человеком. `daily/` — raw material, пользователь читает его и сам лифтит важное в категории.
+**What is not touched:** `state.md`, `index.md`, `raw/`, categories (icp/, offers/, channels/, ...) — all of these are curated by the human. `daily/` is raw material: the user reads it and lifts what matters into the categories.
 
-**Opt-in:** существование `<project>/knowledge/log.md` (= вика заведена).
-**Opt-out:** `touch <project>/.kb-ignore` — хуки тихо пропустят.
+**Opt-in:** `<project>/knowledge/log.md` exists (= the wiki is set up).
+**Opt-out:** `touch <project>/.kb-ignore` — the hooks will skip it silently.
 
-**Patch checklist** (при `git pull` в `~/claude-memory-compiler/`):
-1. `scripts/flush.py::maybe_trigger_compilation()` — первая строка `if os.environ.get("CLAUDE_KB_NO_COMPILE"): return`.
-2. `scripts/flush.py::append_to_daily_log()` — ветка для `CLAUDE_KB_DAILY_DIR` + cross-ref в `CLAUDE_KB_LOG_FILE`.
-3. `scripts/flush.py::main()` — не вызывает `append_to_daily_log` для FLUSH_OK/FLUSH_ERROR когда `CLAUDE_KB_DAILY_DIR` установлен.
+**Patch checklist** (on `git pull` in `~/claude-memory-compiler/`):
+1. `scripts/flush.py::maybe_trigger_compilation()` — the first line is `if os.environ.get("CLAUDE_KB_NO_COMPILE"): return`.
+2. `scripts/flush.py::append_to_daily_log()` — a branch for `CLAUDE_KB_DAILY_DIR` + a cross-ref into `CLAUDE_KB_LOG_FILE`.
+3. `scripts/flush.py::main()` — does not call `append_to_daily_log` for FLUSH_OK/FLUSH_ERROR when `CLAUDE_KB_DAILY_DIR` is set.
 
-**Наблюдение и дебаг:**
-- Лог хука: `~/claude-memory-compiler/scripts/flush.log`
-- Содержит: `SessionEnd fired`, `Spawned flush.py`, `Result: saved (N chars)`
+**Monitoring and debugging:**
+- Hook log: `~/claude-memory-compiler/scripts/flush.log`
+- It contains: `SessionEnd fired`, `Spawned flush.py`, `Result: saved (N chars)`
 
-## Git и вика
+## Git and the wiki
 
-**Правило: `knowledge/` НЕ должна трекаться git ни в одном проекте.**
+**Rule: `knowledge/` must NOT be tracked by git in any project.**
 
-Причины:
-- Dailies могут содержать sensitive session-транскрипты
-- Вика меняется независимо от кода (log.md обновляется каждую сессию)
-- Шум в PR / diff
-- Obsidian — это «второй мозг», а не часть кодовой базы
+Reasons:
+- Dailies may contain sensitive session transcripts
+- The wiki changes independently of the code (log.md is updated every session)
+- Noise in PRs / diffs
+- Obsidian is a "second brain", not part of the codebase
 
-**Конвенция:** в каждом проекте где есть `knowledge/`, `.gitignore` содержит:
+**Convention:** in every project that has `knowledge/`, `.gitignore` contains:
 ```
 knowledge/
 .kb-ignore
 ```
 
-Скрипт `bin/new-wiki` **автоматически** добавляет эти строки в `.gitignore` при создании новой вики. Для проектов, где вика заводилась до этого правила — руками добавить.
+The `bin/new-wiki` script adds these lines to `.gitignore` **automatically** when it creates a new wiki. For projects whose wiki was set up before this rule, add them by hand.
 
-Если нужна версионирование вики — делать это отдельно (например, `~/knowledge/` может быть своим git-репо, отдельно от проектов).
+If you need versioning for the wiki, do it separately (for example, `~/knowledge/` can be its own git repo, separate from the projects).
 
-## Точки расширения
+## Extension points
 
-- `~/knowledge/bin/` — можно добавлять CLI-утилиты.
-- `raw/` на уровне хаба — для источников, не относящихся ни к одному проекту (общие книги, фундаментальные статьи).
-- При росте >100 источников — подключить [qmd](https://github.com/tobi/qmd) (BM25+vector над markdown).
-- **Phase 2 для compiler:** подключить `compile.py` для генерации `concepts/`, `connections/`, `qa/` когда daily-captures накопятся и станет ясно, что конкретно хочется компилировать. Потребует кастомизации промпта чтобы не переписывать user's `index.md`.
+- `~/knowledge/bin/` — you can add CLI utilities here.
+- Hub-level `raw/` — for sources that belong to no project (general books, foundational articles).
+- Once there are >100 sources — plug in [qmd](https://github.com/tobi/qmd) (BM25+vector over markdown).
+- **Phase 2 for the compiler:** plug in `compile.py` to generate `concepts/`, `connections/`, `qa/` once daily captures pile up and it becomes clear what exactly is worth compiling. This will need prompt customization so that it does not rewrite the user's `index.md`.
 
 ## Important research quorum
 
-Для важных ресерчей используй quorum-pipeline: независимые pass-ы четырёх локальных оркестраторов — **Claude Code + Codex + Antigravity CLI (`agy`) + Grok CLI**. Grok-pass запускается через `$HOME/.grok/bin/grok`, не через OpenCode, и prompt обязан явно просить проверить текущие X/Twitter и Reddit discussion/signals. Каноническая процедура: `~/knowledge/concepts/important-research-quorum-pipeline.md`.
+For important research, use the quorum pipeline: independent passes by four local orchestrators — **Claude Code + Codex + Antigravity CLI (`agy`) + Grok CLI**. The Grok pass runs through `$HOME/.grok/bin/grok`, not through OpenCode, and the prompt must explicitly ask it to check current X/Twitter and Reddit discussion/signals. If this hub also keeps a written procedure at `~/knowledge/concepts/important-research-quorum-pipeline.md` (optional; the installer does not ship one), follow it; otherwise this section is the procedure.
 
-Каждый pass пишет durable note в `knowledge/sources/<topic>-<agent>-<date>.md` (4 файла); итоговый synthesis — в `knowledge/reports/<topic>-<date>.md` с явными agreement/disagreement/confidence. NotebookLM — финальный production step для русского пересказа (структура: «Что нашли», «Что это меняет», «Как применить в Vepol», «Что не брать», «Следующие действия»). Если Grok CLI недоступен, important research degraded; chrome-devtools-mcp или OpenCode допустимы только как emergency fallback с явной записью о деградации.
+Each pass writes a durable note to `knowledge/sources/<topic>-<agent>-<date>.md` (4 files); the final synthesis goes to `knowledge/reports/<topic>-<date>.md` with explicit agreement/disagreement/confidence. NotebookLM is the final production step: a recap in the user's language (structure: "What we found", "What this changes", "How to apply it in Vepol", "What not to take", "Next steps"). If Grok CLI is unavailable, important research is degraded; chrome-devtools-mcp or OpenCode are allowed only as an emergency fallback, with an explicit note about the degradation.
 
-**Когда вызывать:**
-- «что обсуждают про X», «что говорят в комьюнии», «какие реакции на Y»
-- любая research-задача с упоминанием X/Twitter/Reddit
-- когда нужна актуальность (последние дни/недели)
-- когда нужен независимый 4-й голос (Grok CLI) для сложных решений
+**When to call it:**
+- "what are people saying about X", "what is the community saying", "what are the reactions to Y"
+- any research task that mentions X/Twitter/Reddit
+- when freshness matters (the last days/weeks)
+- when you need an independent 4th voice (Grok CLI) for hard decisions
 
-**Когда НЕ вызывать:**
-- ответ есть в коде / документации / git history
-- технический вопрос без community-сентимент-компонента
-- быстрый факт, на который хватит обычного web search
+**When NOT to call it:**
+- the answer is in the code / documentation / git history
+- a technical question with no community-sentiment component
+- a quick fact that a normal web search covers

@@ -1,7 +1,7 @@
 """Shared identity filters for the people notebook.
 
-Owner directive (chat, 2026-07-05): «Ботов мне в записною книгу не
-предлагай» — bot accounts are never people and must never reach the
+Owner directive (chat, 2026-07-05): "Don't suggest bots for my address
+book" — bot accounts are never people and must never reach the
 review queue, regardless of the source that saw them.
 """
 

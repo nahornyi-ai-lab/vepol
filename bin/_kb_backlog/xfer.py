@@ -1,6 +1,6 @@
 """xfer.py — cross-backlog transfer coordinator (X1-X4 phases).
 
-Spec: ~/.claude/plans/rustling-marinating-sketch.md Section 5 п.6 + CR7-B3
+Spec: ~/.claude/plans/rustling-marinating-sketch.md Section 5 item 6 + CR7-B3
 + CR8-B4 (byte-safe rollback) + CR9-B1 (state-safe recovery).
 
 Phases:

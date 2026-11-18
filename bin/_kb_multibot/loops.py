@@ -97,7 +97,7 @@ class LoopGuard:
     def truncate_fan_out(self, mentions: list[str]) -> Tuple[list[str], list[str]]:
         """Split mentions into (spawn_now, queue_later) based on fan_out_cap.
 
-        Concept §7.4: F=10 parallel spawns per event, остальные в очередь.
+        Concept §7.4: F=10 parallel spawns per event, the rest are queued.
         Returns (parallel_targets, queued_targets).
         """
         if len(mentions) <= self.fan_out_cap:

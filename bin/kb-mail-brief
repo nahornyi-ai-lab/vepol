@@ -19,6 +19,7 @@ Test knobs:
   KB_MAIL_FAKE_DIR=<dir>   -> FakeBackend fixture (no network)
   KB_MAIL_NOW=<iso8601>    -> pin "now" for deterministic windows/timestamps
   KB_HUB=<dir>             -> hub root (default ~/knowledge)
+  KB_TZ=<IANA zone>        -> time zone of the day/windows (default: the Mac's own zone)
 """
 from __future__ import annotations
 
@@ -47,9 +48,11 @@ MAX_LOOKBACK_DAYS = 3
 
 
 def _tz():
+    """KB_TZ, else the Mac's own time zone, else UTC (never a hardcoded city)."""
     try:
         from zoneinfo import ZoneInfo
-        return ZoneInfo(os.environ.get("KB_TZ", "Europe/Madrid"))
+        from _kb_calendar.dateparse import local_tz_name
+        return ZoneInfo(local_tz_name())
     except Exception:
         return None
 

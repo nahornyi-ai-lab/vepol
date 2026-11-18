@@ -71,7 +71,7 @@ us.
 ### "Can I contribute back to Vepol?"
 
 Yes, please. Contributions are accepted under the same FSL-1.1-MIT
-terms. See `CONTRIBUTING.md` (when published) for the process.
+terms. See [CONTRIBUTING.md](CONTRIBUTING.md) for the process.
 
 ### "What if I'm not sure my use case fits?"
 
@@ -96,7 +96,7 @@ receive a license certificate by email within 24 hours.
 | **Mid-size** — companies up to ~250 people | €5 000 / year | [Buy →](https://buy.stripe.com/cNi3cv9dpcYweiG5xU1ck02) |
 
 **Term and renewal.** Each link creates an annual subscription that
-auto-renews at the same price unless cancelled. Cancel any time via
+auto-renews at the same price unless canceled. Cancel any time via
 the customer portal link in your Stripe receipt or by email;
 cancellation takes effect at the end of the current 12-month term,
 no pro-rata refunds.

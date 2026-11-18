@@ -40,6 +40,15 @@ check() { # check <rc-expr> <label>  — rc-expr "0" means last cmd rc==0 expect
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -405,6 +414,326 @@ run_tick "$HUB"; run_tick "$HUB"
 calls_has "$HUB" shim-learning && bad "failed parent blocks dependent" || ok "failed parent blocks dependent"
 
 echo
+echo "=== after:* with a disabled optional-input parent follows the parent's own trigger ==="
+
+# Only the optional-input parents (_kb_processes.OPTIONAL_INPUT_PARENTS) are
+# walked past when disabled; every other disabled parent keeps the old rule.
+"$PY" - "$BIN" <<'EOF' && ok "optional-input parents are exactly mail-morning, mail-evening, learning, money-radar and all exist in the defaults" \
+  || bad "optional-input parents are exactly mail-morning, mail-evening, learning, money-radar and all exist in the defaults"
+import sys
+sys.path.insert(0, sys.argv[1])
+import _kb_processes as k
+assert k.OPTIONAL_INPUT_PARENTS == {"mail-morning", "mail-evening", "learning", "money-radar"}, k.OPTIONAL_INPUT_PARENTS
+ids = {p["id"] for p in k.parse_processes_text(k.DEFAULT_PROCESSES_YAML)}
+assert k.OPTIONAL_INPUT_PARENTS <= ids, k.OPTIONAL_INPUT_PARENTS - ids
+EOF
+
+# Turning mail off (enabled: false on mail-morning) must not silently stop the
+# brief and everything after it: daily runs at mail-morning's own time.
+HUB=$(new_hub after-disabled)
+mkshim "$HUB" shim-mail; mkshim "$HUB" shim-daily; mkshim "$HUB" shim-learning
+write_cfg "$HUB" <<'EOF'
+- id: mail-morning
+  enabled: false
+  when: "00:00"
+  run: shim-mail
+  outputs: [file]
+- id: daily
+  enabled: true
+  when: after:mail-morning
+  run: shim-daily
+  outputs: [telegram, file]
+- id: learning
+  enabled: true
+  when: after:daily
+  run: shim-learning
+  outputs: [telegram, file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-mail && bad "disabled parent never runs" || ok "disabled parent never runs"
+calls_has "$HUB" shim-daily && ok "disabled parent: child runs at the parent's own time" \
+  || bad "disabled parent: child runs at the parent's own time"
+calls_has "$HUB" shim-learning && bad "enabled parent still gates its child (same tick)" \
+  || ok "enabled parent still gates its child (same tick)"
+run_tick "$HUB"
+calls_has "$HUB" shim-learning && ok "enabled parent: child runs on the next tick" \
+  || bad "enabled parent: child runs on the next tick"
+
+# Mail off in the evening too: retro runs at mail-evening's own time.
+HUB=$(new_hub after-disabled-evening)
+mkshim "$HUB" shim-mail; mkshim "$HUB" shim-retro
+write_cfg "$HUB" <<'EOF'
+- id: mail-evening
+  enabled: false
+  when: "00:00"
+  run: shim-mail
+  outputs: [file]
+- id: retro
+  enabled: true
+  when: after:mail-evening
+  run: shim-retro
+  outputs: [telegram, file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-retro && ok "mail-evening disabled: retro runs at mail-evening's own time" \
+  || bad "mail-evening disabled: retro runs at mail-evening's own time"
+
+# Two disabled optional ancestors (money-radar after learning): the morning
+# digest walks up to the first real trigger.
+HUB=$(new_hub after-chain)
+mkshim "$HUB" shim-a; mkshim "$HUB" shim-b; mkshim "$HUB" shim-c
+write_cfg "$HUB" <<'EOF'
+- id: learning
+  enabled: false
+  when: "00:00"
+  run: shim-a
+  outputs: [file]
+- id: money-radar
+  enabled: false
+  when: after:learning
+  run: shim-b
+  outputs: [file]
+- id: morning-digest
+  enabled: true
+  when: after:money-radar
+  run: shim-c
+  outputs: [file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-c && ok "disabled chain: child follows the top trigger" \
+  || bad "disabled chain: child follows the top trigger"
+{ calls_has "$HUB" shim-a || calls_has "$HUB" shim-b; } \
+  && bad "disabled chain: disabled ancestors never run" || ok "disabled chain: disabled ancestors never run"
+
+# A disabled on-demand optional parent: the child is on-demand too (never scheduled).
+HUB=$(new_hub after-ondemand)
+mkshim "$HUB" shim-p; mkshim "$HUB" shim-k
+write_cfg "$HUB" <<'EOF'
+- id: money-radar
+  enabled: false
+  when: on-demand
+  run: shim-p
+  outputs: [file]
+- id: k
+  enabled: true
+  when: after:money-radar
+  run: shim-k
+  outputs: [file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-k && bad "disabled on-demand parent: child not scheduled" \
+  || ok "disabled on-demand parent: child not scheduled"
+
+echo
+echo "=== after:* with a disabled parent whose output the child needs keeps waiting ==="
+
+# retro off: evening-digest needs the Retro block, so it must not start at
+# mail-evening's time and fail (rc 75) on every tick until midnight.
+HUB=$(new_hub after-required-retro)
+mkshim "$HUB" shim-mail; mkshim "$HUB" shim-retro; mkshim "$HUB" shim-evening 75
+write_cfg "$HUB" <<'EOF'
+- id: mail-evening
+  enabled: true
+  when: "00:00"
+  run: shim-mail
+  outputs: [file]
+- id: retro
+  enabled: false
+  when: after:mail-evening
+  run: shim-retro
+  outputs: [telegram, file]
+- id: evening-digest
+  enabled: true
+  when: after:retro
+  run: shim-evening
+  outputs: [file]
+EOF
+run_tick "$HUB"; run_tick "$HUB"; run_tick "$HUB"
+calls_has "$HUB" shim-mail && ok "retro disabled: mail-evening still runs" || bad "retro disabled: mail-evening still runs"
+calls_has "$HUB" shim-retro && bad "retro disabled: retro never runs" || ok "retro disabled: retro never runs"
+calls_has "$HUB" shim-evening && bad "retro disabled: evening-digest keeps waiting (no retry loop)" \
+  || ok "retro disabled: evening-digest keeps waiting (no retry loop)"
+
+# daily off: learning and the morning digest come after the brief; they keep
+# waiting as before instead of starting at mail-morning's time.
+HUB=$(new_hub after-required-daily)
+mkshim "$HUB" shim-mail; mkshim "$HUB" shim-daily; mkshim "$HUB" shim-learning; mkshim "$HUB" shim-digest
+write_cfg "$HUB" <<'EOF'
+- id: mail-morning
+  enabled: true
+  when: "00:00"
+  run: shim-mail
+  outputs: [file]
+- id: daily
+  enabled: false
+  when: after:mail-morning
+  run: shim-daily
+  outputs: [telegram, file]
+- id: learning
+  enabled: true
+  when: after:daily
+  run: shim-learning
+  outputs: [telegram, file]
+- id: morning-digest
+  enabled: true
+  when: after:learning
+  run: shim-digest
+  outputs: [file]
+EOF
+run_tick "$HUB"; run_tick "$HUB"; run_tick "$HUB"
+calls_has "$HUB" shim-learning && bad "daily disabled: learning keeps waiting" \
+  || ok "daily disabled: learning keeps waiting"
+calls_has "$HUB" shim-digest && bad "daily disabled: morning-digest keeps waiting" \
+  || ok "daily disabled: morning-digest keeps waiting"
+
+# An optional parent above a disabled required one does not unlock the child:
+# learning off walks to after:daily, and daily off stops the walk there.
+HUB=$(new_hub after-mixed)
+mkshim "$HUB" shim-daily; mkshim "$HUB" shim-learning; mkshim "$HUB" shim-digest
+write_cfg "$HUB" <<'EOF'
+- id: daily
+  enabled: false
+  when: "00:00"
+  run: shim-daily
+  outputs: [telegram, file]
+- id: learning
+  enabled: false
+  when: after:daily
+  run: shim-learning
+  outputs: [telegram, file]
+- id: morning-digest
+  enabled: true
+  when: after:learning
+  run: shim-digest
+  outputs: [file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-digest && bad "learning+daily disabled: morning-digest keeps waiting" \
+  || ok "learning+daily disabled: morning-digest keeps waiting"
+
+# A parent that is not an optional input, even with a time trigger, keeps
+# its child waiting when disabled (the pre-walk rule).
+HUB=$(new_hub after-generic)
+mkshim "$HUB" shim-a; mkshim "$HUB" shim-c
+write_cfg "$HUB" <<'EOF'
+- id: a
+  enabled: false
+  when: "00:00"
+  run: shim-a
+  outputs: [file]
+- id: c
+  enabled: true
+  when: after:a
+  run: shim-c
+  outputs: [file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-c && bad "disabled non-optional parent: child keeps waiting" \
+  || ok "disabled non-optional parent: child keeps waiting"
+
+echo
+echo "=== the child sees its cap as KB_PROCESS_TIMEOUT ==="
+
+HUB=$(new_hub proc-timeout)
+cat > "$HUB/bin/shim-env" <<EOF
+#!/usr/bin/env bash
+echo "\$KB_PROCESS_ID timeout=\${KB_PROCESS_TIMEOUT:-unset}" >> "$HUB/env.log"
+EOF
+chmod +x "$HUB/bin/shim-env"
+write_cfg "$HUB" <<'EOF'
+- id: daily
+  enabled: true
+  when: "00:00"
+  run: shim-env
+  outputs: [file]
+  timeout: 3600
+- id: retro
+  enabled: true
+  when: "00:00"
+  run: shim-env
+  outputs: [file]
+EOF
+run_tick "$HUB"
+grep -qx "daily timeout=3600" "$HUB/env.log" 2>/dev/null \
+  && ok "declared timeout reaches the child" || bad "declared timeout reaches the child ($(cat "$HUB/env.log" 2>/dev/null))"
+grep -qx "retro timeout=1800" "$HUB/env.log" 2>/dev/null \
+  && ok "default 1800 s cap reaches the child" || bad "default cap reaches the child ($(cat "$HUB/env.log" 2>/dev/null))"
+
+echo
+echo "=== a failed kb-planner never leaves yesterday's plan in charge ==="
+
+# Yesterday's plan has every fired flag true; if the regenerated plan were
+# still yesterday's, nothing would run today.
+HUB=$(new_hub stale-plan)
+printf '{"date": "2000-01-01", "brief_fired": true, "retro_fired": true}\n' > "$HUB/logs/today-plan.json"
+printf '#!/bin/sh\nexit 1\n' > "$HUB/bin/kb-planner"; chmod +x "$HUB/bin/kb-planner"
+mkshim "$HUB" shim-daily
+write_cfg "$HUB" <<'EOF'
+- id: daily
+  enabled: true
+  when: "00:00"
+  run: shim-daily
+  outputs: [file]
+EOF
+run_tick "$HUB"
+calls_has "$HUB" shim-daily && ok "stale plan: today's processes still run" || bad "stale plan: today's processes still run"
+"$PY" -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["date"] == sys.argv[2] else 1)' \
+  "$HUB/logs/today-plan.json" "$TODAY" && ok "stale plan: replaced by today's plan" || bad "stale plan: replaced by today's plan"
+
+echo
+echo "=== Telegram not configured: the morning chain keeps going ==="
+
+# Real kb-brief + real typed sender with the installer's empty .secrets: the
+# brief is saved, not delivered, exits 0, so after:daily still runs.
+HUB=$(new_hub no-telegram)
+ln -s "$BIN/kb-brief" "$HUB/bin/kb-brief"
+mkshim "$HUB" shim-learning
+printf 'TELEGRAM_BOT_TOKEN=\nTELEGRAM_CHAT_ID=\n' > "$HUB/personal/.secrets"
+for helper in kb-idea kb-mail-block kb-brief-preflight; do
+  printf '#!/bin/sh\necho "{}"\n' > "$HUB/bin/$helper"; chmod +x "$HUB/bin/$helper"
+done
+printf '#!/bin/sh\necho "{\\"available\\":false,\\"overdue\\":[],\\"today\\":[],\\"upcoming\\":[],\\"errors\\":[]}"\n' > "$HUB/bin/kb-agenda"
+printf '#!/bin/sh\nprintf "table\\n---BRIEF---\\nNO_TELEGRAM_BRIEF_BODY\\n"\n' > "$HUB/bin/kb-orchestrator-run"
+chmod +x "$HUB/bin/kb-agenda" "$HUB/bin/kb-orchestrator-run"
+write_cfg "$HUB" <<'EOF'
+- id: daily
+  enabled: true
+  when: "00:00"
+  run: kb-brief
+  outputs: [telegram, file]
+- id: learning
+  enabled: true
+  when: after:daily
+  run: shim-learning
+  outputs: [telegram, file]
+EOF
+nt_tick() { env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$HUB" "$PY" "$BIN/kb-tick" >/dev/null 2>&1; }
+nt_tick
+[[ "$(plan_get "$HUB" brief_fired)" == "true" ]] && ok "no telegram: brief marked fired" || bad "no telegram: brief marked fired"
+grep -q "NO_TELEGRAM_BRIEF_BODY" "$HUB/briefs/$TODAY.md" 2>/dev/null \
+  && ok "no telegram: brief saved" || bad "no telegram: brief saved"
+grep -q "telegram not configured" "$HUB/logs/brief.log" 2>/dev/null \
+  && ok "no telegram: one log line says why" || bad "no telegram: one log line says why"
+nt_tick
+calls_has "$HUB" shim-learning && ok "no telegram: after:daily runs next tick" || bad "no telegram: after:daily runs next tick"
+
+echo
+echo "=== default process-improve command is a valid kb-evolution call ==="
+
+PI_RUN=$("$PY" - "$BIN" <<'EOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+import _kb_processes as k
+print(next(p["run"] for p in k.parse_processes_text(k.DEFAULT_PROCESSES_YAML) if p["id"] == "process-improve"))
+EOF
+)
+EVO="$TMP/evo-knowledge"; mkdir -p "$EVO"
+"$PY" "$BIN/kb-evolution" --knowledge-path "$EVO" init >/dev/null 2>&1
+read -r -a PI_ARGV <<< "${PI_RUN//\~\/knowledge/$EVO}"
+"$PY" "$BIN/${PI_ARGV[0]}" "${PI_ARGV[@]:1}" >/dev/null 2>&1
+check 0 $? "default process-improve run parses and succeeds ($PI_RUN)"
+
+echo
 echo "=== run-command arguments: tilde expansion ==="
 
 # processes.yaml run commands are shlex-split, not shell-expanded: a literal
@@ -552,7 +881,7 @@ echo
 echo "=== T12: file-only is not user delivery ==="
 
 HUB=$(new_hub delivery)
-mknotebooklm "$HUB"; mkchannel "$HUB" 3   # channel send FAILS
+mknotebooklm "$HUB"; mkchannel "$HUB" 4   # channel send FAILS (rc 4; rc 3 = not configured)
 # kb-tick resolves bare run commands strictly against $HUB/bin —
 # link the real script into the fixture hub.
 ln -s "$BIN/kb-daily-research" "$HUB/bin/kb-daily-research"
@@ -594,7 +923,7 @@ unset KB_NOTEBOOKLM_BIN KB_DAILY_RESEARCH_COLLECTOR_FIXTURE
 # after repeated failed deliveries, an explicit manual full-mode run (the
 # only path allowed to call NotebookLM) must still proceed.
 HUB=$(new_hub capisolation)
-mknotebooklm "$HUB"; mkchannel "$HUB" 3   # failing channel
+mknotebooklm "$HUB"; mkchannel "$HUB" 4   # failing channel
 for _ in 1 2 3; do
   KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder" \
     KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" KB_PROCESS_OUTPUTS="telegram,file" \
@@ -663,7 +992,7 @@ KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-good" \
   "$PY" "$BIN/kb-daily-research" --date "$TODAY" >/dev/null 2>&1
 MANIFEST_INT="$HUB/.orchestrator/daily-research-$TODAY.json"
 grep -q '"artifact_id": "art_int"' "$MANIFEST_INT" && ok "manual audio completed (setup)" || bad "manual audio completed (setup)"
-mkchannel "$HUB" 3   # failing channel
+mkchannel "$HUB" 4   # failing channel
 KB_HUB="$HUB" KB_NOTEBOOKLM_BIN="$HUB/bin/notebooklm-recorder" \
   KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE" KB_PROCESS_OUTPUTS="telegram,file" \
   "$PY" "$BIN/kb-daily-research" --text-only --date "$TODAY" >/dev/null 2>&1
@@ -936,7 +1265,7 @@ RC=$?
 [[ "$RC" -eq 0 ]] && ok "launchd-equivalent env: dry-run exits 0" || bad "launchd-equivalent env: dry-run exits 0 (rc=$RC: $OUT)"
 echo "$OUT" | grep -q "Test Person" && ok "due contact surfaced under launchd env" || bad "due contact surfaced under launchd env"
 
-mkchannel "$PHUB" 3   # send fails
+mkchannel "$PHUB" 4   # send fails
 KB_HUB="$PHUB" "$PY" "$BIN/kb-people-remind" --horizon 0 >/dev/null 2>&1
 RC=$?
 [[ "$RC" -ne 0 ]] && ok "failed telegram send → non-zero exit (tick will retry)" || bad "failed telegram send → non-zero exit"

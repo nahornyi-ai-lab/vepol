@@ -16,7 +16,11 @@ social lane is roster-defined but disabled in background unless --with-social.
 
 Env:
   KB_HUB                       hub root (default ~/knowledge)
-  MONEY_RADAR_PROJECT          project root (defaults to cwd only when cwd has knowledge/)
+  MONEY_RADAR_PROJECT          project root whose knowledge/ receives the outputs
+                               (default: the cwd when it has knowledge/, else the
+                               hub itself, which is what scheduled runs use)
+  KB_CLAUDE_BIN                claude binary (else PATH, ~/.local/bin,
+                               /opt/homebrew/bin, /usr/local/bin)
   KB_PROCESS_OUTPUTS           telegram,file (set by kb-tick)
   KB_PROCESS_BACKGROUND        1 in scheduled runs (gates social/web adapters)
   MONEY_RADAR_<ID>_BIN         per-adapter binary override (id upper, '-'->'_')
@@ -35,6 +39,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -48,9 +53,24 @@ except Exception:  # pragma: no cover - profile module optional
 from _kb_codex import CodexUnavailable, codex_bin
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
-PROJ = pathlib.Path(os.environ.get("MONEY_RADAR_PROJECT", os.getcwd()))
-SOURCES = PROJ / "knowledge" / "sources"
-REPORTS = PROJ / "knowledge" / "reports"
+# Where the radar writes: <project>/knowledge/{sources,reports}/money-radar and
+# <project>/knowledge/escalations.md. The project is MONEY_RADAR_PROJECT, else
+# the cwd when it has knowledge/. Otherwise (kb-tick under launchd runs with
+# cwd "/" and no MONEY_RADAR_PROJECT) the hub itself is that knowledge/ folder.
+if "MONEY_RADAR_PROJECT" in os.environ:
+    PROJ = pathlib.Path(os.environ["MONEY_RADAR_PROJECT"])
+    KNOWLEDGE = PROJ / "knowledge"
+    LAYOUT = "project"
+elif (pathlib.Path(os.getcwd()) / "knowledge").is_dir():
+    PROJ = pathlib.Path(os.getcwd())
+    KNOWLEDGE = PROJ / "knowledge"
+    LAYOUT = "cwd"
+else:
+    PROJ = HUB.parent
+    KNOWLEDGE = HUB
+    LAYOUT = "hub"
+SOURCES = KNOWLEDGE / "sources"
+REPORTS = KNOWLEDGE / "reports"
 # Money-radar writes its durable outputs into PRIVATE subdirs that no other process
 # touches. The shared sources/ and reports/ churn from concurrent dev work (review
 # notes, source summaries) — watching them for "new stray files" false-positives every
@@ -59,7 +79,7 @@ REPORTS = PROJ / "knowledge" / "reports"
 # genuinely an agent escaping its sandbox, not unrelated KB activity.
 RADAR_SOURCES = SOURCES / "money-radar"
 RADAR_REPORTS = REPORTS / "money-radar"
-ESCAL = PROJ / "knowledge" / "escalations.md"
+ESCAL = KNOWLEDGE / "escalations.md"
 ORCH = HUB / ".orchestrator"
 LOG = HUB / "logs" / "money-radar.log"
 STREAK_PATH = ORCH / "money-radar-streak.json"
@@ -92,6 +112,7 @@ ROSTER_MAX_AGENTS = 8
 ROSTER_MAX_TIMEOUT = 900
 ROSTER_MAX_SMOKE_TIMEOUT = 90
 
+# Includes a few Russian stop words: candidate titles may come back in Russian.
 STOP_WORDS = {
     "the", "and", "for", "with", "via", "before", "after", "your", "you", "are",
     "что", "как", "для", "the", "into", "from", "this", "that", "near", "over",
@@ -222,6 +243,27 @@ def _env_timeout(adapter_id: str, default: int) -> int:
     return default
 
 
+def claude_bin() -> str:
+    """Find the Claude Code CLI (shared contract): $KB_CLAUDE_BIN when set and
+    executable, then `claude` on PATH, then ~/.local/bin, /opt/homebrew/bin and
+    /usr/local/bin (launchd's PATH lacks ~/.local/bin). First executable hit
+    wins; nothing found keeps the historical path, whose smoke then fails and
+    the lane is reported missing."""
+    candidates = []
+    configured = os.environ.get("KB_CLAUDE_BIN", "").strip()
+    if configured:
+        candidates.append(os.path.expanduser(configured))
+    on_path = shutil.which("claude")
+    if on_path:
+        candidates.append(on_path)
+    candidates += [os.path.expanduser("~/.local/bin/claude"),
+                   "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/opt/homebrew/bin/claude"
+
+
 def default_roster() -> list:
     # All four agents run WITH internet access (owner directive 2026-06-21): live
     # X/Reddit/marketplace signal is the point. File-WRITE is still kept off where
@@ -258,7 +300,7 @@ def default_roster() -> list:
     roster.extend([
         {
             "id": "claude", "kind": "stdout", "role": "execution", "web": True,
-            "bin": "/opt/homebrew/bin/claude",
+            "bin": claude_bin(),
             "argv": ["-p", "{prompt}", "--output-format", "text",
                      "--permission-mode", "plan",
                      "--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
@@ -610,7 +652,7 @@ def _lang_directive() -> str:
     code = owner_lang()
     name = LANG_NAMES.get(code)
     # The digest is user-facing output for the owner → its CONTENT must be in the owner's
-    # language, not English (owner feedback 2026-06-22 "радар пришёл на английском"). But only
+    # language, not English (owner feedback 2026-06-22: "the radar arrived in English"). But only
     # for a SUPPORTED language — one we also render chrome for (L's keys == LANG_NAMES's keys,
     # guarded by T19). For en or any code outside that set, return "" so CONTENT degrades to
     # English in lockstep with the chrome's en fallback; emitting "write in <bare code>" here
@@ -1066,7 +1108,8 @@ def validate_candidate(c: dict):
     return True, ""
 
 
-# An enumerated operational step list: "1. … 2. …", "step 1 …", "шаг 1 …". For a BLACK
+# An enumerated operational step list: "1. … 2. …", "step 1 …", or its Russian form
+# (_STEP_RE also matches the Russian word for "step": content may be in Russian). For a BLACK
 # (illegal) candidate, ≥2 such markers in a field = step-by-step facilitation, which the
 # §3 HARD RED LINE forbids in ANY field (not just how_to_try). The agent prompt asks for
 # general dynamics only; this is the code backstop (Codex sweep 2026-06-21: steps could
@@ -1222,7 +1265,7 @@ def _gate_cache_language(manifest: dict, run_lang: str) -> bool:
 
 
 # Digest chrome (labels) is rendered in the owner's profile language, NOT a hardcoded one
-# (owner 2026-06-22 "vepol работает на языке пользователя, а не хардкодит язык"). The chrome
+# (owner 2026-06-22: "vepol works in the user's language, it does not hardcode one"). The chrome
 # covers exactly the same languages the content directive supports (LANG_NAMES); `en` is the
 # universal fallback for any code outside this set. Keep L's keys == LANG_NAMES's keys
 # (enforced by test T19) so content and chrome never drift apart.
@@ -1371,7 +1414,7 @@ def _find_block(i, r, lab, prefix=""):
     out = [head]
     # Only emit fields the agent actually filled — an empty value must not render as a
     # dangling "Label:" line (live-smoke quality nit 2026-06-21: claude left how_it_works
-    # blank and the digest showed "Как устроено:" with nothing after it).
+    # blank and the ru digest showed the "How it works:" label with nothing after it).
     for key, lbl in (("money_flow", lab['flow']), ("pain_signal", lab['pain']),
                      ("audience_density", lab['density']), ("who_earns", lab['who']),
                      ("why_now", lab['why']), ("how_it_works", lab['how']),
@@ -1451,6 +1494,10 @@ def render_digest(date_iso: str, ranked: list, agents: list, confidence: str,
 # Delivery
 # --------------------------------------------------------------------------
 
+# kb-channel-send exit code for "Telegram is not configured".
+RC_TELEGRAM_NOT_CONFIGURED = 3
+
+
 def channel_bin() -> str:
     override = os.environ.get("MONEY_RADAR_CHANNEL_BIN", "").strip()
     if override:
@@ -1477,9 +1524,18 @@ def deliver_digest(date_iso: str, digest: str, manifest: dict) -> int:
     except Exception as exc:
         manifest["error"] = f"telegram delivery failed: {exc}"
         return 1
+    if proc.returncode == RC_TELEGRAM_NOT_CONFIGURED:
+        # Not delivered, not an error: the report and digest are on disk (the
+        # morning audio digest reads the ORCH copy), so the run completes.
+        manifest["telegram_delivered"] = False
+        manifest["telegram"] = "not_configured"
+        log(f"{date_iso}: telegram not configured; digest not sent, kept at "
+            f"{RADAR_REPORTS / f'{date_iso}-digest.txt'}")
+        return 0
     if proc.returncode != 0:
         manifest["error"] = f"telegram delivery failed rc={proc.returncode}"
         return 1
+    manifest.pop("telegram", None)
     manifest["telegram_delivered"] = True
     save_manifest(date_iso, manifest)  # persist flag immediately (min resend window)
     return 0
@@ -1808,9 +1864,14 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--date", default=today_iso(), help="YYYY-MM-DD (testing)")
     args = ap.parse_args()
-    if "MONEY_RADAR_PROJECT" not in os.environ and not (PROJ / "knowledge").is_dir():
-        print("MONEY_RADAR_PROJECT is required unless cwd is a project root with knowledge/.", file=sys.stderr)
-        return 2
+    if LAYOUT == "hub":
+        if not HUB.is_dir():
+            print(f"kb-money-radar: the hub {HUB} does not exist; set KB_HUB or "
+                  "MONEY_RADAR_PROJECT (a folder that has knowledge/).", file=sys.stderr)
+            return 2
+        log(f"{args.date}: MONEY_RADAR_PROJECT is unset and {os.getcwd()} has no "
+            f"knowledge/; writing to the hub {HUB} (sources/money-radar, "
+            "reports/money-radar)")
     try:
         return run(args.date, args.force, args.with_social, args.dry_run)
     except Exception as exc:  # never leave kb-tick without an rc

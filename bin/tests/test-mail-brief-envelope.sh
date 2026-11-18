@@ -15,6 +15,14 @@ PASS=0
 FAIL=0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 
 SRC_BIN="${KB_MAIL_SRC_BIN:-$HOME/knowledge/bin}"
 BRIEF="$SRC_BIN/kb-mail-brief"
@@ -148,6 +156,14 @@ assert "@" not in blob and "<" not in blob and "admin" not in blob, "raw error t
 assert validate_envelope(env), "unavailable envelope failed its own validation"
 print("ok")
 PY
+
+# ── the day follows KB_TZ (else the Mac's own zone), never a hardcoded city ──
+# Kiritimati (UTC+14) and Pago Pago (UTC-11) are always on different dates.
+mail_day() { env -u KB_MAIL_NOW KB_TZ="$1" KB_HUB="$TMP/tz-hub" KB_MAIL_DISABLE=1 \
+  "$BRIEF" --period morning --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["generated_at"][:10])'; }
+D_EAST=$(mail_day Pacific/Kiritimati); D_WEST=$(mail_day Pacific/Pago_Pago)
+[[ -n "$D_EAST" && -n "$D_WEST" && "$D_EAST" != "$D_WEST" ]] \
+  && ok "TZ: KB_TZ decides the mail day ($D_EAST vs $D_WEST)" || fail "TZ: KB_TZ ignored ($D_EAST vs $D_WEST)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

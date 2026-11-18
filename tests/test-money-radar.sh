@@ -20,6 +20,16 @@ bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 if [[ ! -f "$RUNNER" ]]; then echo "MISSING $RUNNER"; exit 1; fi
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+STUB_BIN=$(mktemp -d)
+trap 'rm -rf "$STUB_BIN"' EXIT
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$STUB_BIN/$agent"
+  chmod +x "$STUB_BIN/$agent"
+done
+export PATH="$STUB_BIN:$PATH" KB_CLAUDE_BIN="$STUB_BIN/claude" KB_CODEX_BIN="$STUB_BIN/codex"
+
 # --- canned payloads --------------------------------------------------------
 # Two agents, same opportunity PARAPHRASED (share allegro/polish/board/game/
 # collector after normalization) → corroboration=2.
@@ -124,7 +134,7 @@ DIGEST="$D/proj/knowledge/reports/money-radar/$DATE-digest.txt"
 [ -f "$D/proj/knowledge/sources/money-radar/$DATE-codex.md" ] && [ -f "$D/proj/knowledge/sources/money-radar/$DATE-claude.md" ] && ok "T1: per-agent notes" || bad "T1: missing agent notes"
 grep -q "2 agents" "$REPORT" && ok "T1: corroboration=2 label (paraphrase merged)" || bad "T1: paraphrase did NOT merge to corroboration 2"
 [ -s "$D/chan_log" ] && ok "T1: telegram delivered" || bad "T1: not delivered"
-grep -qi "разведка\|intelligence\|decide" "$DIGEST" && ok "T1: 'you decide' intelligence framing" || bad "T1: no intelligence framing"
+grep -qi "intelligence\|decide" "$DIGEST" && ok "T1: 'you decide' intelligence framing" || bad "T1: no intelligence framing"
 grep -qiE "white|grey|black|⚪|🟡|⚫" "$DIGEST" && ok "T1: band label present" || bad "T1: no band label"
 
 # T2: only codex substantive, claude empty → still ships the one find
@@ -146,7 +156,7 @@ D=$(setup); echo "" > "$D/codex_payload"; echo "" > "$D/claude_payload"
 run_radar "$D" >/dev/null 2>&1; run_radar "$D" >/dev/null 2>&1; run_radar "$D" >/dev/null 2>&1; rc=$?
 DIGEST="$D/proj/knowledge/reports/money-radar/$DATE-digest.txt"
 [ $rc -eq 0 ] && ok "T3b: rc=0 at cap (honest degraded-success)" || bad "T3b: rc=$rc at cap"
-grep -qi "unavailable\|недоступны" "$DIGEST" && ok "T3b: 'agents unavailable' digest" || bad "T3b: wrong digest"
+grep -qi "unavailable" "$DIGEST" && ok "T3b: 'agents unavailable' digest" || bad "T3b: wrong digest"
 
 # T9: NO filtering — a bold black-band find (huge money, money_real 95, interest 90)
 # PASSES and appears in the report; for black band the operational how_to_try steps
@@ -299,7 +309,7 @@ run_radar "$D" >/dev/null 2>&1; rc=$?
 DIGEST="$D/proj/knowledge/reports/money-radar/$DATE-digest.txt"
 REPORT="$D/proj/knowledge/reports/money-radar/$DATE.md"
 [ $rc -eq 0 ] && grep -qi "Empty-howto offer" "$REPORT" && ok "T9e: candidate with empty field still ships (rc=0)" || bad "T9e: empty-field candidate dropped (rc=$rc)"
-if grep -qE "(How it works|Как устроено): *$" "$DIGEST"; then bad "T9e: empty field rendered as a dangling label line"; else ok "T9e: empty field omitted, no dangling label"; fi
+if grep -qE "How it works: *$" "$DIGEST"; then bad "T9e: empty field rendered as a dangling label line"; else ok "T9e: empty field omitted, no dangling label"; fi
 grep -qi "real flow" "$DIGEST" && ok "T9e: non-empty fields still rendered" || bad "T9e: non-empty field lost"
 
 # T11b: cost cap — 9-agent override rejected
@@ -370,7 +380,7 @@ echo "$CODEX_ARGV" | grep -q "mcp_servers={}" && echo "$CODEX_ARGV" | grep -q "p
 echo "$CODEX_ARGV" | grep -q "model_reasoning_effort=low" && ok "T16e: codex uses low reasoning (tight searches)" || bad "T16e: codex reasoning not capped"
 
 # T18: owner-language output — the digest content must come back in the owner's language,
-# not English (owner 2026-06-22 "радар пришёл на английском"). The agent prompt carries a
+# not English (owner 2026-06-22: "the radar arrived in English"). The agent prompt carries a
 # LANGUAGE directive for non-en owners; the digest labels/band tags localize; en is unchanged.
 python3 -c "
 from importlib.machinery import SourceFileLoader
@@ -389,8 +399,8 @@ print('ok')
 " >/dev/null 2>&1 && ok "T18: owner-language directive + localized ru digest (en unchanged)" || bad "T18: owner-language output broken"
 
 # T19: chrome (digest labels) must be language-agnostic across the SAME set the content
-# directive supports — not a ru/en-only hardcode (owner 2026-06-22 "vepol работает на языке
-# пользователя, а не хардкодит язык"). Every LANG_NAMES code has a complete localized label
+# directive supports — not a ru/en-only hardcode (owner 2026-06-22: "vepol works in the
+# user's language, it does not hardcode one"). Every LANG_NAMES code has a complete localized label
 # set; en is the universal fallback; a non-ru/en owner gets localized chrome, not English.
 python3 -c "
 from importlib.machinery import SourceFileLoader
@@ -491,7 +501,7 @@ echo 1 > "$D/chan_rc"                                            # now make deli
 # restore substantive payloads so the 3rd attempt reaches delivery
 echo "$CODEX_PAYLOAD" > "$D/codex_payload"; echo "$CLAUDE_PAYLOAD" > "$D/claude_payload"
 run_radar "$D" >/dev/null 2>&1; rc=$?
-[ $rc -ne 0 ] && ok "T4: downstream fault at/після cap still rc!=0" || bad "T4: cap swallowed a downstream fault (rc=0)"
+[ $rc -ne 0 ] && ok "T4: downstream fault at/after cap still rc!=0" || bad "T4: cap swallowed a downstream fault (rc=0)"
 
 # T-key: two clearly DIFFERENT opportunities do NOT merge (no "2 agents" label).
 # Distinct title+why_now tokens → below the merge threshold → stay separate.
@@ -525,7 +535,7 @@ run_radar "$D" >/dev/null 2>&1
 DIGEST="$D/proj/knowledge/reports/money-radar/$DATE-digest.txt"
 grep -qi "BLACK awareness" "$DIGEST" && grep -qi "WHITE missed-call" "$DIGEST" && ok "T-div1: black awareness + strong white BOTH shown (band diversity)" || bad "T-div1: cross-lane opportunity buried under awareness item"
 
-# T-div2: a WEAK cross-lane find is NOT promoted — default stays 1 ("если интересные").
+# T-div2: a WEAK cross-lane find is NOT promoted — default stays 1 ("only if interesting").
 D=$(setup)
 echo '{"candidates":[{"title":"BLACK strong awareness","band":"black","money_flow":"flow","who_earns":"crews","why_now":"now","how_it_works":"x","rough_numbers":"big","proof_links":["https://fbi.gov"],"risk":"crime","how_to_try":"","interest":66,"money_real":90}]}' > "$D/codex_payload"
 echo '{"candidates":[{"title":"WHITE weak idea","band":"white","money_flow":"tiny flow","who_earns":"few","why_now":"meh","how_it_works":"x","rough_numbers":"20 EUR","proof_links":["https://a.b"],"risk":"low","how_to_try":"try","interest":30,"money_real":30}]}' > "$D/claude_payload"
@@ -607,6 +617,71 @@ echo "$CODEX_PAYLOAD" > "$D/codex_payload"; echo "$CLAUDE_PAYLOAD" > "$D/claude_
 run_radar "$D" >/dev/null 2>&1
 s2=$($PY -c "import json;print(json.load(open('$D/hub/.orchestrator/money-radar-streak.json'))['streak'])" 2>/dev/null)
 [ "$s2" = "0" ] && ok "T17: later healthy run resets streak to 0" || bad "T17: streak not reset ($s2)"
+
+# T21: scheduled runs (launchd cwd "/", no MONEY_RADAR_PROJECT) write into the hub
+D=$(setup); mkdir -p "$D/elsewhere"
+( cd "$D/elsewhere" && env -u MONEY_RADAR_PROJECT KB_HUB="$D/hub" \
+    KB_PROCESS_OUTPUTS="telegram,file" KB_PROCESS_BACKGROUND=1 \
+    KB_CODEX_BIN="$D/hub/bin/codex-fake" MONEY_RADAR_CLAUDE_BIN="$D/hub/bin/claude-fake" \
+    MONEY_RADAR_GROK_BIN="$D/hub/bin/grok-fake" MONEY_RADAR_ANTIGRAVITY_BIN="$D/hub/bin/agy-fake" \
+    MONEY_RADAR_CHANNEL_BIN="$D/hub/bin/kb-channel-send" MONEY_RADAR_CURL_BIN="$D/hub/bin/curl-fake" \
+    "$PY" "$RUNNER" --text-only --date "$DATE" >/dev/null 2>&1 ); rc=$?
+[ $rc -eq 0 ] && ok "T21: no MONEY_RADAR_PROJECT and no knowledge/ in cwd → runs (rc=0)" || bad "T21: rc=$rc"
+[ -f "$D/hub/reports/money-radar/$DATE-digest.txt" ] && [ -f "$D/hub/sources/money-radar/$DATE-context.md" ] \
+  && [ -f "$D/hub/.orchestrator/money-radar-$DATE-digest.txt" ] \
+  && ok "T21: outputs land in the hub (sources/ and reports/money-radar)" || bad "T21: hub outputs missing"
+[ ! -e "$D/elsewhere/knowledge" ] && ok "T21: nothing written into the cwd" || bad "T21: wrote into the cwd"
+grep -q "MONEY_RADAR_PROJECT is unset .* writing to the hub $D/hub" "$D/hub/logs/money-radar.log" \
+  && ok "T21: the log says the hub is used" || bad "T21: no log line about the hub"
+( cd "$D/elsewhere" && env -u MONEY_RADAR_PROJECT KB_HUB="$D/missing-hub" \
+    "$PY" "$RUNNER" --text-only --date "$DATE" --dry-run >/dev/null 2>"$D/nohub.err" ); rc=$?
+[ $rc -eq 2 ] && grep -q "does not exist" "$D/nohub.err" \
+  && ok "T21: a missing hub still fails clearly (rc=2)" || bad "T21: missing hub rc=$rc"
+# A cwd that HAS knowledge/ keeps the project layout (unchanged behavior).
+D=$(setup)
+( cd "$D/proj" && env -u MONEY_RADAR_PROJECT KB_HUB="$D/hub" \
+    KB_PROCESS_OUTPUTS="file" KB_PROCESS_BACKGROUND=1 \
+    KB_CODEX_BIN="$D/hub/bin/codex-fake" MONEY_RADAR_CLAUDE_BIN="$D/hub/bin/claude-fake" \
+    MONEY_RADAR_GROK_BIN="$D/hub/bin/grok-fake" MONEY_RADAR_ANTIGRAVITY_BIN="$D/hub/bin/agy-fake" \
+    MONEY_RADAR_CURL_BIN="$D/hub/bin/curl-fake" \
+    "$PY" "$RUNNER" --text-only --date "$DATE" >/dev/null 2>&1 ); rc=$?
+[ $rc -eq 0 ] && [ -f "$D/proj/knowledge/reports/money-radar/$DATE-digest.txt" ] && [ ! -e "$D/hub/reports/money-radar" ] \
+  && ok "T21: cwd with knowledge/ keeps the project layout" || bad "T21: cwd project layout broken (rc=$rc)"
+
+# T22: Telegram not configured (kb-channel-send exit 3) → not an error
+D=$(setup); echo 3 > "$D/chan_rc"
+run_radar "$D" >/dev/null 2>&1; rc=$?
+M="$D/hub/.orchestrator/money-radar-$DATE.json"
+[ $rc -eq 0 ] && ok "T22: telegram not configured → rc=0" || bad "T22: rc=$rc"
+$PY -c "import json,sys; m=json.load(open('$M')); assert m['status']=='completed' and m['telegram_delivered'] is False and m['telegram']=='not_configured', m" 2>/dev/null \
+  && ok "T22: manifest completed, not delivered, telegram=not_configured" || bad "T22: manifest wrong"
+[ -s "$D/proj/knowledge/reports/money-radar/$DATE-digest.txt" ] && [ -s "$D/hub/.orchestrator/money-radar-$DATE-digest.txt" ] \
+  && ok "T22: digest kept for the morning audio" || bad "T22: digest missing"
+[ "$(grep -c 'telegram not configured' "$D/hub/logs/money-radar.log")" = "1" ] \
+  && ok "T22: one log line" || bad "T22: log line count wrong"
+
+# T23: the Claude lane finds the CLI per the shared contract
+CB=$(mktemp -d); mkdir -p "$CB/env" "$CB/path" "$CB/home/.local/bin" "$CB/empty" "$CB/hub"
+for f in "$CB/env/claude" "$CB/path/claude" "$CB/home/.local/bin/claude"; do printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; done
+claude_lane_bin() { # env assignments... → default roster's claude bin
+  ( cd "$CB" && env -i HOME="$CB/home" KB_HUB="$CB/hub" "$@" "$(command -v $PY)" - "$RUNNER" "$SRC_BIN" <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+sys.path.insert(0, sys.argv[2])
+loader = SourceFileLoader('radar', sys.argv[1])
+spec = importlib.util.spec_from_loader('radar', loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+print([a["bin"] for a in mod.default_roster() if a["id"] == "claude"][0])
+PYEOF
+  )
+}
+[ "$(claude_lane_bin PATH="$CB/path" KB_CLAUDE_BIN="$CB/env/claude")" = "$CB/env/claude" ] \
+  && ok "T23: KB_CLAUDE_BIN wins" || bad "T23: KB_CLAUDE_BIN ignored"
+[ "$(claude_lane_bin PATH="$CB/path")" = "$CB/path/claude" ] \
+  && ok "T23: claude on PATH is used" || bad "T23: PATH claude ignored"
+[ "$(claude_lane_bin PATH="$CB/empty")" = "$CB/home/.local/bin/claude" ] \
+  && ok "T23: launchd-style PATH still finds ~/.local/bin/claude" || bad "T23: ~/.local/bin fallback missing"
+rm -rf "$CB"
 
 # T13: runner imports no urllib
 grep -q "import urllib" "$RUNNER" && bad "T13: runner imports urllib" || ok "T13: no urllib in runner"

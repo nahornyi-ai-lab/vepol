@@ -21,12 +21,13 @@ Please include:
 
 - A description of the vulnerability and the affected component
 - Steps to reproduce, ideally with a minimal proof of concept
-- The version of Vepol affected (`cat ~/vepol/VERSION` on the user side)
-- Your contact info if you want acknowledgement
+- The version of Vepol affected (the `VERSION` file in your clone, for
+  example `cat ~/vepol/VERSION`)
+- Your contact info if you want acknowledgment
 
 ### What to expect
 
-- **Acknowledgement** within 72 hours
+- **Acknowledgment** within 72 hours
 - **Initial assessment** within 7 days
 - **Fix or mitigation** depending on severity:
   - Critical: targeted release within 14 days
@@ -48,7 +49,7 @@ anonymous.
 - Dangerous defaults in pre-shipped configuration — anything Vepol's
   `install.sh` or `_template/` writes onto a user's machine
   (default `settings.json`, permission allowlists, hooks, LaunchAgents,
-  bundled MCP scopes)
+  the Vepol block in `~/.claude/CLAUDE.md`)
 
 ## What does NOT count
 
@@ -59,18 +60,18 @@ anonymous.
 - Issues in configuration that the user has hand-edited away from the
   Vepol defaults (your own `~/.claude/settings.json` changes, your own
   hooks). If the unsafe value was shipped by Vepol — `install.sh`,
-  `_template/`, or any other artefact in this repo — it IS in scope and
+  `_template/`, or any other artifact in this repo — it IS in scope and
   should be reported through the flow above.
 
 ## Supported versions
 
 | Version | Status | Security fixes |
 |---|---|---|
-| 1.0.x | Current | Yes |
-| 0.x | Superseded by 1.0 | No — upgrade to 1.0 |
+| 1.1.x | Current | Yes |
+| 1.0.x and 0.x | Superseded | No — upgrade to the latest release |
 
 Security fixes ship in the latest release. If you run an older version,
-upgrade to receive them.
+run `./upgrade.sh` in your clone to receive them.
 
 ## Disclosure policy
 

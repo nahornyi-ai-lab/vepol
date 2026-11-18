@@ -7,10 +7,10 @@ synthesis pass, then gives the same privacy-gated frozen speech file to every
 enabled audio channel. Evening Retro keeps its independent trusted path.
 
 Usage:
-  kb-morning-digest                       # today: gather -> synth -> file -> audio
+  kb-morning-digest                       # today: finalized blocks -> report -> speech -> audio
   kb-morning-digest --period evening      # evening retro: day file -> short audio
   kb-morning-digest --date 2026-06-25     # explicit date
-  kb-morning-digest --digest-file F       # use F as the digest body (skip synth)
+  kb-morning-digest --digest-file F       # use F as the digest body instead of the blocks
   kb-morning-digest --no-push             # build the report only, skip audio
   kb-morning-digest --out PATH            # write digest to PATH (preview)
   kb-morning-digest --force               # regenerate even if manifest completed
@@ -48,11 +48,11 @@ VEPOL_DEV = pathlib.Path(
 
 # User language (spec D2: the digest speaks the user's language; the public
 # default is en). Same resolution as kb-brief/kb-retro: KB_LANG env override ->
-# personal/profile.yaml -> en. The synthesis prompts below stay
-# Russian-authored (their Russian section names are the STRUCTURE SAMPLE,
-# kb-retro precedent); the OUTPUT language is directed by the user's language
-# name and the local Qwen render passes --language explicitly. Fail-open:
-# language is presentation and must never block the digest.
+# personal/profile.yaml -> en. The synthesis prompts below are English; their
+# section headings are a STRUCTURE SAMPLE given in the user's language when a
+# sample exists (en otherwise), the OUTPUT language is directed by the user's
+# language name, and the local Qwen render passes --language explicitly.
+# Fail-open: language is presentation and must never block the digest.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 try:
     from _kb_profile import get_language, language_directive
@@ -68,6 +68,9 @@ from _kb_retro import ParsedRetro, load_retro
 ATTEMPT_CAPS = {"build": 2, "tts": 2, "telegram": 3, "total": 5}
 DELIVERY_TAG = "local_qwen_telegram"
 
+# NOTE: neither the morning whole-block path nor the evening Retro path calls
+# the synthesis chain below (gather()/synth_digest() included); it is kept,
+# unused, for reference. No LLM agent runs in this command today.
 # Synthesis is not bound to one runtime: subscriptions and rate limits move, so
 # the digest tries an ordered chain of CLI agents and uses the first that returns
 # a usable result. Owner directive 2026-07-29 (chat): claude primary, codex as
@@ -93,6 +96,9 @@ SYNTH_MODEL = os.environ.get("KB_MORNING_SYNTH_MODEL", "sonnet")
 # is the first gate; channel selection is the independent outputs flag map.
 RC_LOCK_CONTENTION = 75
 RC_INVALID_RETRO = 75
+# kb-channel-send / kb-channel-send-audio exit code for "Telegram is not
+# configured" (no bot token or chat id): not delivered, not an error.
+RC_TELEGRAM_NOT_CONFIGURED = 3
 
 # Scheduler budget: kb-tick caps the whole process at 1800s. Synthesis and local
 # render each remain bounded, and Telegram upload has its own short timeout.
@@ -100,6 +106,10 @@ SYNTH_TIMEOUT = int(os.environ.get("KB_MORNING_SYNTH_TIMEOUT", "240"))          
 SYNTH_TOTAL_TIMEOUT = int(os.environ.get("KB_MORNING_SYNTH_TOTAL_TIMEOUT", "420"))  # whole chain
 TTS_TIMEOUT = int(os.environ.get("KB_MORNING_TTS_TIMEOUT", "900"))
 TELEGRAM_TIMEOUT = int(os.environ.get("KB_MORNING_TELEGRAM_TIMEOUT", "180"))
+# Per NotebookLM CLI call (list, create, source add, generate --no-wait). At
+# most four calls run per digest, so a stuck CLI fails the attempt well before
+# kb-tick's 1800 s cap instead of holding the tick.
+NOTEBOOKLM_TIMEOUT = int(os.environ.get("KB_MORNING_NOTEBOOKLM_TIMEOUT", "120"))
 NBLM_MAX_ATTEMPTS = int(os.environ.get("KB_MORNING_DIGEST_MAX_ATTEMPTS", "3"))
 AUDIO_FORMAT = os.environ.get("KB_MORNING_AUDIO_FORMAT", "deep-dive")
 AUDIO_LENGTH = os.environ.get("KB_MORNING_AUDIO_LENGTH", "long")
@@ -107,6 +117,66 @@ AUDIO_LANG = os.environ.get("KB_MORNING_AUDIO_LANG", "") or UI_LANG
 # Freshness window: an artifact older than this many days is still shown but
 # flagged "stale" so the synth does not present it as "this morning".
 FRESH_DAYS = int(os.environ.get("KB_MORNING_FRESH_DAYS", "2"))
+
+# Text the user reads or hears (report titles, the report's sources list,
+# Telegram captions, the TTS failure alert, NotebookLM titles, weekday names).
+# English is the default; other languages are keyed by UI_LANG and fall back
+# to en. The ru entries are the owner's existing strings and must stay
+# byte-identical.
+UI_TEXT: dict[str, dict[str, Any]] = {
+    "en": {
+        "notebook_title": "Vepol morning digest {month}",
+        "source_title_morning": "Vepol morning digest {date}",
+        "source_title_evening": "Vepol evening retro {date}",
+        "report_title_morning": "Vepol morning digest — {date}",
+        "report_title_evening": "Vepol evening retro — {date}",
+        "sources_heading": "Sources (for checking, not for narration)",
+        "block_morning_brief": "Morning brief (finalized)",
+        "block_evening_retro": "Evening retro (trusted Retro block)",
+        "caption_morning": "Morning digest — {date}",
+        "caption_evening": "Evening retro — {date}",
+        "weekdays": (
+            "Monday", "Tuesday", "Wednesday", "Thursday",
+            "Friday", "Saturday", "Sunday",
+        ),
+        "truncated": "\n\n…(truncated, {total} characters in total)",
+        "tts_alert": (
+            "Digest narration failed ({engine}): {reason}. The text is saved. "
+            "Set up local narration: kb-tts-install; or switch the digests to "
+            "NotebookLM: kb-digest-migrate --file ~/knowledge/personal/processes.yaml "
+            "--audio-backend notebooklm; retry: {retry}"
+        ),
+    },
+    "ru": {
+        "notebook_title": "Vepol утренний дайджест {month}",
+        "source_title_morning": "Утренний дайджест Vepol {date}",
+        "source_title_evening": "Vepol вечернее ретро {date}",
+        "report_title_morning": "Утренний дайджест Vepol — {date}",
+        "report_title_evening": "Вечернее ретро Vepol — {date}",
+        "sources_heading": "Источники (для проверки, не для озвучки)",
+        "block_morning_brief": "Утренний бриф (finalized)",
+        "block_evening_retro": "Вечернее ретро (trusted Retro block)",
+        "caption_morning": "Утренний дайджест — {date}",
+        "caption_evening": "Вечернее ретро — {date}",
+        "weekdays": (
+            "понедельник", "вторник", "среда", "четверг",
+            "пятница", "суббота", "воскресенье",
+        ),
+        "truncated": "\n\n…(обрезано, всего {total} символов)",
+        "tts_alert": (
+            "Озвучка дайджеста упала ({engine}): {reason}. Текст сохранён. "
+            "Установить локальную озвучку: kb-tts-install; или переключить "
+            "дайджесты на NotebookLM: kb-digest-migrate --file "
+            "~/knowledge/personal/processes.yaml --audio-backend notebooklm; "
+            "повтор: {retry}"
+        ),
+    },
+}
+
+
+def ui_text(key: str) -> Any:
+    """User-facing string for UI_LANG, falling back to en."""
+    return UI_TEXT.get(UI_LANG, UI_TEXT["en"]).get(key, UI_TEXT["en"][key])
 
 
 def resolve_notebooklm_bin() -> str:
@@ -189,13 +259,13 @@ def audio_path(date_iso: str, period: str = "morning") -> pathlib.Path:
 
 
 def notebook_title(date_iso: str) -> str:
-    return f"Vepol утренний дайджест {date_iso[:7]}"
+    return ui_text("notebook_title").format(month=date_iso[:7])
 
 
 def source_title(date_iso: str, period: str = "morning") -> str:
     if period == "evening":
-        return f"Vepol вечернее ретро {date_iso}"
-    return f"Утренний дайджест Vepol {date_iso}"
+        return ui_text("source_title_evening").format(date=date_iso)
+    return ui_text("source_title_morning").format(date=date_iso)
 
 
 # ---------------------------------------------------------------------------
@@ -231,33 +301,39 @@ def latest_match(patterns: list[str]) -> pathlib.Path | None:
 
 def _staleness(date_str: str | None, ref: str) -> str:
     if not date_str:
-        return "дата неизвестна"
+        return "date unknown"
     try:
         d = dt.date.fromisoformat(date_str)
         r = dt.date.fromisoformat(ref)
     except ValueError:
-        return "дата неизвестна"
+        return "date unknown"
     delta = (r - d).days
     if delta <= 0:
-        return "свежее (сегодня)"
+        return "fresh (today)"
     if delta == 1:
-        return "вчерашнее"
+        return "yesterday's"
     if delta <= FRESH_DAYS:
-        return f"свежее ({delta} дн. назад)"
-    return f"УСТАРЕЛО ({delta} дн. назад) — не выдавать за сегодняшнее"
+        return f"fresh ({delta} days ago)"
+    return f"STALE ({delta} days ago) — do not present it as today's"
+
+
+# Prefix of the in-band read-failure marker; upstream_snapshot() keys on it.
+UNREADABLE_PREFIX = "(could not read:"
 
 
 def _read_text(path: pathlib.Path, cap: int) -> str:
     try:
         txt = path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
-        return f"(не удалось прочитать: {exc})"
+        return f"{UNREADABLE_PREFIX} {exc})"
     return _cap_text(txt, cap)
 
 
 def _cap_text(txt: str, cap: int) -> str:
+    # The truncation note can reach the spoken evening retro, so it is
+    # localized like other user-facing text.
     if len(txt) > cap:
-        return txt[:cap] + f"\n\n…(обрезано, всего {len(txt)} символов)"
+        return txt[:cap] + ui_text("truncated").format(total=len(txt))
     return txt
 
 
@@ -265,7 +341,7 @@ def _read_full_text(path: pathlib.Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
-        return f"(не удалось прочитать: {exc})"
+        return f"{UNREADABLE_PREFIX} {exc})"
 
 
 def _truncate_before_line_heading(
@@ -289,9 +365,9 @@ def _run(cmd: list[str], timeout: int = 60) -> str:
             cmd, capture_output=True, text=True, timeout=timeout, check=False
         )
         out = (proc.stdout or "").strip()
-        return out or "(пусто)"
+        return out or "(empty)"
     except Exception as exc:  # noqa: BLE001
-        return f"(ошибка вызова: {exc})"
+        return f"(call failed: {exc})"
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +393,7 @@ def _log_gist(text: str, limit: int = LOG_GIST_ENTRIES) -> str:
     char cap and no byte clip; the paragraph boundary is what bounds each gist."""
     starts = [m.start() for m in LOG_ENTRY_RE.finditer(text)]
     if not starts:
-        return text.strip() or "(пусто)"
+        return text.strip() or "(empty)"
     bounds = starts + [len(text)]
     kept: list[str] = []
     for i, start in enumerate(starts):
@@ -333,7 +409,7 @@ def _log_gist(text: str, limit: int = LOG_GIST_ENTRIES) -> str:
         first_para = rest.split("\n\n", 1)[0].strip()
         kept.append(f"{header}\n{first_para}".strip() if first_para else header)
     if not kept:
-        return "(нет содержательных записей)"
+        return "(no meaningful entries)"
     return "\n\n".join(kept[-limit:])
 
 
@@ -363,12 +439,12 @@ def _registry_live_slugs() -> list[str] | None:
 
 def _project_last_trace(slug: str) -> tuple[str, str]:
     """Return (date, rendered_line) for a project's last dated log entry.
-    Missing log / no dated entries → ('', '<slug>: (записей нет)')."""
+    Missing log / no dated entries → ('', '<slug>: (no entries)')."""
     plog = HUB / "projects" / slug / "log.md"
     try:
         text = plog.read_text(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
-        return "", f"{slug}: (записей нет)"
+        return "", f"{slug}: (no entries)"
     last_date = ""
     last_header = ""
     for line in text.splitlines():
@@ -376,7 +452,7 @@ def _project_last_trace(slug: str) -> tuple[str, str]:
         if m:
             last_date, last_header = m.group(1), m.group(2).strip()
     if not last_date:
-        return "", f"{slug}: (записей нет)"
+        return "", f"{slug}: (no entries)"
     return last_date, f"{slug}: [{last_date}] {last_header}".rstrip()
 
 
@@ -392,16 +468,16 @@ def _project_guarantee_block() -> str:
 
 # D9: money-radar — prose digest first, JSON as a structured fallback.
 MONEY_VOICE_FIELDS = (
-    ("band", "уровень"),
-    ("money_flow", "поток денег"),
-    ("pain_signal", "боль"),
-    ("audience_density", "плотность аудитории"),
-    ("who_earns", "кто зарабатывает"),
-    ("why_now", "почему сейчас"),
-    ("how_it_works", "как работает"),
-    ("rough_numbers", "порядок чисел"),
-    ("risk", "риск"),
-    ("how_to_try", "как попробовать"),
+    ("band", "level"),
+    ("money_flow", "money flow"),
+    ("pain_signal", "pain"),
+    ("audience_density", "audience density"),
+    ("who_earns", "who earns"),
+    ("why_now", "why now"),
+    ("how_it_works", "how it works"),
+    ("rough_numbers", "rough numbers"),
+    ("risk", "risk"),
+    ("how_to_try", "how to try"),
 )
 
 
@@ -411,7 +487,7 @@ def _render_money_json(data: Any) -> str:
     prose fields in voice order. URLs, numeric scores, _links_withheld and all run
     metadata are dropped. Schema-drift tolerant: missing keys skip."""
     if not isinstance(data, dict):
-        return "(данные радара нечитаемы)"
+        return "(radar data unreadable)"
     report = data.get("report") if isinstance(data.get("report"), dict) else {}
     lines: list[str] = []
 
@@ -421,13 +497,13 @@ def _render_money_json(data: Any) -> str:
         if isinstance(report.get("nogo"), list) else []
     confidence = str(report.get("confidence") or "").strip()
     if ranked:
-        lines.append("Отобрано (ranked):")
+        lines.append("Selected (ranked):")
         lines.extend(f"- {t}" for t in ranked)
     if nogo:
-        lines.append("Мимо (no-go):")
+        lines.append("Passed over (no-go):")
         lines.extend(f"- {t}" for t in nogo)
     if confidence:
-        lines.append(f"Уверенность: {confidence}")
+        lines.append(f"Confidence: {confidence}")
 
     # Collect candidates from agents[*].candidates (agents is a dict or list).
     agents = data.get("agents")
@@ -454,7 +530,7 @@ def _render_money_json(data: Any) -> str:
                    [k for k in order if k not in ranked_keys]
     if ordered_keys or ranked:
         lines.append("")
-        lines.append("Разбор кандидатов:")
+        lines.append("Candidate breakdown:")
     for title in ranked:
         if title.lower() not in candidates:
             lines.append(f"- {title}")
@@ -465,7 +541,7 @@ def _render_money_json(data: Any) -> str:
             val = cand.get(field)
             if isinstance(val, str) and val.strip():
                 lines.append(f"    {label}: {val.strip()}")
-    return "\n".join(lines).strip() or "(радар без кандидатов)"
+    return "\n".join(lines).strip() or "(radar has no candidates)"
 
 
 def _money_block(date_iso: str) -> dict[str, Any]:
@@ -478,29 +554,29 @@ def _money_block(date_iso: str) -> dict[str, Any]:
 
     if same_digest.is_file():
         return {"snapshot_key": "money_radar", "snapshot_state": "present",
-                "name": "Money radar (быстрые деньги)",
-                "meta": f"{rel(same_digest)} | свежее (сегодня)",
-                "text": _read_full_text(same_digest).strip() or "(пусто)"}
+                "name": "Money radar (fast money)",
+                "meta": f"{rel(same_digest)} | fresh (today)",
+                "text": _read_full_text(same_digest).strip() or "(empty)"}
     if same_json.is_file():
         try:
             data = json.loads(same_json.read_text(encoding="utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001
             data = None
-            text = f"(не удалось разобрать JSON: {exc})"
+            text = f"(could not parse JSON: {exc})"
         else:
             text = _render_money_json(data)
         return {"snapshot_key": "money_radar", "snapshot_state": "present",
-                "name": "Money radar (быстрые деньги)",
-                "meta": f"{rel(same_json)} | свежее (сегодня, из JSON)",
+                "name": "Money radar (fast money)",
+                "meta": f"{rel(same_json)} | fresh (today, from JSON)",
                 "text": text}
 
     stale_digest = latest_match([str(ORCH / "money-radar-2*-digest.txt")])
     if stale_digest and stale_digest.is_file():
         d = _date_from_name(stale_digest)
         return {"snapshot_key": "money_radar", "snapshot_state": "present",
-                "name": "Money radar (быстрые деньги)",
+                "name": "Money radar (fast money)",
                 "meta": f"{rel(stale_digest)} | {_staleness(d, date_iso)}",
-                "text": _read_full_text(stale_digest).strip() or "(пусто)"}
+                "text": _read_full_text(stale_digest).strip() or "(empty)"}
 
     stale_json = latest_match([
         str(ORCH / "money-radar-2*.json"),
@@ -513,17 +589,17 @@ def _money_block(date_iso: str) -> dict[str, Any]:
                 data = json.loads(stale_json.read_text(encoding="utf-8", errors="replace"))
                 text = _render_money_json(data)
             except Exception as exc:  # noqa: BLE001
-                text = f"(не удалось разобрать JSON: {exc})"
+                text = f"(could not parse JSON: {exc})"
         else:
-            text = _read_full_text(stale_json).strip() or "(пусто)"
+            text = _read_full_text(stale_json).strip() or "(empty)"
         return {"snapshot_key": "money_radar", "snapshot_state": "present",
-                "name": "Money radar (быстрые деньги)",
+                "name": "Money radar (fast money)",
                 "meta": f"{rel(stale_json)} | {_staleness(d, date_iso)}",
                 "text": text}
 
     return {"snapshot_key": "money_radar", "snapshot_state": "missing",
-            "name": "Money radar (быстрые деньги)",
-            "meta": "нет данных", "text": "(нет файла)"}
+            "name": "Money radar (fast money)",
+            "meta": "no data", "text": "(no file)"}
 
 
 # D10: escalations — only the '## Open' slice, template HTML comments stripped.
@@ -543,7 +619,7 @@ def _open_escalations(text: str) -> str:
         if in_open:
             open_body.append(line)
     body = HTML_COMMENT_RE.sub("", "\n".join(open_body)).strip()
-    return body or "Открытых эскалаций нет."
+    return body or "No open escalations."
 
 
 # D11 (digest side): a missing same-day brief appends ONE deduped line per date.
@@ -573,20 +649,23 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
         d = _date_from_name(arxiv)
         text = _truncate_before_line_heading(
             _read_full_text(arxiv),
+            # Russian forms: headings kb-learning-arxiv writes for ru users
+            # today and older reports still on disk. "## Runner-ups" also
+            # matches the current en "## Runner-ups (not selected)".
             ("## Не вошли (runner-ups)", "## Runner-ups", "## Runner-ups (не вошли)"),
             suffix="\n\n…(runner-ups list removed — see snapshot)",
         )
         blocks.append({
             "snapshot_key": "learning", "snapshot_state": "present",
-            "name": "ArXiv AI research (дневная сводка)",
+            "name": "ArXiv AI research (daily summary)",
             "meta": f"{rel(arxiv)} | {_staleness(d, date_iso)}",
             "text": text,
         })
     else:
         blocks.append({
             "snapshot_key": "learning", "snapshot_state": "missing",
-            "name": "ArXiv AI research (дневная сводка)",
-            "meta": "нет данных", "text": "(нет файла)",
+            "name": "ArXiv AI research (daily summary)",
+            "meta": "no data", "text": "(no file)",
         })
 
     # D9: money-radar by explicit priority (prose digest first, JSON as fallback).
@@ -604,31 +683,31 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     if same_day_brief.is_file():
         blocks.append({
             "snapshot_key": "brief", "snapshot_state": "present",
-            "name": "Утренний бриф (kb-brief)",
-            "meta": f"{rel(same_day_brief)} | свежее (сегодня)",
+            "name": "Morning brief (kb-brief)",
+            "meta": f"{rel(same_day_brief)} | fresh (today)",
             "text": strip_untrusted_spans(
                 _read_full_text(same_day_brief)
-            ).strip() or "(пусто)",
+            ).strip() or "(empty)",
         })
     else:
         _append_missing_brief_log(date_iso)
         blocks.append({
             "snapshot_key": "brief", "snapshot_state": "present",
-            "name": "Утренний бриф (kb-brief)",
-            "meta": "нет файла за сегодня",
-            "text": "утренний бриф за сегодня не создан — инцидент в работе",
+            "name": "Morning brief (kb-brief)",
+            "meta": "no file for today",
+            "text": "today's morning brief was not created — incident in progress",
         })
 
     # D8: daily-research block removed (dead 29-day-stale duplicate of the arXiv
     # research; verified sole consumer). Nothing to gather here.
 
-    # D10: idea digest — append only when there is something (non-'(пусто)').
+    # D10: idea digest — append only when there is something (non-'(empty)').
     # Error strings still append so failures stay visible.
     ideas_text = _run([str(HUB / "bin" / "kb-idea"), "brief", "--limit", "3"], 25)
-    if ideas_text.strip() != "(пусто)":
+    if ideas_text.strip() != "(empty)":
         blocks.append({
             "snapshot_key": "ideas", "snapshot_state": "present",
-            "name": "Идеи в работе (kb-idea brief)",
+            "name": "Ideas in progress (kb-idea brief)",
             "meta": "kb-idea brief --limit 3",
             "text": ideas_text,
         })
@@ -639,7 +718,7 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     if state.is_file():
         blocks.append({
             "snapshot_key": "project_state", "snapshot_state": "present",
-            "name": "Проект example-project — состояние",
+            "name": "Project example-project — state",
             "meta": rel(state) if str(state).startswith(str(HUB)) else str(state),
             "text": _read_full_text(state),
         })
@@ -648,7 +727,7 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     if vlog.is_file():
         blocks.append({
             "snapshot_key": "project_log", "snapshot_state": "present",
-            "name": "Проект example-project — свежий лог",
+            "name": "Project example-project — recent log",
             "meta": str(vlog),
             "text": _log_gist(_read_full_text(vlog)),
         })
@@ -657,7 +736,7 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     # D7b: per-project visibility guarantee — latest trace of every live project.
     blocks.append({
         "snapshot_key": "project_guarantee", "snapshot_state": "present",
-        "name": "Проекты: последний след каждого живого проекта",
+        "name": "Projects: latest trace of every live project",
         "meta": "registry.md (status: live) → projects/<slug>/log.md",
         "text": _project_guarantee_block(),
     })
@@ -666,8 +745,8 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     if HUB_LOG.is_file():
         blocks.append({
             "snapshot_key": "hub_log", "snapshot_state": "present",
-            "name": "Хаб — свежий лог",
-            "meta": "log.md (свежие содержательные записи)",
+            "name": "Hub — recent log",
+            "meta": "log.md (recent meaningful entries)",
             "text": _log_gist(_read_full_text(HUB_LOG)),
         })
     # D10: escalations — only the '## Open' slice, template comments stripped.
@@ -675,7 +754,7 @@ def gather(date_iso: str) -> list[dict[str, Any]]:
     if esc.is_file():
         blocks.append({
             "snapshot_key": "escalations", "snapshot_state": "present",
-            "name": "Хаб — эскалации",
+            "name": "Hub — escalations",
             "meta": rel(esc),
             "text": _open_escalations(_read_full_text(esc)),
         })
@@ -710,7 +789,7 @@ def _read_exact_utf8(path: pathlib.Path) -> str:
 
 def _morning_brief_block(date_iso: str) -> dict[str, Any]:
     path = BRIEFS / f"{date_iso}.md"
-    name = "Утренний бриф (finalized)"
+    name = ui_text("block_morning_brief")
     if not path.is_file():
         log(f"{date_iso}: finalized morning brief missing")
         return _finalized_block("brief", "missing", name, "same-day file missing")
@@ -849,7 +928,7 @@ def upstream_snapshot(blocks: list[dict[str, Any]]) -> dict[str, Any]:
             state = str(block.get("snapshot_state") or "present")
             text = str(block.get("text") or "")
             meta = str(block.get("meta") or "")
-            if text.startswith("(не удалось прочитать:"):
+            if text.startswith(UNREADABLE_PREFIX):
                 state, text = "unreadable", ""
         projected = _semantic_projection(key, text) if state == "present" else ""
         inputs.append({
@@ -903,15 +982,16 @@ def build_context_packet(date_iso: str, blocks: list[dict[str, Any]]) -> str:
     # D13: no mail section — the brief block already carries the day's curated
     # mail; raw mail never enters the packet.
     parts = [
-        f"# Контекст утренних процессов — {date_iso}",
+        f"# Morning process context — {date_iso}",
         "",
-        "Ниже — сырые/полусырые выходы всех утренних процессов оркестратора Vepol "
-        "за самый свежий доступный цикл. Каждый блок помечен источником и свежестью.",
+        "Below are the raw and semi-raw outputs of every Vepol orchestrator morning "
+        "process from the freshest available cycle. Each block is labeled with its "
+        "source and freshness.",
         "",
     ]
     for b in blocks:
         parts.append(f"## {b['name']}")
-        parts.append(f"_источник: {b['meta']}_")
+        parts.append(f"_source: {b['meta']}_")
         parts.append("")
         parts.append(b["text"].rstrip())
         parts.append("")
@@ -1025,14 +1105,14 @@ def gather_evening(
         retro_text = f"{parsed.heading}\n\n{parsed.body.rstrip()}"
         text = render_evening_retro_source(date_iso, retro_text)
         blocks.append({
-            "name": "Вечернее ретро (trusted Retro block)",
+            "name": ui_text("block_evening_retro"),
             "meta": rel(day_file),
             "text": text,
         })
     else:
         blocks.append({
-            "name": "Вечернее ретро (trusted Retro block)",
-            "meta": "нет данных",
+            "name": ui_text("block_evening_retro"),
+            "meta": "no data",
             "text": evening_missing_retro_source(date_iso),
         })
 
@@ -1059,79 +1139,144 @@ def build_evening_context_packet(date_iso: str, blocks: list[dict[str, Any]]) ->
 # Synthesis via a pluggable CLI agent chain (codex / claude / agy / grok)
 # ---------------------------------------------------------------------------
 
+# Per-language samples for the synthesis prompts. The instructions are English;
+# the section headings and quoted phrases are samples in the user's language
+# when one exists (ru keeps the owner's existing wording), else English.
+PROMPT_SAMPLES: dict[str, dict[str, Any]] = {
+    "en": {
+        "morning_headings": (
+            "## Morning: the main points in brief",
+            "## Science and artificial intelligence",
+            "## Money and opportunities",
+            "## Projects: where we are",
+            "## Your day: deadlines, priorities, personal",
+            "## Decisions needed from you",
+            "## What I suggest doing today",
+        ),
+        "evening_headings": (
+            "## What got closed today",
+            "## What is still open and waiting",
+            "## Mail still waiting for a reply",
+            "## One question for the evening",
+        ),
+        "empty_example": '("nothing here today")',
+        "suggest_section": '"What I suggest doing today"',
+        "no_brief_phrase": (
+            '"the morning summary was not created — actions come only from '
+            "project state and the projects' latest traces\""
+        ),
+    },
+    "ru": {
+        "morning_headings": (
+            "## Утро: коротко о главном",
+            "## Наука и искусственный интеллект",
+            "## Деньги и возможности",
+            "## Проекты: где мы",
+            "## Твой день: сроки, главное, личное",
+            "## Решения от тебя",
+            "## Что предлагаю сделать сегодня",
+        ),
+        "evening_headings": (
+            "## Что закрыто сегодня",
+            "## Что висит и ждёт",
+            "## Почта, на которую не ответили",
+            "## Один вопрос на вечер",
+        ),
+        "empty_example": "(«сегодня тут пусто»)",
+        "suggest_section": "«Что предлагаю сделать сегодня»",
+        "no_brief_phrase": (
+            "«утренняя сводка не создана — действия только из состояния проектов "
+            "и последних следов проектов»"
+        ),
+    },
+}
+_SAMPLE = PROMPT_SAMPLES.get(UI_LANG, PROMPT_SAMPLES["en"])
+
+# Narration rules. The Russian set only makes sense for Russian text-to-speech
+# (no Latin letters, abbreviations spelled out in Russian, names in Cyrillic),
+# so it is used only when the user's language is ru; its example words stay
+# Russian on purpose. Every other language gets the generic set.
+SPEECH_RULES_RU = """\
+- Write the finished text only in Russian. Use plain Russian words.
+- Do not use anglicisms, Latin letters, or English abbreviations.
+- Spell abbreviations out in full in Russian words: «искусственный интеллект», not «ИИ».
+- Write necessary names and titles in Cyrillic, the way they sound. Write each \
+name or title the same way throughout the text.
+"""
+SPEECH_RULES_GENERIC = f"""\
+- Write the finished text only in {UI_LANG_NAME}. Use plain, everyday words.
+- Spell abbreviations out in full instead of using the short form.
+- Write each name or title the same way throughout the text.
+"""
+SPEECH_RULES = SPEECH_RULES_RU if UI_LANG == "ru" else SPEECH_RULES_GENERIC
+
+_MORNING_HEADINGS = "\n".join(_SAMPLE["morning_headings"])
+_EVENING_HEADINGS = "\n".join(_SAMPLE["evening_headings"])
+_EMPTY_EXAMPLE = _SAMPLE["empty_example"]
+_SUGGEST_SECTION = _SAMPLE["suggest_section"]
+_NO_BRIEF_PHRASE = _SAMPLE["no_brief_phrase"]
+
 SYNTH_INSTRUCTION = f"""\
-Ты — утренний редактор владельца. На входе ниже — сырые выходы всех утренних \
-процессов его системы (обзор научных работ, обзор денежных возможностей, утренняя \
-сводка — в ней почта, календарь и задачи дня, — состояние проектов и последние изменения).
+You are the owner's morning editor. Below are the raw outputs of every morning \
+process in their system (a review of research papers, a review of money \
+opportunities, the morning summary — which holds the day's mail, calendar and \
+tasks — project state, and recent changes).
 
-Сделай ОДНУ связную утреннюю сводку на языке пользователя — {UI_LANG_NAME}, \
-который он ПОСЛУШАЕТ как аудио и пойдёт работать. Это не отчёт и не список \
-ссылок — это тёплый, плотный, по делу рассказ умного коллеги за кофе.
+Write ONE coherent morning summary in the user's language, {UI_LANG_NAME}, \
+that they will LISTEN to as audio before getting to work. It is not a report or \
+a list of links — it is a warm, dense, to-the-point story from a smart colleague \
+over coffee.
 
-Жёсткие правила:
-- Готовый текст — только на русском языке. Пиши простыми русскими словами.
-- Не используй англицизмы, латиницу и английские сокращения.
-- Сокращения раскрывай полностью русскими словами: «искусственный интеллект», а не «ИИ».
-- Необходимые имена и названия передавай кириллицей так, как они звучат. Каждое \
-имя или название пиши одинаково во всём тексте.
-- Пиши короткими, простыми и естественными фразами. Текст должен легко восприниматься на слух.
-- Расставляй знаки препинания так, чтобы при озвучке звучали понятные паузы.
-- Никаких ссылок, путей к файлам, JSON, markdown-таблиц, кусков на других языках — это для озвучки.
-- Каждый факт обязан опираться на данные ниже. НИЧЕГО не выдумывай. Если процесс \
-дал пусто или данные устаревшие — так и скажи коротко («сегодня тут пусто»).
-- Числа проговаривай словами там, где это естественно для слуха.
-- Объём ~600–900 слов (≈5–7 минут озвучки).
+Hard rules:
+{SPEECH_RULES}\
+- Write in short, simple, natural sentences. The text must be easy to follow by ear.
+- Use punctuation that gives clear pauses when the text is read aloud.
+- No links, file paths, JSON, markdown tables, or fragments in other languages — this is for narration.
+- Every fact must rest on the data below. Make NOTHING up. If a process \
+returned nothing or its data is stale, say so briefly {_EMPTY_EXAMPLE}.
+- Say numbers in words where that sounds natural to the ear.
+- Length: ~600–900 words (≈5–7 minutes of narration).
 
-Структура (ровно эти заголовки, каждый — '## '; названия заголовков — на языке \
-пользователя {UI_LANG_NAME}, русские формулировки ниже — образец структуры):
-## Утро: коротко о главном
-## Наука и искусственный интеллект
-## Деньги и возможности
-## Проекты: где мы
-## Твой день: сроки, главное, личное
-## Решения от тебя
-## Что предлагаю сделать сегодня
+Structure (exactly these headings, each starting with '## '; write the headings \
+in the user's language, {UI_LANG_NAME}; the wording below is a structure sample):
+{_MORNING_HEADINGS}
 
-Если утренняя сводка за сегодня не создана (об этом прямо сказано в данных), не \
-выдумывай её содержимое: в разделе «Что предлагаю сделать сегодня» так и \
-скажи — «утренняя сводка не создана — действия только из состояния проектов и последних \
-следов проектов» — и предложи шаги, опираясь только на состояние проектов и \
-их последние следы. Список задач дня в этом случае недоступен — не \
-реконструируй его и прямо скажи, что его сегодня нет.
+If today's morning summary was not created (the data says so directly), do not \
+invent its contents: in the {_SUGGEST_SECTION} section say so — \
+{_NO_BRIEF_PHRASE} — and suggest steps based only on project state and the \
+projects' latest traces. In that case the day's task list is not available — \
+do not reconstruct it, and say plainly that it is missing today.
 
-Верни ТОЛЬКО саму сводку в markdown, без преамбулы и без послесловия.
+Return ONLY the summary itself in markdown, with no preamble and no closing remarks.
 
-=== ДАННЫЕ УТРЕННИХ ПРОЦЕССОВ ===
+=== MORNING PROCESS DATA ===
 """
 
 
 # Evening variant: a SHORT spoken recap (~1-2 min), same hard rules as morning.
 EVENING_SYNTH_INSTRUCTION = f"""\
-Ты — вечерний редактор владельца. На входе ниже — дневной файл (утренний бриф, \
-вечернее ретро, рефлексия) и записи лога за сегодня.
+You are the owner's evening editor. Below are the day file (morning brief, \
+evening retro, reflection) and today's log entries.
 
-Сделай КОРОТКОЕ вечернее ретро на языке пользователя — {UI_LANG_NAME}, которое \
-он ПОСЛУШАЕТ как аудио перед завершением дня. Это спокойный итог дня от умного \
-коллеги, не отчёт.
+Write a SHORT evening retro in the user's language, {UI_LANG_NAME}, that they \
+will LISTEN to as audio before wrapping up the day. It is a calm end-of-day \
+recap from a smart colleague, not a report.
 
-Жёсткие правила:
-- Только {UI_LANG_NAME}. Минимум терминов; каждый термин — объясни одной фразой сразу.
-- Никаких ссылок, путей к файлам, JSON, markdown-таблиц, кусков на других языках — это для озвучки.
-- Каждый факт обязан опираться на данные ниже. НИЧЕГО не выдумывай. Если данных \
-нет — так и скажи коротко («сегодня тут пусто»).
-- Числа проговаривай словами там, где это естественно для слуха.
-- Объём ~150–300 слов (≈1–2 минуты озвучки).
+Hard rules:
+- Only {UI_LANG_NAME}. Keep terms to a minimum; explain each term in one sentence right away.
+- No links, file paths, JSON, markdown tables, or fragments in other languages — this is for narration.
+- Every fact must rest on the data below. Make NOTHING up. If there is no \
+data, say so briefly {_EMPTY_EXAMPLE}.
+- Say numbers in words where that sounds natural to the ear.
+- Length: ~150–300 words (≈1–2 minutes of narration).
 
-Структура (ровно эти заголовки, каждый — '## '; названия заголовков — на языке \
-пользователя {UI_LANG_NAME}, русские формулировки ниже — образец структуры):
-## Что закрыто сегодня
-## Что висит и ждёт
-## Почта, на которую не ответили
-## Один вопрос на вечер
+Structure (exactly these headings, each starting with '## '; write the headings \
+in the user's language, {UI_LANG_NAME}; the wording below is a structure sample):
+{_EVENING_HEADINGS}
 
-Верни ТОЛЬКО само ретро в markdown, без преамбулы и без послесловия.
+Return ONLY the retro itself in markdown, with no preamble and no closing remarks.
 
-=== ДАННЫЕ ДНЯ ===
+=== DAY DATA ===
 """
 
 
@@ -1306,21 +1451,19 @@ def synth_digest(context_packet: str,
 
 def render_source_file(date_iso: str, digest_body: str, blocks: list[dict[str, Any]],
                        period: str = "morning") -> str:
-    weekday_ru = [
-        "понедельник", "вторник", "среда", "четверг",
-        "пятница", "суббота", "воскресенье",
-    ]
+    weekdays = ui_text("weekdays")
     try:
-        wd = weekday_ru[dt.date.fromisoformat(date_iso).weekday()]
+        wd = weekdays[dt.date.fromisoformat(date_iso).weekday()]
     except ValueError:
         wd = ""
     sources = "\n".join(f"- {b['name']} — {b['meta']}" for b in blocks)
     if period == "evening":
-        title = f"Вечернее ретро Vepol — {date_iso}"
+        title = ui_text("report_title_evening").format(date=date_iso)
         doc_type = "evening-digest"
     else:
-        title = f"Утренний дайджест Vepol — {date_iso}"
+        title = ui_text("report_title_morning").format(date=date_iso)
         doc_type = "morning-digest"
+    sources_heading = ui_text("sources_heading")
     return f"""---
 title: "{title}"
 date: {date_iso}
@@ -1335,7 +1478,7 @@ language: {UI_LANG}
 
 ---
 
-## Источники (для проверки, не для озвучки)
+## {sources_heading}
 
 {sources}
 """
@@ -1363,10 +1506,15 @@ def _parse_notebooklm_json(stdout: str) -> Any:
 
 
 def run_notebooklm(args: list[str]) -> Any:
-    proc = subprocess.run(
-        [NOTEBOOKLM_BIN, *args], capture_output=True, text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [NOTEBOOKLM_BIN, *args], capture_output=True, text=True,
+            check=False, timeout=NOTEBOOKLM_TIMEOUT, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"notebooklm {' '.join(args[:3])} timed out after {NOTEBOOKLM_TIMEOUT}s"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"notebooklm {' '.join(args[:3])} rc={proc.returncode}: "
@@ -1644,9 +1792,15 @@ def _ensure_notebook(manifest: dict[str, Any]) -> str:
         manifest["notebook_id"] = configured
         return configured
     title = str(manifest["notebook_title"])
+    # Older versions gave every user the Russian notebook name; keep reusing
+    # that month's notebook instead of opening a second one.
+    month = str(manifest.get("date") or "")[:7]
+    accepted = {title}
+    if month:
+        accepted.add(UI_TEXT["ru"]["notebook_title"].format(month=month))
     data = run_notebooklm(["list", "--json"])
     for notebook in data.get("notebooks", []) if isinstance(data, dict) else []:
-        if notebook.get("title") == title and notebook.get("id"):
+        if notebook.get("title") in accepted and notebook.get("id"):
             manifest["notebook_id"] = notebook["id"]
             return str(notebook["id"])
     created = run_notebooklm(["create", title, "--json"])
@@ -1719,13 +1873,13 @@ def push_notebooklm(
                 manifest["source_retro_sha256"] = retro_hash
             save_manifest(mpath, manifest)
         prompt = (
-            f"Язык озвучки — {UI_LANG_NAME}. Сделай короткое спокойное вечернее "
-            "ретро: что закрыто сегодня, что висит и что ждёт ответа."
+            f"Narration language: {UI_LANG_NAME}. Make a short, calm evening "
+            "retro: what got closed today, what is still open, and what is waiting for a reply."
             if period == "evening" else
-            f"Язык озвучки — {UI_LANG_NAME}. Сделай тёплый утренний аудиообзор "
-            "готового дайджеста продолжительностью примерно восемь–двенадцать минут. "
-            "Равномерно раскрой все содержательные разделы, спокойно, по делу, без "
-            "добавления новых фактов."
+            f"Narration language: {UI_LANG_NAME}. Make a warm morning audio overview "
+            "of the finished digest, roughly eight to twelve minutes long. "
+            "Cover every substantive section evenly, calmly and to the point, without "
+            "adding new facts."
         )
         # Persist the at-most-one automatic attempt gate before the remote
         # create. If the process dies after NotebookLM accepts the request but
@@ -1848,6 +2002,42 @@ def speech_from_digest(body: str) -> str:
     if not text:
         raise ValueError("speech text is empty after cleanup")
     return text + "\n"
+
+
+# Lines of the arXiv report (kb-learning-arxiv, en and ru labels) that belong
+# on the written page only. The report keeps them; the speech text drops them
+# so the narrator never reads JSON scores, wiki-link lists, author lists,
+# category codes or a bare link aloud.
+REPORT_MACHINE_LINE_RES = (
+    # "- Scores: `{"topic_relevance": 2, ...}`" / "- Скоры: `{...}`"
+    re.compile(r"^\s*[-*]\s+[^:\n]{1,40}:\s*`\{[^`\n]*\}`\s*$"),
+    # "Sources: [[a]], [[b]]" / "Источники: [[a]], [[b]]"
+    re.compile(r"^\s*[^:\n\[]{1,40}:\s*\[\[[^\]\n]+\]\](?:\s*,\s*\[\[[^\]\n]+\]\])*\s*$"),
+    # "- Authors: ..." / "- Category: cs.AI · 2026-..." (and the ru labels)
+    re.compile(r"^\s*[-*]\s+(?:Authors|Авторы|Category|Категория):\s"),
+    # "- arXiv: https://arxiv.org/abs/..."
+    re.compile(r"^\s*[-*]\s+arXiv:\s*https?://\S+\s*$"),
+)
+
+
+def strip_report_machine_lines(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines()
+        if not any(rx.match(line) for rx in REPORT_MACHINE_LINE_RES)
+    )
+
+
+def speech_body(period: str, digest_file: pathlib.Path | None,
+                blocks: list[dict[str, Any]], digest_body: str) -> str:
+    """The text the narrator reads: the report body, except that the arXiv
+    block of a morning whole-block digest loses its machine lines."""
+    if period != "morning" or digest_file is not None:
+        return digest_body
+    return assemble_finalized_morning([
+        dict(block, text=strip_report_machine_lines(str(block.get("text") or "")))
+        if block.get("snapshot_key") == "learning" else block
+        for block in blocks
+    ])
 
 
 def canonical_artifacts(date_iso: str, period: str) -> dict[str, pathlib.Path]:
@@ -2138,19 +2328,17 @@ def _send_tts_alert(date_iso: str, period: str, manifest: dict[str, Any]) -> Non
             engine = str(data["engine"])
     except Exception:  # noqa: BLE001 — engine name is cosmetic in the alert
         pass
-    extra = (
-        "; продление моста: kb-tts-engine extend-bridge --days N --reason ..."
-        if "bridge expired" in reason else ""
-    )
-    text = (
-        f"Озвучка дайджеста упала ({engine}): {reason}. Текст сохранён. "
-        f"Откат: kb-tts-engine set qwen; повтор: kb-morning-digest --force{extra}"
-    )
+    retry = ("kb-morning-digest --period evening --force" if period == "evening"
+             else "kb-morning-digest --force")
+    text = ui_text("tts_alert").format(engine=engine, reason=reason, retry=retry)
     try:
         proc = subprocess.run(
             [str(sender), "tts_failure_alert", text],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
         )
+        if proc.returncode == RC_TELEGRAM_NOT_CONFIGURED:
+            log(f"{date_iso} {period}: tts alert not sent: telegram not configured")
+            return
         if proc.returncode != 0:
             log(f"{date_iso} {period}: tts alert send failed rc={proc.returncode}")
             return
@@ -2258,12 +2446,30 @@ def send_local_audio(date_iso: str, period: str, mpath: pathlib.Path,
         return 0
     _begin_attempt(mpath, manifest, "telegram", "telegram_sending")
     if period == "evening":
-        caption = f"Вечернее ретро — {date_iso}"
+        caption = ui_text("caption_evening").format(date=date_iso)
         message_type = "evening_digest_audio"
     else:
-        caption = f"Утренний дайджест — {date_iso}"
+        caption = ui_text("caption_morning").format(date=date_iso)
         message_type = "morning_digest_audio"
     proc = _run_child([str(sender), message_type, str(paths["audio"]), caption], TELEGRAM_TIMEOUT)
+    if proc.returncode == RC_TELEGRAM_NOT_CONFIGURED:
+        # Not delivered, not an error: the report, speech file and MP3 stay
+        # on disk, the day is terminal (no retries), and --force sends it once
+        # Telegram is configured. The begun attempt made no network call.
+        attempts = manifest["attempts"]
+        attempts["telegram"] = max(0, int(attempts.get("telegram", 1)) - 1)
+        attempts["total"] = max(0, int(attempts.get("total", 1)) - 1)
+        manifest.update({
+            "status": "unavailable", "failed_stage": "telegram",
+            "retry_disposition": "terminal",
+            "error": "telegram not configured; audio kept at "
+                     f"{rel(paths['audio'])}",
+            "updated_at": now_iso(),
+        })
+        save_manifest(mpath, manifest)
+        log(f"{date_iso} {period}: telegram not configured; audio kept at "
+            f"{rel(paths['audio'])} (not sent)")
+        return 0
     try:
         result = json.loads((proc.stdout or "").strip())
     except Exception:  # noqa: BLE001
@@ -2317,11 +2523,11 @@ def append_hub_log(date_iso: str, source_file: pathlib.Path, manifest: dict[str,
                    period: str = "morning") -> None:
     status = manifest.get("status", "unknown")
     message_id = (manifest.get("telegram") or {}).get("message_id") or "—"
-    label = "Вечернее ретро" if period == "evening" else "Утренний дайджест"
+    label = "Evening retro" if period == "evening" else "Morning digest"
     line = (
         f"\n## [{date_iso}] digest | hub | "
         f"\"{label} → local Qwen/Telegram ({status}); "
-        f"файл {rel(source_file)}; message_id {message_id}\"\n"
+        f"file {rel(source_file)}; message_id {message_id}\"\n"
     )
     try:
         with HUB_LOG.open("a", encoding="utf-8") as f:
@@ -2443,7 +2649,7 @@ def build_ready_digest(
     if period == "morning" and not digest_body:
         return paths, source, "no finalized same-day morning blocks; report-only"
     try:
-        speech = speech_from_digest(digest_body)
+        speech = speech_from_digest(speech_body(period, digest_file, blocks, digest_body))
     except ValueError as exc:
         return paths, source, str(exc)
     atomic_write(paths["speech"], speech)
@@ -2495,12 +2701,12 @@ def run_notebooklm_route(
     submission = manifest.get("submission_id") or manifest.get("artifact_id") or "—"
     delivery = manifest.get("local_delivery_status") or manifest.get("status", "unknown")
     remote = manifest.get("remote_status") or "legacy_unknown"
-    label = "Вечернее ретро" if period == "evening" else "Утренний дайджест"
+    label = "Evening retro" if period == "evening" else "Morning digest"
     try:
         with HUB_LOG.open("a", encoding="utf-8") as handle:
             handle.write(
                 f"\n## [{date_iso}] digest | hub | \"{label} → NotebookLM "
-                f"(local={delivery}, remote={remote}); файл {rel(paths['report'])}; "
+                f"(local={delivery}, remote={remote}); file {rel(paths['report'])}; "
                 f"submission {submission}\"\n"
             )
     except Exception as exc:  # noqa: BLE001
@@ -2767,7 +2973,9 @@ def run(date_iso: str, *, period: str, digest_file: pathlib.Path | None,
             # adapter input for audit/proof. They invoke no audio adapter.
             if out is None and digest_body and source != "missing-retro":
                 try:
-                    frozen_speech = speech_from_digest(digest_body)
+                    frozen_speech = speech_from_digest(
+                        speech_body(period, digest_file, blocks, digest_body)
+                    )
                 except ValueError as exc:
                     log(f"{date_iso}: file-only speech gate rejected source: {exc}")
                     return 1
@@ -2811,7 +3019,8 @@ def main() -> int:
     parser.add_argument("--period", choices=("morning", "evening"), default="morning",
                         help="Which digest to build (default morning).")
     parser.add_argument("--date", default=today_iso(), help="YYYY-MM-DD (default today).")
-    parser.add_argument("--digest-file", help="Use this file as the digest body (skip synth).")
+    parser.add_argument("--digest-file",
+                        help="Use this file as the digest body instead of the finalized blocks.")
     parser.add_argument("--out", help="Write digest to this path instead of the canonical report.")
     parser.add_argument("--no-push", action="store_true", help="Build the report only; skip selected audio delivery.")
     parser.add_argument(

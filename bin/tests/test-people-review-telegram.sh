@@ -770,7 +770,7 @@ print('OK' if any(d.startswith('pn:e:') for d in datas) else f'BAD {datas}')
 [ "$REKB" = "OK" ] && ok "T23b: reconcile re-offered the search keyboard" || fail "T23b: $REKB"
 
 # ---------------------------------------------------------------------------
-# T24: stale search callback cannot override an explicit «без поиска»
+# T24: stale search callback cannot override an explicit "skip search"
 # ---------------------------------------------------------------------------
 HUB24="$TMPDIR_TEST/hub24"; make_hub "$HUB24"; reset_srv
 stage_senders "$HUB24" "2026-07-05" '[

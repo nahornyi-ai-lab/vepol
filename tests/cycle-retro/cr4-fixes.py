@@ -4,6 +4,8 @@
 CR4-B2: enabled child under disabled ancestor → cycle refuses (exit 2).
 CR4-B3: pre-pass does NOT overwrite a completed report from a prior run.
 CR4-B4: MAX_DEPTH and MAX_FANOUT are enforced.
+Fresh hub: retro/plan exit 0 with a setup hint when the cycle was never set up.
+Deep autonomy gate without the scanner: refuses with one line before any spawn.
 """
 from __future__ import annotations
 
@@ -190,7 +192,7 @@ def cr5_b3_skips_spawn_for_completed():
         f"---\nreport_id: solo-{today}\nslug: solo\ndate: {today}\n"
         f"cycle: evening\nparent: hub\nchildren_rolled_up: []\n"
         f"status: done\nrun_id: prior-cycle-uuid\n---\n\n"
-        f"## Что сделано\n- prior cycle finished work, do not overwrite\n"
+        f"## What was done\n- prior cycle finished work, do not overwrite\n"
     )
     (proj / "reports" / f"{today}.md").write_text(completed, encoding="utf-8")
 
@@ -295,7 +297,7 @@ def cr4_b3_no_overwrite_completed():
         f"---\nreport_id: solo-{today}\nslug: solo\ndate: {today}\n"
         f"cycle: evening\nparent: hub\nchildren_rolled_up: []\n"
         f"status: done\nrun_id: prior-cycle-uuid\n---\n\n"
-        f"## Что сделано\n- prior cycle did real work\n"
+        f"## What was done\n- prior cycle did real work\n"
     )
     (proj / "reports" / f"{today}.md").write_text(completed, encoding="utf-8")
     pre_existing_size = (proj / "reports" / f"{today}.md").stat().st_size
@@ -390,11 +392,84 @@ def cr4_b4_max_fanout():
     shutil.rmtree(sb)
 
 
+def fresh_hub_cycle_not_set_up():
+    print("Fresh hub: retro and plan skip with a setup hint instead of failing")
+    sb = make_sandbox("")
+    (sb / "hierarchy.yaml").unlink()  # fresh install: no hierarchy, no migration table
+    cli = sb / "bin" / "kb-orchestrator-cycle"
+    proc = subprocess.run([str(cli), "retro"], env=sandbox_env(sb),
+                          capture_output=True, text=True)
+    assert_(proc.returncode == 0, f"retro exits 0 on a fresh hub (got {proc.returncode}: {proc.stderr[-300:]})")
+    assert_("kb-rebuild-registry bootstrap" in proc.stderr and "cycle_enabled: true" in proc.stderr,
+            f"retro says how to enable the cycle (got: {proc.stderr[-300:]})")
+    assert_(proc.stderr.count("\n") == 1, "retro prints exactly one line")
+    assert_(not (sb / ".orchestrator" / "runs").exists() or not any((sb / ".orchestrator" / "runs").iterdir()),
+            "retro started no runs")
+
+    plan = sb / "daily-plan" / "today.md"
+    plan.parent.mkdir()
+    plan.write_text("approved_at: 2026-11-17T07:00:00\n\n- [ ] hub: something\n", encoding="utf-8")
+    proc = subprocess.run([str(cli), "plan", "--approved-plan", str(plan)], env=sandbox_env(sb),
+                          capture_output=True, text=True)
+    assert_(proc.returncode == 0, f"plan exits 0 on a fresh hub (got {proc.returncode}: {proc.stderr[-300:]})")
+    assert_("kb-rebuild-registry bootstrap" in proc.stderr, "plan says how to enable the cycle")
+
+    # Half set up (migration table written, apply not run yet) still fails loudly.
+    shutil.copy(_cycle_src_bin() / "kb-rebuild-registry", sb / "bin" / "kb-rebuild-registry")
+    (sb / "migration-2026-04-25.yaml").write_text("version: 1\nentries:\n", encoding="utf-8")
+    proc = subprocess.run([str(cli), "retro"], env=sandbox_env(sb),
+                          capture_output=True, text=True)
+    assert_(proc.returncode != 0, f"half-set-up hub still fails (got {proc.returncode})")
+    assert_("kb-rebuild-registry check failed" in proc.stderr,
+            f"half-set-up failure names the registry check (got: {proc.stderr[-300:]})")
+    shutil.rmtree(sb)
+
+
+def deep_gate_without_scanner_refuses_before_work():
+    print("KB_AUTONOMY_GATE_DEEP=1 without the scanner refuses before any work")
+    sb_dir = pathlib.Path(tempfile.mkdtemp(prefix="kb-cr4-gate-"))
+    nodes = {"mid": ("hub", "[leaf]"), "leaf": ("mid", "[]")}
+    lines = ["version: 1", "root: hub", "nodes:", "  hub:", "    kind: root",
+             "    parent: null", f"    knowledge_path: {sb_dir}", "    children: [mid]"]
+    for slug, (parent, children) in nodes.items():
+        kp = sb_dir / slug / "knowledge"
+        kp.mkdir(parents=True)
+        (kp / "backlog.md").write_text(f"# {slug}\n\n## Open\n\n## Done\n", encoding="utf-8")
+        lines += [f"  {slug}:", "    kind: project", f"    parent: {parent}", "    category: lab",
+                  "    status: live", f"    knowledge_path: {kp}", f"    children: {children}",
+                  "    cycle_enabled: true", "    sla_report_timeout_sec: 60", "    owner: test",
+                  "    decompose_strategy: subset", "    exec_broker: false"]
+    sb = make_sandbox("\n".join(lines) + "\n")
+    marker = sb / "broker-was-called"
+    stub = sb / "bin" / "kb-orchestrator-run"
+    stub.write_text(f"#!/usr/bin/env bash\ntouch {marker}\necho 'OUTCOME: closed: ok'\n", encoding="utf-8")
+    # HOME points into the sandbox: the gate also looks for the scanner under
+    # ~/knowledge/bin, and a real hub that has one must not change this test.
+    env = {**sandbox_env(sb), "KB_AUTONOMY_GATE_DEEP": "1", "HOME": str(sb)}
+    env.pop("KB_AUTONOMY_GATE_INPUT", None)
+    proc = subprocess.run(
+        [str(sb / "bin" / "kb-orchestrator-cycle"), "retro",
+         "--skip-registry-check", "--skip-hub-retro", "--skip-post-cleanup"],
+        env=env, capture_output=True, text=True,
+    )
+    assert_(proc.returncode == 75, f"refuses with exit 75 (got {proc.returncode}: {proc.stderr[-300:]})")
+    assert_("did not start" in proc.stderr and "Traceback" not in proc.stderr,
+            f"one clear message, no traceback (got: {proc.stderr[-300:]})")
+    assert_(not marker.exists(), "no agent was spawned")
+    for slug in nodes:
+        assert_(not (sb_dir / slug / "knowledge" / "reports").exists(),
+                f"{slug}: no half-written report")
+    shutil.rmtree(sb)
+    shutil.rmtree(sb_dir)
+
+
 def main():
     cr4_b2_disabled_ancestor()
     cr4_b3_no_overwrite_completed()
     cr5_b3_skips_spawn_for_completed()
     cr4_b4_max_fanout()
+    fresh_hub_cycle_not_set_up()
+    deep_gate_without_scanner_refuses_before_work()
     print("\nAll CR4 + CR5 fixes verified")
 
 

@@ -19,6 +19,14 @@ PASS=0
 FAIL=0
 TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="${TMP}/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -157,6 +165,17 @@ dp show --date "2026-10-15" --json >"${TMP}/none.json" 2>&1
 check_eq "show --json without a plan exits 0" "$?" "0"
 check_eq "show --json without a plan says exists false" \
   "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["exists"], d["date"], "prompt" in d)' "${TMP}/none.json")" "False 2026-10-15 True"
+
+echo "== time zone: KB_TZ first, then TZ, then /etc/localtime (same order as kb-agenda) =="
+zone_of() { env "$@" python3 - "${DAYPLAN}" <<'PY'
+import importlib.machinery, importlib.util, sys
+spec = importlib.util.spec_from_loader("kbdp", importlib.machinery.SourceFileLoader("kbdp", sys.argv[1]))
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.local_zone_name())
+PY
+}
+check_eq "KB_TZ wins over TZ" "$(zone_of KB_TZ=Asia/Tokyo TZ=Europe/Berlin)" "Asia/Tokyo"
+check_eq "TZ when KB_TZ is unset" "$(zone_of -u KB_TZ TZ=Europe/Berlin)" "Europe/Berlin"
 
 echo
 echo "dayplan: ${PASS} passed, ${FAIL} failed"

@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Vepol does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please do not paste tokens, chat IDs or private notes; security problems go to [SECURITY.md](https://github.com/nahornyi-ai-lab/vepol/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `./install.sh`
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Vepol version
+      description: "`cat ~/vepol/VERSION`, plus `git -C ~/vepol rev-parse --short HEAD` if you run `main`"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: macOS 15.6, Apple Silicon
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Install or upgrade
+        - Knowledge base and agent sessions
+        - Morning brief or evening retro
+        - Audio digests or Telegram delivery
+        - Learning digest, research or money radar
+        - People, mail or calendar
+        - Vepol Desktop
+        - Docs
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: kb-doctor output
+      description: "Output of `kb-doctor install-health`. Remove anything private."
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "From `~/knowledge/logs/` or `~/vepol/install.log`. Remove anything private."
+      render: text

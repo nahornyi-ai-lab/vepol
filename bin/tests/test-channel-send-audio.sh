@@ -7,6 +7,14 @@ set -uo pipefail
 PASS=0
 FAIL=0
 TMP=$(mktemp -d)
+# Hermetic: product code must never reach a real agent CLI (a contributor's
+# logged-in Claude Code or Codex would make real, paid calls with test data).
+AGENT_STUBS="$TMP/agent-stubs"; mkdir -p "$AGENT_STUBS"
+for _cli in claude codex; do
+  printf '#!/bin/sh\necho "test stub: no real %s calls" >&2\nexit 1\n' "$_cli" > "$AGENT_STUBS/$_cli"
+  chmod +x "$AGENT_STUBS/$_cli"
+done
+export PATH="$AGENT_STUBS:$PATH" KB_CLAUDE_BIN="$AGENT_STUBS/claude" KB_CODEX_BIN="$AGENT_STUBS/codex"
 SENDER="${KB_AUDIO_SENDER:-$HOME/knowledge/bin/kb-channel-send-audio}"
 SERVER_PID=""
 
@@ -127,6 +135,8 @@ CHAT="777001"
 MP3="$TMP/daily.mp3"
 printf 'ID3-exact-test-audio-bytes' >"$MP3"
 
+# Cyrillic caption on purpose: the ru digest caption must reach Telegram
+# byte-exact in the UTF-8 multipart body.
 run_sender() {
   KB_TG_API_BASE="$API" TELEGRAM_BOT_TOKEN="$TOKEN" TELEGRAM_CHAT_ID="$CHAT" \
     "$SENDER" daily_digest "$MP3" "Утренний дайджест — 2026-07-11"
@@ -184,7 +194,17 @@ PY
   expect_rc 20 "empty file is known rejection" env KB_TG_API_BASE="$API" TELEGRAM_BOT_TOKEN="$TOKEN" TELEGRAM_CHAT_ID="$CHAT" "$SENDER" daily_digest "$TMP/empty.mp3"
   printf 'RIFF-not-an-mp3' >"$TMP/audio.wav"
   expect_rc 20 "non-MP3 input is known rejection" env KB_TG_API_BASE="$API" TELEGRAM_BOT_TOKEN="$TOKEN" TELEGRAM_CHAT_ID="$CHAT" "$SENDER" daily_digest "$TMP/audio.wav"
-  expect_rc 20 "missing credentials are known rejection" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/no-secrets" KB_TG_API_BASE="$API" "$SENDER" daily_digest "$MP3"
+  # Contract: Telegram not configured is its own outcome (exit 3, one stderr
+  # line), not a send failure, and makes no network call.
+  : >"$SRV/request.json"
+  expect_rc 3 "missing credentials exit 3 (telegram not configured)" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/no-secrets" KB_TG_API_BASE="$API" "$SENDER" daily_digest "$MP3"
+  json_assert "not configured has structured outcome" 'd["outcome"] == "not_configured"'
+  [[ "$(cat "$TMP/stderr")" == "telegram not configured" ]] \
+    && ok "not configured prints one stderr line" || bad "not configured stderr: $(cat "$TMP/stderr")"
+  [[ ! -s "$SRV/request.json" ]] && ok "not configured makes no request" || bad "not configured reached the server"
+  mkdir -p "$TMP/empty-secrets/personal"
+  printf '%s\n' 'TELEGRAM_BOT_TOKEN=' 'TELEGRAM_CHAT_ID=' >"$TMP/empty-secrets/personal/.secrets"
+  expect_rc 3 "installer's empty .secrets values exit 3" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$TMP/empty-secrets" KB_TG_API_BASE="$API" "$SENDER" daily_digest "$MP3"
   expect_rc 20 "malformed API base is local known rejection" env KB_TG_API_BASE="http://127.0.0.1:notaport" TELEGRAM_BOT_TOKEN="$TOKEN" TELEGRAM_CHAT_ID="$CHAT" "$SENDER" daily_digest "$MP3"
 
   mkdir -p "$TMP/hub/personal"

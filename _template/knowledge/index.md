@@ -1,16 +1,16 @@
-# {{PROJECT_NAME}} — индекс вики
+# {{PROJECT_NAME}} — wiki index
 
-Каталог всех страниц проекта. Обновляется при каждом ingest/query.
+Catalog of all project pages. Updated on every ingest/query.
 
 ## Core
 
-- [state.md](state.md) — текущее состояние проекта
-- [log.md](log.md) — хронология событий
+- [state.md](state.md) — current project state
+- [log.md](log.md) — timeline of events
 
 ## Sources (`sources/`)
 
-_(саммари по каждому raw-документу)_
+_(a summary for each raw document)_
 
-## Категории
+## Categories
 
-_(добавляются по мере появления содержания)_
+_(added as content appears)_

@@ -13,8 +13,13 @@
 #   kb-demo retro
 #   kb-demo search "client renewal"
 #   kb-demo backlog --open
-#   kb-demo task "my new task"       # writes into the demo, not your real KB
-#   kb-demo path                     # prints the demo path and exits
+#   kb-demo task "my new task"       # writes into the demo copy, not your real KB
+#   kb-demo path                     # prints the demo copy's path and exits
+#   kb-demo reset                    # starts the demo copy over from the repo
+#
+# Commands run against a private copy of the repo's demo/knowledge in
+# ~/.vepol/demo-knowledge (KB_DEMO_HUB overrides), so trying the demo never
+# changes files in your Vepol clone (upgrade.sh refuses a clone with local edits).
 
 set -euo pipefail
 
@@ -24,16 +29,42 @@ set -euo pipefail
 # the symlink to find the repo root.
 SCRIPT_REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL_PATH")/.." && pwd)"
-DEMO_HUB="$REPO_ROOT/demo/knowledge"
+DEMO_SRC="$REPO_ROOT/demo/knowledge"
+DEMO_HUB="${KB_DEMO_HUB:-$HOME/.vepol/demo-knowledge}"
+DEMO_MARK=".vepol-demo-copy"
 
-if [[ ! -d "$DEMO_HUB" ]]; then
-  echo "✘ Demo hub not found at: $DEMO_HUB" >&2
+if [[ ! -d "$DEMO_SRC" ]]; then
+  echo "✘ Demo hub not found at: $DEMO_SRC" >&2
   echo "  Expected the demo/knowledge/ directory to exist in the Vepol repo." >&2
-  echo "  Run 'kb-demo path' to see where it's looking." >&2
   exit 1
 fi
 
-# Special command: 'path' just prints the demo dir and exits
+# 'reset' removes the copy (only one this script made) so it is created again below.
+if [[ "${1:-}" == "reset" ]]; then
+  if [[ -d "$DEMO_HUB" ]]; then
+    if [[ ! -f "$DEMO_HUB/$DEMO_MARK" ]]; then
+      echo "✘ $DEMO_HUB was not created by kb-demo; not removing it." >&2
+      exit 1
+    fi
+    rm -rf "$DEMO_HUB"
+  fi
+  shift
+  [[ $# -eq 0 ]] && set -- path
+fi
+
+# Create the private copy on first use; bring its task boards to the current
+# kb-board format so 'kb-demo task' can write to them.
+if [[ ! -d "$DEMO_HUB" ]]; then
+  mkdir -p "$(dirname "$DEMO_HUB")"
+  cp -R "$DEMO_SRC" "$DEMO_HUB"
+  : > "$DEMO_HUB/$DEMO_MARK"
+  while IFS= read -r board; do
+    "$REPO_ROOT/bin/kb-board" check "$board" >/dev/null 2>&1 \
+      || "$REPO_ROOT/bin/kb-board" migrate "$board" --write >/dev/null 2>&1 || true
+  done < <(find "$DEMO_HUB" -name backlog.md -type f)
+fi
+
+# Special command: 'path' just prints the demo copy's path and exits
 if [[ "${1:-}" == "path" ]]; then
   echo "$DEMO_HUB"
   exit 0
@@ -43,16 +74,17 @@ if [[ $# -lt 1 ]]; then
   cat <<HELP
 kb-demo — run kb-* commands against the Vepol demo wiki.
 
-Demo hub: $DEMO_HUB
+Demo hub: $DEMO_HUB (a private copy of $DEMO_SRC)
 
 Usage:
   kb-demo brief                Run kb-brief on the demo
   kb-demo retro                Run kb-retro on the demo
   kb-demo search "<query>"     Run kb-search on the demo
   kb-demo backlog [--open]     Run kb-backlog on the demo
-  kb-demo task "<text>"        Run kb-task on the demo (writes to demo backlog)
+  kb-demo task "<text>"        Run kb-task on the demo (writes to the demo copy)
   kb-demo doctor               Run kb-doctor on the demo
-  kb-demo path                 Print the demo directory and exit
+  kb-demo path                 Print the demo copy's directory and exit
+  kb-demo reset                Start the demo copy over from the repo
   kb-demo help                 Show this message
 
 Any other kb-* subcommand also works:
@@ -83,10 +115,10 @@ fi
 # TELEGRAM_* variables exported in the shell, the user's real Telegram chat.
 #   KB_CALENDAR_DISABLE=1  — the calendar reader answers "disabled", never connects
 #   KB_BRIEF_DRY=1         — kb-brief prints the brief and exits before delivery
+#   KB_RETRO_DRY=1         — kb-retro prints the retro instead of sending it
 export KB_CALENDAR_DISABLE=1
-if [[ "$SUBCMD" == "brief" ]]; then
-  export KB_BRIEF_DRY="${KB_BRIEF_DRY:-1}"
-fi
+export KB_BRIEF_DRY="${KB_BRIEF_DRY:-1}"
+export KB_RETRO_DRY="${KB_RETRO_DRY:-1}"
 
 # Run the kb-* command with the demo hub.
 # Different scripts read different env-var names — set both to be safe:

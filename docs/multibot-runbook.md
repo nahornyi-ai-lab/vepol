@@ -1,159 +1,180 @@
 # Multibot operations runbook
 
-Стандартные операции для multibot-agent-runtime (см. [concepts/multibot-agent-runtime.md](concepts/multibot-agent-runtime.md)).
+Standard operations for the multibot agent runtime (see [methodology/multibot-agent-runtime.md](methodology/multibot-agent-runtime.md)).
 
-## Пять команд
+## Five commands
 
 ```
-kb-multibot-setup       # одноразовая первичная настройка (auth + group)
-kb-multibot-supervisor  # main daemon (под LaunchAgent, не зовём вручную)
-kb-multibot-add         # добавить агента с уже созданным ботом
-kb-multibot-remove      # деактивировать агента
-kb-multibot-list        # показать состояние всех агентов
+kb-multibot-setup       # one-time first setup (auth + group)
+kb-multibot-supervisor  # main daemon (runs under a LaunchAgent; you don't call it by hand)
+kb-multibot-add         # add an agent whose bot already exists
+kb-multibot-remove      # deactivate an agent
+kb-multibot-list        # show the state of all agents
 ```
 
 ---
 
-## Добавить агента
+## First-time setup
 
-**Условие:** проект уже существует, у него есть `<project>/knowledge/` + `.orchestration.yaml`. Если нет — сначала `init-kb`.
+1. **Telegram credentials, login and group:**
+   ```bash
+   kb-multibot-setup
+   ```
+   It asks for `TG_API_ID` and `TG_API_HASH` (from my.telegram.org → API development tools), logs in with Telethon (Telegram sends you a code), asks for the group's @username or invite link, and writes `~/.orchestrator/multibot.env` (chmod 600). `kb-multibot-setup --check` shows the current state without changing anything.
 
-1. **Создать бота в @BotFather:**
+2. **Install the LaunchAgent.** `install.sh` does not install this one. From your Vepol checkout:
+   ```bash
+   sed "s|__HOME__|$HOME|g" launchd/com.knowledge.multibot-supervisor.plist.template \
+     > ~/Library/LaunchAgents/com.knowledge.multibot-supervisor.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.knowledge.multibot-supervisor.plist
+   ```
+
+> **Long runs are stopped.** A run that prints nothing for `watchdog_silence_sec` (900 seconds by default) is stopped, and `claude -p --output-format json` prints nothing until it finishes. For an agent that runs long jobs, set `watchdog_silence_sec` in the `telegram:` block of its `.orchestration.yaml` to more than its longest expected run. A stop, from the watchdog or `/stop`, signals only that agent's own process. Details: [status of the code](methodology/multibot-agent-runtime.md#status-of-the-code).
+
+---
+
+## Add an agent
+
+**Prerequisite:** the project already exists and has `<project>/knowledge/` + `.orchestration.yaml`. If not, run `/init-kb` in the project first.
+
+1. **Create the bot in @BotFather:**
    - `/newbot` → display name → username
    - `/setprivacy` → Disable
    - `/setjoingroups` → Enable
-   - Скопировать token формата `12345:ABC...`
+   - Copy the token, format `12345:ABC...`
 
-2. **Зарегистрировать одной командой:**
+2. **Register it with one command:**
    ```bash
    kb-multibot-add 12345:ABC...
    ```
-   Скрипт авто-определит:
-   - бота (через `getMe`)
-   - slug (из `bot_username`)
-   - workdir (через `projects/<slug>` симлинк)
-   - parent (из existing yaml, default `hub`)
+   The script works out on its own:
+   - the bot (through `getMe`)
+   - the slug (from `bot_username`)
+   - the workdir (through the `~/knowledge/projects/<slug>` symlink)
+   - the parent (from the existing yaml; default `hub`)
 
-   Дополнительно делает:
-   - сохраняет токен в `~/.claude/channels/bots/<slug>.env` (chmod 600)
-   - пишет `telegram:` блок в `.orchestration.yaml`
-   - добавляет бота в группу через Telethon (best-effort)
-   - `enabled: true` по умолчанию (production rollout)
-   - kickstart supervisor (подхватит нового агента)
+   It also:
+   - saves the token to `~/.claude/channels/bots/<slug>.env` (chmod 600)
+   - writes the `telegram:` block in `.orchestration.yaml`
+   - adds the bot to the group through Telethon (best-effort; `--no-group-add` skips it)
+   - sets `enabled: true` by default (production rollout; `--no-enable` registers the agent disabled)
+   - restarts the supervisor so it picks up the new agent (`--no-kickstart` skips it)
 
-3. **Если slug не вывелся** автоматически (например username не содержит slug проекта):
+3. **If the slug is not inferred** automatically (for example, the username does not contain the project slug):
    ```bash
    kb-multibot-add 12345:ABC... --slug my-project
    ```
 
-4. **Проверить:**
+4. **Check:**
    ```bash
    kb-multibot-list
    ```
-   Должна появиться новая строка с `enabled=True, token=present`.
+   A new row should appear with `enabled` = `True` and `token` = `present`.
 
-5. **Тест** в группе `<your_group>`:
+5. **Test** in the `<your_group>` group:
    ```
-   @<bot_username> привет
+   @<bot_username> hello
    ```
-   Должна прийти реакция 👀 → ответ ботом через 5–30 сек.
+   You should get a 👀 reaction, then a reply from the bot within 5–30 s.
 
 ---
 
-## Удалить агента
+## Remove an agent
 
-**Три уровня:**
+**Three levels:**
 
 ```bash
-# soft — supervisor перестаёт вызывать, бот остаётся в группе и на диске
+# soft — the supervisor stops calling the agent; the bot stays in the group and on disk
 kb-multibot-remove <slug>
 
-# medium — также кикаем бота из группы
+# medium — also kick the bot from the group
 kb-multibot-remove <slug> --kick
 
-# hard — также архивируем токен (token не удаляется навсегда, перемещается в _archive/)
-kb-multibot-remove <slug> --archive
+# hard — also archive the token (it is not deleted for good; it moves to _archive/)
+kb-multibot-remove <slug> --kick --archive
 ```
 
-Все варианты делают kickstart supervisor автоматически.
+`--kick` and `--archive` are independent; combine them as you need. `--kick` works for supergroups; in a basic group, remove the bot by hand.
 
-**Полное удаление бота на стороне Telegram** — только вручную через `@BotFather` → `/deletebot`. Скрипт это НЕ делает (требует подтверждения от человека).
+Every variant restarts the supervisor automatically (`--no-kickstart` skips it).
+
+**Deleting the bot fully on the Telegram side** — only by hand, through `@BotFather` → `/deletebot`. The script does NOT do this (it needs a human to confirm).
 
 ---
 
-## Посмотреть состояние
+## Check the state
 
 ```bash
-kb-multibot-list                 # таблица всех
-kb-multibot-list --only-enabled  # только активные
-kb-multibot-list --json          # для скриптов
+kb-multibot-list                 # table of all agents
+kb-multibot-list --only-enabled  # active agents only
+kb-multibot-list --json          # for scripts
 ```
 
-Колонки: slug, bot, parent, enabled, token (present/missing), last_run.
+Columns: slug, bot, parent, enabled, token (present/missing), last_run. `--json` also includes `children`.
 
 ---
 
 ## Troubleshooting
 
-### Supervisor не отвечает в группе
+### The supervisor does not answer in the group
 
-1. Проверить процесс:
+1. Check the process:
    ```bash
    launchctl list com.knowledge.multibot-supervisor
    ```
-   Если `LastExitStatus != 0` — посмотреть лог:
+   If `LastExitStatus` is not 0, read the log:
    ```bash
    tail -50 ~/knowledge/logs/multibot-supervisor.err.log
    ```
 
-2. Полный рестарт:
+2. Full restart:
    ```bash
    launchctl kickstart -k gui/$(id -u)/com.knowledge.multibot-supervisor
    ```
 
-3. Если совсем не стартует — проверить конфиг:
+3. If it does not start at all, check the config:
    ```bash
    kb-multibot-supervisor --check
    ```
 
 ### Telethon session invalid
 
-Если в логах `SessionPasswordNeededError` или auth errors:
+If the logs show `SessionPasswordNeededError` or auth errors:
 
 ```bash
-kb-multibot-setup --auth   # повторная авторизация
+kb-multibot-setup --auth   # log in again
 launchctl kickstart -k gui/$(id -u)/com.knowledge.multibot-supervisor
 ```
 
-### Бот не отвечает (но supervisor работает)
+### A bot does not answer (but the supervisor runs)
 
-1. `kb-multibot-list` — `enabled: true`?
-2. Бот действительно в группе? Открой Telegram → группа → members.
-3. Был ли spawn?
+1. `kb-multibot-list` — is `enabled` true?
+2. Is the bot really in the group? Open Telegram → the group → members.
+3. Was there a spawn?
    ```bash
    ls -lt ~/.orchestrator/multibot/runs/ | head
    ```
 
-### BotFather hit creation cap
+### BotFather hit the creation cap
 
-Hard cap: 20 ботов (free) / 40 (Premium). Решения:
-- `/mybots` → удалить неиспользуемых
-- Telegram Premium ($5/мес) → 40 cap
-- Создать ботов с другого user-account (токены portable)
+Hard cap: 20 bots (free) / 40 (Premium). Options:
+- `/mybots` → delete bots you no longer use
+- Telegram Premium ($5/month) → 40 cap
+- Create bots from another user account (tokens are portable)
 
 ---
 
-## Файлы
+## Files
 
 ```
-~/.orchestrator/multibot.env                 # TG_API_ID/HASH/group_chat_id
+~/.orchestrator/multibot.env                 # TG_API_ID, TG_API_HASH, KB_MULTIBOT_GROUP_CHAT_ID
 ~/.orchestrator/multibot-supervisor.session  # Telethon session
-~/.orchestrator/multibot/queues/<slug>.json  # очередь задач per agent
+~/.orchestrator/multibot/queues/<slug>.json  # task queue per agent
 ~/.orchestrator/multibot/runs/<run_id>.json  # active + recent runs
 ~/.orchestrator/multibot/watchdog/<slug>.lock # flock
-~/.orchestrator/multibot/cache/<chat>.json   # rolling buffer
+~/.orchestrator/multibot/cache/<chat>.json   # rolling buffer (reserved; the cache lives in memory)
 ~/.claude/channels/bots/<slug>.env           # bot tokens (0600)
-~/.claude/channels/bots/_archive/            # архив токенов после --archive
+~/.claude/channels/bots/_archive/            # tokens archived by --archive
 ~/Library/LaunchAgents/com.knowledge.multibot-supervisor.plist
 ~/knowledge/logs/multibot-supervisor.{out,err}.log
 ```

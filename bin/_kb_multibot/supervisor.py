@@ -11,9 +11,9 @@ Top-level flow per concept §7.3:
      b. parse mentions → identify target agent(s)
      c. apply loop guards
      d. for each target: emoji-ack, enqueue, async spawn coordinator
-  4. spawn coordinator: acquire per-agent flock, watchdog.add(),
-     spawner.spawn() with stdout→watchdog.touch, send result via Bot API,
-     watchdog.remove() + state.write_run().
+  4. spawn coordinator: acquire per-agent flock, spawner.spawn() with
+     on_started→watchdog.add(real child pid) and stdout→watchdog.touch,
+     send result via Bot API, watchdog.remove() + state.write_run().
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from .mention import extract_stop_targets, filter_bot_mentions, has_stop_command
 from .prompts import assemble_spawn_prompt
 from .registry import AgentRegistry, AgentSpec, load_from_projects_dir
 from .sender import BotApiSender
-from .spawner import SpawnFailed, make_adapter
+from .spawner import BaseAdapter, SpawnFailed, make_adapter
 from .state import StateStore
 from .watchdog import Watchdog
 
@@ -83,6 +83,10 @@ class Supervisor:
         self.listener: GroupListener | None = None
         # Track active spawn tasks so we can wait on shutdown
         self._active_tasks: set[asyncio.Task] = set()
+        # run_id → adapter whose child is running; kills go through it only.
+        self._run_adapters: dict[str, BaseAdapter] = {}
+        # run_id → kill reason, so the spawn coordinator records the kill.
+        self._kill_reasons: dict[str, str] = {}
         # Dedup table for events seen this session (in addition to cache dedup)
         self._seen_events: set[tuple[int, int]] = set()
         self._shutdown = asyncio.Event()
@@ -169,10 +173,20 @@ class Supervisor:
             return
 
     async def _kill_expired_run(self, run_id: str, pid: int, reason: str) -> None:
+        # Unregister first so the next watchdog poll or a second /stop does
+        # not start another kill of the same run.
+        self.watchdog.remove(run_id)
+        adapter = self._run_adapters.get(run_id)
+        if adapter is None:
+            logger.info("run %s pid=%s already finished — nothing to stop", run_id, pid)
+            return
         logger.warning("watchdog killing run %s pid=%s reason=%s", run_id, pid, reason)
-        from .spawner import BaseAdapter
+        self._kill_reasons[run_id] = reason
         try:
-            await BaseAdapter().kill(pid)
+            # Signals only this run's own child; pid <= 1 is refused.
+            if not await adapter.kill(pid):
+                self._kill_reasons.pop(run_id, None)
+                return
         except Exception:
             logger.exception("kill failed for run %s", run_id)
         # Update run state on disk
@@ -380,14 +394,19 @@ class Supervisor:
                                 spec.slug, event.chat_id, resume_id[:8])
 
             adapter = make_adapter(spec.runtime, resume_session_id=resume_id)
+            self._run_adapters[run_id] = adapter
 
-            self.watchdog.add(
-                run_id=run_id,
-                agent_slug=spec.slug,
-                pid=-1,  # set by spawner once subprocess started; we touch via callback
-                silence_sec=spec.watchdog_silence_sec,
-                hard_timeout_sec=spec.task_timeout_sec,
-            )
+            def on_started(pid: int) -> None:
+                # Watch the real child pid only once the process exists.
+                self.watchdog.add(
+                    run_id=run_id,
+                    agent_slug=spec.slug,
+                    pid=pid,
+                    silence_sec=spec.watchdog_silence_sec,
+                    hard_timeout_sec=spec.task_timeout_sec,
+                )
+                run.pid = pid
+                self.state.write_run(run)
 
             def on_chunk(_chunk: str) -> None:
                 self.watchdog.touch(run_id, now=_now_epoch())
@@ -399,9 +418,11 @@ class Supervisor:
                 workdir=spec.workdir,
                 prompt=prompt,
                 on_stdout_chunk=on_chunk,
+                on_started=on_started,
             )
 
             self.watchdog.remove(run_id)
+            self._run_adapters.pop(run_id, None)
 
             # Extract response text
             reply_text = ""
@@ -425,6 +446,13 @@ class Supervisor:
             final_status = (
                 RUN_STATUS_SUCCESS if result.exit_code == 0 else RUN_STATUS_FAILED
             )
+            kill_reason = self._kill_reasons.pop(run_id, None)
+            if kill_reason:
+                # Stopped by the watchdog or /stop: keep that outcome.
+                final_status = (
+                    RUN_STATUS_TIMEOUT if kill_reason == "timeout" else RUN_STATUS_KILLED
+                )
+                run.kill_reason = kill_reason
             run.status = final_status
             run.ended_at = _now_iso()
             run.reply_msg_id = send_result.message_id
@@ -448,6 +476,10 @@ class Supervisor:
             run.ended_at = _now_iso()
             self.state.write_run(run)
         finally:
+            # Also on SpawnFailed/crash: never leave a stale watchdog entry.
+            self.watchdog.remove(run_id)
+            self._run_adapters.pop(run_id, None)
+            self._kill_reasons.pop(run_id, None)
             lock.release()
             # Drain one item from queue if present
             asyncio.create_task(self._drain_queue(spec))

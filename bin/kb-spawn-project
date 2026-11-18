@@ -36,13 +36,20 @@
 #   can fail over between Claude and Codex. JSON/stream legacy mode keeps the
 #   previous Claude-only pinned-session behavior.
 #
+# Permissions:
+#   The spawned session does project work (kb-execute-next sends registered
+#   projects' tasks here), so text mode passes --allow-edits to the broker:
+#   the Claude lane auto-accepts file edits in the project and may run shell
+#   commands. JSON/stream mode passes no permission flags; it uses your own
+#   Claude Code settings.
+#
 # Output:
 #   Writes the spawned session's stdout to this script's stdout unchanged.
 #   Exits with the spawn's exit code (or 124 on timeout).
 #
 # Examples:
-#   kb-spawn-project <slug> "Что в backlog на эту неделю?"
-#   kb-spawn-project <slug> "Открой последний sources/*.md и дай summary" --stream
+#   kb-spawn-project <slug> "What's in the backlog this week?"
+#   kb-spawn-project <slug> "Open the latest sources/*.md and give a summary" --stream
 #   kb-spawn-project <slug> "..." --fresh --timeout 300
 
 set -euo pipefail
@@ -89,24 +96,38 @@ if [[ -z "$SLUG" || -z "$PROMPT" ]]; then
   exit 2
 fi
 
-# Resolve slug → absolute path via registry.md. Registry rows look like:
-#   | slug | status | `~/path` | description |
-# Tilde expansion: $HOME prefix.
+# Resolve slug → absolute path via registry.md. Each table's header row names
+# the path column; both layouts are read:
+#   | slug | status | path | description |                        (hand-written, hub-managed)
+#   | slug | status | category | parent | path | description |    (kb-rebuild-registry apply)
+# A table without a recognised header falls back to the first `backticked`
+# cell, then to column 3. Tilde expansion: $HOME prefix.
 resolve_path() {
   local slug="$1"
   python3 - "$REGISTRY" "$slug" <<'PY'
 import os, re, sys
 reg, slug = sys.argv[1], sys.argv[2]
 home = os.path.expanduser("~")
+PATH_HEADERS = {"path", "путь"}
+path_col = None
 with open(reg, encoding="utf-8") as f:
     for line in f:
         if not line.startswith("|"):
+            path_col = None  # any non-table line ends the current table
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 3:
+        if cells and cells[0].lower() == "slug":
+            heads = [c.lower() for c in cells]
+            path_col = next((i for i, h in enumerate(heads) if h in PATH_HEADERS), None)
+            continue
+        if len(cells) < 3 or set(cells[0]) <= set("-: "):
             continue
         if cells[0] == slug:
-            raw = cells[2].strip("`")
+            if path_col is not None and path_col < len(cells):
+                raw = cells[path_col]
+            else:
+                raw = next((c for c in cells[1:] if c.startswith("`") and c.endswith("`")), cells[2])
+            raw = raw.strip("`")
             if raw.startswith("~"):
                 raw = home + raw[1:]
             print(raw)
@@ -115,6 +136,10 @@ sys.exit(1)
 PY
 }
 
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "⨯ $REGISTRY not found" >&2
+  exit 3
+fi
 PROJECT_DIR="$(resolve_path "$SLUG" || true)"
 if [[ -z "$PROJECT_DIR" ]]; then
   echo "⨯ slug '$SLUG' not found in $REGISTRY" >&2
@@ -176,6 +201,7 @@ if [[ "$OUTPUT_FORMAT" == "text" ]]; then
     --cwd "$PROJECT_DIR"
     --timeout "$TIMEOUT"
     --resume-key "project:$SLUG"
+    --allow-edits
   )
   [[ $FRESH -eq 1 ]] && cmd+=(--fresh)
   for arg in "${ADD_DIR_ARGS[@]}"; do

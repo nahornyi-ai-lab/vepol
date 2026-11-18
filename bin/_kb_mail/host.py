@@ -1,7 +1,7 @@
 """CodexHostRunner — the mail reader's host is Codex, not `claude -p`.
 
 Gmail is reachable from the background only through Codex's `gmail@openai-curated`
-plugin (owner directive: "именно кодекс должен читать"). A headless `claude -p`
+plugin (owner directive: "Codex is the one that must read it"). A headless `claude -p`
 does not carry the claude.ai Gmail connector, so the mail ProductionBackend
 spawns `codex exec` instead. Calendar keeps using _kb_mcp.McpHostRunner; only the
 mail surface routes through Codex.

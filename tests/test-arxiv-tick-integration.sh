@@ -38,6 +38,15 @@ fi
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMPHUB/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMPHUB/stub-bin/$agent"
+  chmod +x "$TMPHUB/stub-bin/$agent"
+done
+export PATH="$TMPHUB/stub-bin:$PATH" KB_CLAUDE_BIN="$TMPHUB/stub-bin/claude" KB_CODEX_BIN="$TMPHUB/stub-bin/codex"
+
 # Copy the real kb-tick + its config reader into the tmp hub (reads env KB_HUB).
 cp "$SRC_BIN/kb-tick" "$TMPHUB/bin/kb-tick"
 cp "$SRC_BIN/_kb_processes.py" "$TMPHUB/bin/_kb_processes.py"

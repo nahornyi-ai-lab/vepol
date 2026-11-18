@@ -8,7 +8,7 @@
 #
 # Flags:
 #   --check   show the current release vs. the newest tag and exit (no changes)
-#   passes VEPOL_ENABLE_* / VEPOL_APPLY_C01 through to install.sh --apply
+#   passes VEPOL_ENABLE_* / VEPOL_APPLY_C01 / VEPOL_MERGE_HOOKS through to install.sh --apply
 #
 # Project: https://github.com/nahornyi-ai-lab/vepol
 

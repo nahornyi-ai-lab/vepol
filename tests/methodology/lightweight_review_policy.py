@@ -63,12 +63,12 @@ def main() -> None:
     forbid("AGENTS.md", "Do not skip the cross-agent review gate")
     require(
         "knowledge/AGENTS.md",
-        "ровно один лёгкий независимый review",
+        "exactly one lightweight independent review",
         "GO / QUESTIONS / BLOCK",
     )
     forbid(
         "knowledge/AGENTS.md",
-        "≥2 НЕЗАВИСИМЫХ ревьюера",
+        "≥2 independent reviewers",
         "5.5. **Implementation review",
     )
     print("lightweight review policy: PASS")

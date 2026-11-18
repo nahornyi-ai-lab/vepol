@@ -1,8 +1,8 @@
-"""Subprocess spawning — ClaudeAdapter (via kb-spawn-project) and CodexAdapter.
+"""Subprocess spawning — ClaudeAdapter and CodexAdapter.
 
-Concept §16: ClaudeAdapter — thin async wrapper around existing `kb-spawn-project`
-(не re-implement аргументной логики claude -p). CodexAdapter — direct subprocess
-to `codex exec` (no existing wrapper).
+ClaudeAdapter runs `claude -p <prompt> --output-format json` directly in the
+agent's workdir (it does not go through `kb-spawn-project`). CodexAdapter runs
+`codex exec <prompt>` directly.
 
 Both adapters share the same async interface so supervisor doesn't care which
 runtime an agent uses. They take prompt text + workdir + agent_slug + run_id,
@@ -10,6 +10,11 @@ return SpawnResult with stdout, exit code, parsed JSON.
 
 stdout is streamed incrementally so watchdog.touch() can be called on each
 chunk — keeping the silence-detector honest.
+
+The child's real pid is reported through `on_started` as soon as the process
+exists, so the supervisor can watch and, if needed, stop exactly that process.
+Children run in the supervisor's process group (no new session), so only the
+child pid itself is ever signalled — never a group, never pid <= 1.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import shutil
 import signal
@@ -25,6 +31,9 @@ from pathlib import Path
 from typing import Callable
 
 from _kb_codex import CodexUnavailable, codex_bin
+
+
+logger = logging.getLogger("kb-multibot")
 
 
 @dataclasses.dataclass
@@ -48,29 +57,59 @@ class SpawnFailed(Exception):
 
 # StdoutCallback — invoked on each chunk read; supervisor passes watchdog.touch.
 StdoutCallback = Callable[[str], None]
+# StartedCallback — invoked once with the child's real pid right after start.
+StartedCallback = Callable[[int], None]
+
+
+def _refuse_signal(pid: object) -> bool:
+    """True (and an error is logged) when `pid` must never be signalled.
+
+    os.kill(-1, ...) signals every process the user owns, os.kill(0, ...) the
+    whole process group, other negative values a group, and 1 is launchd.
+    The supervisor itself and its parent are never valid targets either.
+    """
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 1
+        or pid in (os.getpid(), os.getppid())
+    ):
+        logger.error("refusing to signal pid=%r: not a spawned agent process", pid)
+        return True
+    return False
+
+
+def _executable(path: str | Path | None) -> str | None:
+    if not path:
+        return None
+    p = Path(path).expanduser()
+    if p.is_file() and os.access(p, os.X_OK):
+        return str(p)
+    return None
 
 
 def _claude_path() -> str | None:
-    """Locate `claude` CLI — prefer Homebrew native binary over nvm.
+    """Locate the `claude` CLI; the first executable hit wins.
 
-    Order of preference:
-      1. /opt/homebrew/bin/claude — native binary 2.x, no node version issues
-      2. /usr/local/bin/claude    — Intel-mac Homebrew
-      3. shutil.which("claude")   — PATH-resolved (may pick stale nvm version)
-      4. nvm fallback             — older 0.2.x, may have node-version issues
+    Order (shared with the rest of Vepol):
+      1. $KB_CLAUDE_BIN
+      2. `claude` on the current PATH
+      3. ~/.local/bin/claude      — native installer; not on launchd's PATH
+      4. /opt/homebrew/bin/claude — Apple-silicon Homebrew
+      5. /usr/local/bin/claude    — Intel-mac Homebrew
+      6. legacy nvm install       — older 0.2.x, may have node-version issues
     """
     for cand in (
-        Path("/opt/homebrew/bin/claude"),
-        Path("/usr/local/bin/claude"),
+        os.environ.get("KB_CLAUDE_BIN", "").strip(),
+        shutil.which("claude"),
+        Path.home() / ".local" / "bin" / "claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        Path.home() / ".nvm" / "versions" / "node" / "v18.20.4" / "bin" / "claude",
     ):
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return str(cand)
-    fp = shutil.which("claude")
-    if fp:
-        return fp
-    cand = Path.home() / ".nvm" / "versions" / "node" / "v18.20.4" / "bin" / "claude"
-    if cand.is_file() and os.access(cand, os.X_OK):
-        return str(cand)
+        found = _executable(cand)
+        if found:
+            return found
     return None
 
 
@@ -90,6 +129,9 @@ class BaseAdapter:
     """
 
     name: str = "base"
+    # The live child while spawn() runs; kill() signals through this handle,
+    # which refuses to signal once the child has been reaped (no pid reuse).
+    _proc: asyncio.subprocess.Process | None = None
 
     async def spawn(
         self,
@@ -100,6 +142,7 @@ class BaseAdapter:
         prompt: str,
         on_stdout_chunk: StdoutCallback | None = None,
         env: dict[str, str] | None = None,
+        on_started: StartedCallback | None = None,
     ) -> SpawnResult:
         argv = self._argv_with_prompt(prompt, workdir, agent_slug, run_id)
         if argv is None:
@@ -133,6 +176,15 @@ class BaseAdapter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            self._proc = proc
+            if on_started is not None:
+                try:
+                    on_started(proc.pid)
+                except BaseException:
+                    # Never leave a child running that nobody watches.
+                    proc.kill()
+                    await proc.wait()
+                    raise
 
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
@@ -172,20 +224,49 @@ class BaseAdapter:
                 duration_sec=duration,
             )
         finally:
+            self._proc = None
             try:
                 os.unlink(prompt_path)
             except OSError:
                 pass
 
-    async def kill(self, pid: int, *, escalate_after: float = 5.0) -> None:
-        """SIGTERM, wait `escalate_after` seconds, then SIGKILL if still alive.
+    async def kill(self, pid: int, *, escalate_after: float = 5.0) -> bool:
+        """SIGTERM, wait up to `escalate_after` seconds, then SIGKILL if still alive.
 
         Concept §7.4: kill-switch + watchdog-trip — SIGTERM → 5s → SIGKILL.
+
+        Only the single process `pid` is signalled. pid <= 1, the supervisor
+        itself and its parent are refused with a logged error and False is
+        returned (os.kill(-1) would signal every process the user owns).
+        When `pid` is the child this adapter is running, the asyncio process
+        handle is used, so a child that has already exited (and whose pid
+        may be reused) is never signalled.
         """
+        if _refuse_signal(pid):
+            return False
+        proc = self._proc
+        if proc is not None and proc.pid == pid:
+            if proc.returncode is not None:
+                return True
+            try:
+                proc.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=escalate_after)
+                return True
+            except asyncio.TimeoutError:
+                pass
+            try:
+                proc.send_signal(signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return True
+
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            return
+            return True
         await asyncio.sleep(escalate_after)
         try:
             os.kill(pid, 0)
@@ -193,6 +274,7 @@ class BaseAdapter:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        return True
 
     @staticmethod
     def _try_parse_json(stdout: str) -> dict | None:
@@ -267,6 +349,9 @@ def make_adapter(runtime: str, **kw) -> BaseAdapter:
     if runtime == "claude":
         return ClaudeAdapter(**kw)
     elif runtime == "codex":
+        # The supervisor passes resume_session_id for every runtime; codex
+        # has no warm resume here, so drop it instead of a TypeError.
+        kw.pop("resume_session_id", None)
         return CodexAdapter(**kw)
     raise ValueError(f"unknown runtime: {runtime!r}")
 

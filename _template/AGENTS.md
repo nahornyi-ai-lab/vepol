@@ -1,56 +1,55 @@
-# {{PROJECT_NAME}} — локальная схема вики
+# {{PROJECT_NAME}} — local wiki schema
 
-> Наследует мастер: [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md). Здесь — только специфика проекта.
+> Inherits the master: [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md). This file holds only what is specific to this project.
 
-## О проекте
+## About the project
 
-_(1–3 предложения: что это, зачем, для кого, в каком статусе)_
+_(1–3 sentences: what it is, why it exists, who it is for, what status it is in)_
 
-## Структура проекта
+## Project structure
 
 ```
 {{PROJECT_SLUG}}/
-├── AGENTS.md                # этот файл (canonical; читается Codex/Claude Code/Antigravity CLI)
-├── CLAUDE.md                # Claude Code adapter → AGENTS.md (≤30 строк)
-├── knowledge/               # ВСЯ вика проекта (изолирована от кода)
-│   ├── README.md            # короткое описание
-│   ├── index.md             # каталог страниц
-│   ├── log.md               # лог
-│   ├── state.md             # текущее состояние
-│   ├── raw/                 # immutable источники
-│   │   └── assets/          # картинки
-│   ├── sources/             # саммари raw-документов
-│   ├── agents/              # одна карточка проекта: agent-card.md (общая для всех runtime; identity = роль проекта, не вендор)
-│   └── <категории>/         # специфичные для проекта
-└── <code-dirs>/             # код проекта — сиблинги к knowledge/
+├── AGENTS.md                # this file (canonical; read by Codex/Claude Code/Antigravity CLI)
+├── knowledge/               # the WHOLE project wiki (kept separate from the code)
+│   ├── README.md            # short description
+│   ├── index.md             # page catalog
+│   ├── log.md               # log
+│   ├── state.md             # current state
+│   ├── raw/                 # immutable sources
+│   │   └── assets/          # images
+│   ├── sources/             # summaries of raw documents
+│   ├── agents/              # one project card: agent-card.md (shared by all runtimes; identity = project role, not vendor)
+│   └── <categories>/        # project-specific
+└── <code-dirs>/             # project code — siblings of knowledge/
 ```
 
-## Категории (начальный набор)
+## Categories (starter set)
 
-_(перечислить, какие подпапки в `knowledge/` имеют смысл для этого проекта. Примеры:_
-- _для лидген-проекта: `icp/`, `offers/`, `channels/`, `funnel/`, `metrics/`, `experiments/`, `agent-specs/`_
-- _для проекта-библиотеки: `api/`, `patterns/`, `decisions/`_
-- _для pet-эксперимента: возможно, только `sources/` и `experiments/`)_
+_(list which subfolders of `knowledge/` make sense for this project. Examples:_
+- _for a lead-gen project: `icp/`, `offers/`, `channels/`, `funnel/`, `metrics/`, `experiments/`, `agent-specs/`_
+- _for a library project: `api/`, `patterns/`, `decisions/`_
+- _for a pet experiment: maybe just `sources/` and `experiments/`)_
 
-## Границы автономии
+## Autonomy boundaries
 
-Что агент может делать без подтверждения, а что — только с ревью.
+What the agent may do without confirmation, and what only after review.
 
-- **Свободно:** создавать/обновлять страницы в `knowledge/`, апдейтить `log.md`, `state.md`, `index.md`.
-- **С подтверждением:** изменения в code-dirs проекта, создание новых категорий в `knowledge/`, удаление страниц.
-- **Никогда:** трогать `knowledge/raw/`, пушить в git без команды, удалять чужие файлы вне `knowledge/`.
+- **Freely:** create/update pages in `knowledge/`, update `log.md`, `state.md`, `index.md`.
+- **With confirmation:** changes in the project's code dirs, new categories in `knowledge/`, deleting pages.
+- **Never:** touch `knowledge/raw/`, push to git without being asked, delete other people's files outside `knowledge/`.
 
 ## Agent card
 
-В проекте — **одна карточка на роль** (не одна на runtime): `knowledge/agents/agent-card.md`. Identity привязана к роли проекта; Claude Code, Codex, Antigravity CLI и будущие runtime работают по одной и той же карточке. Runtime-различия (что доступно Claude, что — Codex, …) живут в секции `## Operating notes` внутри карточки.
+The project has **one card per role** (not one per runtime): `knowledge/agents/agent-card.md`. Identity is tied to the project role; Claude Code, Codex, Antigravity CLI and future runtimes all work from the same card. Runtime differences (what Claude can use, what Codex can use, …) live in the card's `## Operating notes` section.
 
-При каждом старте новой сессии — до первого содержательного ответа или действия — агент обязан иметь startup context: agent card, `knowledge/state.md`, свежий срез `knowledge/log.md`, active work/open escalations и компактный incident-срез. Нормальный путь — hook-injected `Startup Context Manifest`; если manifest есть, перечисленные в нём срезы считаются прочитанными, и агент не перечитывает `knowledge/index.md`, полный `knowledge/incidents.md` или весь `knowledge/backlog.md` только ради формальности. Если manifest нет (hook-less runtime), запусти `~/knowledge/bin/kb-session-start --print --cwd "$PWD"` или вручную прочитай: карточку по иерархии `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → явный fallback «карточки нет», `knowledge/state.md`, `tail -n 80 knowledge/log.md` (fallback 160 при <3 датированных записей), active work через `kb-board`, открытые эскалации и `## Prevention rules` / `## Ongoing` из `knowledge/incidents.md` при наличии. `knowledge/index.md` и полный `knowledge/incidents.md` — on-demand навигация/диагностика, не startup load. Вопрос «кто ты / представься» не является триггером чтения: отвечать по уже прочитанному `## Self-introduction`, не generic-описанием вендора. Полная схема — в [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md#session-startup-context).
+At every new session start — before the first substantive answer or action — the agent must have startup context: the agent card, `knowledge/state.md`, a recent `knowledge/log.md` slice, active work/open escalations, and a compact incident slice. The normal path is the hook-injected `Startup Context Manifest`; when the manifest is present, the slices it lists count as already read, and the agent does not reread `knowledge/index.md`, the full `knowledge/incidents.md`, or the whole `knowledge/backlog.md` just as a formality. If there is no manifest (hook-less runtime), run `~/knowledge/bin/kb-session-start --print --cwd "$PWD"` or read manually: the card along the hierarchy `knowledge/agents/agent-card.md` → `~/knowledge/agents/agent-card.md` → explicit "no card" fallback, `knowledge/state.md`, `tail -n 80 knowledge/log.md` (fallback 160 when there are <3 dated entries), active work via `kb-board`, open escalations, and `## Prevention rules` / `## Ongoing` from `knowledge/incidents.md` when present. `knowledge/index.md` and the full `knowledge/incidents.md` are on-demand navigation/diagnostics, not startup load. A "who are you / introduce yourself" question is not a trigger to read anything: answer from the already-read `## Self-introduction`, not with a generic vendor description. Full schema: [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md#session-startup-context).
 
-Если карточки в проекте ещё нет — агент явно сообщает об этом и предлагает завести. Образец — `~/knowledge/_template/knowledge/agents/_example.md` (после `new-wiki` он автоматически копируется в `knowledge/agents/_example.md`). Первая операция: `cp knowledge/agents/_example.md knowledge/agents/agent-card.md` и заполнить под проект.
+If the project has no card yet, the agent says so explicitly and offers to create one. The sample is `~/knowledge/_template/knowledge/agents/_example.md` (`new-wiki` copies it to `knowledge/agents/_example.md` automatically). First step: `cp knowledge/agents/_example.md knowledge/agents/agent-card.md`, then fill it in for the project.
 
 ## State contract
 
-`knowledge/state.md` — текущая приборная панель проекта, не лог и не архив. Пиши overwrite-only: когда реальность меняется, записывай событие в `knowledge/log.md` (если оно durable), затем заменяй устаревшую строку в `state.md`. Исторические даты, proof, review results, resolved blockers и старые snapshots уходят в `log.md`, `reports/`, `decisions/`, `sources/` или тематические страницы. Текущие дедлайны, активные офферы, метрики, freshness дат и `Last Updated` допустимы.
+`knowledge/state.md` is the project's current dashboard, not a log and not an archive. Write it overwrite-only: when reality changes, record the event in `knowledge/log.md` (if it is durable), then replace the stale line in `state.md`. Historical dates, proof, review results, resolved blockers and old snapshots go to `log.md`, `reports/`, `decisions/`, `sources/` or thematic pages. Current deadlines, active offers, metrics, date freshness and `Last Updated` are allowed.
 
 ## Owner-approved spec gate
 
@@ -58,19 +57,19 @@ For non-trivial work, the path is mandatory: research -> one lightweight indepen
 
 ## Cross-orchestrator CLI launch
 
-Агенты на этой машине могут запускать локальные CLI (Claude Code, Codex, Antigravity `agy`, Grok, OpenCode, NotebookLM) через shared matrix: [`~/knowledge/solutions/cli-agent-runtime-launch.md`](~/knowledge/solutions/cli-agent-runtime-launch.md). **Живой ростер** — какие из них реально установлены здесь и когда какой звать — в `knowledge/.active-roster.md` (автогенерится `kb-cli-roster`, инжектится в каждую Claude/Codex-сессию; оркестраторы без хука читают файл сами). Без версий, gitignored.
+Agents on this machine can launch local CLIs (Claude Code, Codex, Antigravity `agy`, Grok, OpenCode, NotebookLM). The **live roster** — which of them are actually installed here and when to call which — is [`~/knowledge/.active-roster.md`](~/knowledge/.active-roster.md) (this project's copy: `knowledge/.active-roster.md`). `kb-cli-roster` generates it and the SessionStart hook injects it into every Claude/Codex session; orchestrators without the hook read the file themselves. No versions, gitignored. The launch rule is in the hub contract: [`~/knowledge/AGENTS.md`](~/knowledge/AGENTS.md#cross-orchestrator-cli-launch-matrix).
 
-## Метрики проекта
+## Project metrics
 
-_(какие цифры меряем, откуда они приходят, как часто обновляются → см. `knowledge/metrics/` если есть)_
+_(which numbers we measure, where they come from, how often they update → see `knowledge/metrics/` if it exists)_
 
-## Связанные проекты в хабе
+## Related projects in the hub
 
-_(симлинки на другие проекты, с которыми есть пересечения — обновлять по мере появления связей)_
+_(symlinks to other projects this one overlaps with — update as connections appear)_
 
 ## Significant external state changes (entity events)
 
-При любом значимом изменении внешнего состояния проекта — обязательная запись в `knowledge/log.md` строкой с грепабельным префиксом:
+Any significant change to the project's external state must be recorded in `knowledge/log.md` as a line with a greppable prefix:
 
 ```
 ## [YYYY-MM-DD] <category> | <action> | <project_slug> | <one-line description> [→ <provider>:<external_ref>]
@@ -78,19 +77,19 @@ _(симлинки на другие проекты, с которыми ест�
 
 - **Categories:** `publish | account | subscription | person | company | asset`
 - **Actions:** `created | updated | renamed | deprecated | cancelled | closed | transferred | deleted`
-- `<project_slug>` — slug этого проекта (тот, под которым он живёт в `~/knowledge/registry.md`).
-- `<provider>:<external_ref>` — опционально, но **сильно** рекомендуется когда есть стабильный внешний референт (домен/handle/bundle-id/url). Это ключ для deterministic upsert при hub-rollup'е.
+- `<project_slug>` — this project's slug (the one it lives under in `~/knowledge/registry.md`).
+- `<provider>:<external_ref>` — optional, but **strongly** recommended when there is a stable external referent (domain/handle/bundle-id/url). It is the key for the deterministic upsert during the hub rollup.
 
-**Когда писать:**
+**When to write:**
 
-- `publish` — публикация артефакта (App Store / Play Store / npm / pypi / production-домен), отзыв публикации.
-- `account` — регистрация нового developer-аккаунта (Apple Dev, Google Play, Cloudflare, Stripe, Vercel, GitHub Org, etc.), закрытие аккаунта, передача владения.
-- `subscription` — новая платная подписка/SaaS (Holded, MS365, OpenAI API, Linear, etc.), смена плана, отписка.
-- `person` — появление key-партнёра-человека (клиент, коллега, broker, fundraising-контакт), смена роли, ровно один alias-merge при `renamed`.
-- `company` — клиент / партнёр / провайдер / конкурент / target-investor.
-- `asset` — hardware (Mac/iPhone/часы/весы/рутер), virtual asset (домен, IP, физический ключ), ключ-токен (только метаданные: provider, scope, location-of-secret-file, rotation-date — **никогда** не значение токена).
+- `publish` — an artifact is published (App Store / Play Store / npm / pypi / production domain) or unpublished.
+- `account` — a new developer account is registered (Apple Dev, Google Play, Cloudflare, Stripe, Vercel, GitHub Org, etc.), an account is closed, ownership is transferred.
+- `subscription` — a new paid subscription/SaaS (Holded, MS365, OpenAI API, Linear, etc.), a plan change, a cancellation.
+- `person` — a key person appears (client, colleague, broker, fundraising contact), a role changes, exactly one alias merge on `renamed`.
+- `company` — client / partner / provider / competitor / target investor.
+- `asset` — hardware (Mac/iPhone/watch/scale/router), virtual asset (domain, IP, physical key), key/token (metadata only: provider, scope, location-of-secret-file, rotation-date — **never** the token value).
 
-**Примеры:**
+**Examples:**
 
 ```
 ## [2026-04-22] account | created | <slug-a> | dev-account active → vendor.com:user [at] example.com
@@ -100,4 +99,4 @@ _(симлинки на другие проекты, с которыми ест�
 ## [2026-05-03] asset | created | <slug-b> | device-model → vendor.com:<device-uuid>
 ```
 
-**Зачем:** хабовый вечерний cron (`kb-orchestrator-cycle` retro pass) собирает эти строки → апдейтит `~/knowledge/personal/assets.md` / `people/<slug>.md` / `companies/<slug>.md`. Без префикса событие не подхватится. Спека: [`concepts/entity-extraction-cycle-pass.md`](~/knowledge/concepts/entity-extraction-cycle-pass.md).
+**Why:** the hub's evening cron (`kb-orchestrator-cycle` retro pass) collects these lines → updates `~/knowledge/personal/assets.md` / `people/<slug>.md` / `companies/<slug>.md`. Without the prefix, the event is not picked up. If the hub keeps a full spec at `~/knowledge/concepts/entity-extraction-cycle-pass.md` (optional; the installer does not ship one), it has the details.

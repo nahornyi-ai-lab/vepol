@@ -90,6 +90,25 @@ ASSETS_END = "<!-- ASSETS-DERIVED-END -->"
 SIGHTINGS_BEGIN = "<!-- SIGHTINGS-DERIVED-BEGIN -->"
 SIGHTINGS_END = "<!-- SIGHTINGS-DERIVED-END -->"
 
+# Archive section heading of personal/assets.md, keyed by the owner's
+# language (personal/profile.yaml); other languages fall back to en.
+ARCHIVE_HEADING = {
+    "en": "## Archive",
+    "ru": "## Архив",
+}
+
+
+def _owner_language(hub: Path) -> str:
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        from _kb_profile import get_language
+    except ImportError:
+        return "en"
+    return get_language(hub)
+
+
 # Secret blocklist (description redacted → counted malformed)
 SECRET_PATTERNS = [
     re.compile(r"Bearer\s+\S{20,}", re.IGNORECASE),
@@ -495,7 +514,7 @@ def _replace_managed_block(text: str, begin: str, end: str, new_inner: str) -> s
     return text[:i] + begin + "\n" + new_inner + "\n" + text[j:]
 
 
-def _render_assets_block(entities: list[dict]) -> str:
+def _render_assets_block(entities: list[dict], lang: str = "en") -> str:
     by_status: dict[str, dict[str, list[dict]]] = {"active": {}, "archive": {}}
     for ent in sorted(entities, key=lambda e: (e["category"], e["slug"], e["entity_id"])):
         if ent["category"] not in ASSETS_CATS:
@@ -542,7 +561,7 @@ def _render_assets_block(entities: list[dict]) -> str:
             for ent in rows:
                 out.append(format_row(ent))
     out.append("")
-    out.append("## Архив")
+    out.append(ARCHIVE_HEADING.get(lang, ARCHIVE_HEADING["en"]))
     if not any(by_status["archive"].values()):
         out.append("")
         out.append("_(no archived entities)_")
@@ -569,7 +588,7 @@ def write_assets_md(hub: Path, entities: list[dict]) -> None:
             "---\ntitle: Assets\n---\n\n# Assets\n\n"
             f"{ASSETS_BEGIN}\n{ASSETS_END}\n"
         )
-    new_inner = _render_assets_block(entities)
+    new_inner = _render_assets_block(entities, _owner_language(hub))
     new_text = _replace_managed_block(text, ASSETS_BEGIN, ASSETS_END, new_inner)
     atomic_write_text(p, new_text)
 

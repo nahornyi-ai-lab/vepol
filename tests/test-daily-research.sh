@@ -21,6 +21,15 @@ FIXTURE="$TMPHUB/fixtures/radar.json"
 ok() { echo "  ✓ $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
+# Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
+# default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
+mkdir -p "$TMPHUB/stub-bin"
+for agent in claude codex; do
+  printf '#!/bin/sh\necho "%s is disabled in tests" >&2\nexit 97\n' "$agent" >"$TMPHUB/stub-bin/$agent"
+  chmod +x "$TMPHUB/stub-bin/$agent"
+done
+export PATH="$TMPHUB/stub-bin:$PATH" KB_CLAUDE_BIN="$TMPHUB/stub-bin/claude" KB_CODEX_BIN="$TMPHUB/stub-bin/codex"
+
 cat > "$TMPHUB/projects/demo-project/state.md" <<'EOF'
 # demo-project — state
 
@@ -153,6 +162,9 @@ grep -q "Watchlist" "$PACKET" && ok "T1: watchlist present" || fail "T1: watchli
 [[ ! -e "$TMPHUB/reports/daily-research-audio-$DATE1.mp3" ]] && ok "T1: no local mp3 downloaded" || fail "T1: unexpected local mp3"
 grep -q '^source add https://openai.com/index/running-codex-safely/' "$CALL_LOG" && ok "T1: official URL source added" || fail "T1: official URL source not added"
 grep -q '^source add-research ' "$CALL_LOG" && fail "T1: add-research should not run in radar mode" || ok "T1: add-research not called"
+grep -q "in the user's language (Russian)" "$PACKET" && ok "T1: packet carries the user-language directive" || fail "T1: packet language directive missing"
+grep -q -- "^generate audio .*--language ru .*in the user's language (Russian)" "$CALL_LOG" \
+  && ok "T1: audio requested in the configured language (ru)" || fail "T1: audio language/directive wrong"
 python3 - "$MANIFEST" <<'PYEOF' && ok "T1: manifest records radar metadata" || fail "T1: manifest invalid"
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -276,6 +288,118 @@ R3=$?
 R4=$?
 set -e
 [[ $R1 -ne 0 && $R2 -ne 0 && $R3 -ne 0 && $R4 -eq 0 ]] && ok "T8: retries cap after 3 failures" || fail "T8: rc sequence $R1/$R2/$R3/$R4"
+
+echo "=== T9 topic commands change only their own keys in the shared yaml ==="
+CFG="$TMPHUB/personal/daily-research.yaml"
+cat > "$CFG" <<'EOF'
+# learning digest settings (kb-learning-arxiv)
+max_papers: 2
+arxiv_categories: [cs.AI, cs.CL]
+social_check: grok
+focus_context: shipping the morning audio  # owner note
+mode: ai_agents_radar
+EOF
+"$REAL_BIN" --set-topic "MCP tool safety" >/dev/null
+grep -q "^max_papers: 2$" "$CFG" && grep -q "^arxiv_categories: \[cs.AI, cs.CL\]$" "$CFG" \
+  && grep -q "^social_check: grok$" "$CFG" && grep -q "^focus_context: shipping the morning audio  # owner note$" "$CFG" \
+  && grep -q "^# learning digest settings" "$CFG" \
+  && ok "T9: --set-topic keeps the learning digest settings and comments" || fail "T9: --set-topic dropped other keys"
+[[ $(grep -c "^mode:" "$CFG") == 1 ]] && grep -q "^mode: override$" "$CFG" && grep -q "^topic_override: MCP tool safety$" "$CFG" \
+  && ok "T9: --set-topic rewrites mode in place and adds topic_override" || fail "T9: topic keys wrong"
+if grep -qE "^(research_mode|source_mode|max_attempts|max_sources|focus_project):" "$CFG"; then
+  fail "T9: --set-topic added keys it does not own"
+else
+  ok "T9: --set-topic adds no other keys"
+fi
+"$REAL_BIN" --auto-topic >/dev/null
+grep -q "^mode: ai_agents_radar$" "$CFG" && grep -q '^topic_override: ""$' "$CFG" && grep -q "^source_mode: curated$" "$CFG" \
+  && grep -q "^max_papers: 2$" "$CFG" && grep -q "^social_check: grok$" "$CFG" \
+  && ok "T9: --auto-topic keeps the learning keys" || fail "T9: --auto-topic clobbered the file"
+"$REAL_BIN" --legacy-auto-topic >/dev/null
+grep -q "^mode: auto$" "$CFG" && grep -q "^focus_context: shipping" "$CFG" \
+  && ok "T9: --legacy-auto-topic keeps the learning keys" || fail "T9: --legacy-auto-topic clobbered the file"
+
+echo "=== T10 a run never creates daily-research.yaml (no legacy keys seeded) ==="
+rm -f "$CFG"
+write_mock 0
+export KB_DAILY_RESEARCH_COLLECTOR_FIXTURE="$FIXTURE"
+"$REAL_BIN" --date "2026-06-01" >/dev/null 2>&1 || true
+[[ ! -e "$CFG" ]] && ok "T10: no config file is auto-created" || fail "T10: config auto-created: $(cat "$CFG")"
+
+echo "=== T11 --text-only: Telegram not configured is not an error ==="
+cat > "$TMPHUB/bin/kb-channel-send" <<EOF
+#!/usr/bin/env bash
+echo "\$1" >> "$TMPHUB/channel-calls.log"
+exit \$(cat "$TMPHUB/channel-rc" 2>/dev/null || echo 0)
+EOF
+chmod +x "$TMPHUB/bin/kb-channel-send"
+echo 3 > "$TMPHUB/channel-rc"
+DATE6="2026-06-02"
+set +e
+KB_PROCESS_BACKGROUND=1 "$REAL_BIN" --date "$DATE6" --text-only >/dev/null 2>&1
+R=$?
+set -e
+M6="$TMPHUB/.orchestrator/daily-research-$DATE6.json"
+[[ $R -eq 0 ]] && ok "T11: exit 3 from kb-channel-send → rc=0" || fail "T11: rc=$R"
+python3 - "$M6" <<'PYEOF' && ok "T11: text run completed, not delivered, telegram=not_configured" || fail "T11: manifest wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["text_status"] == "completed" and m["digest_delivered"] is False, m
+assert m["telegram"] == "not_configured" and m["text_error"] is None, m
+PYEOF
+[[ -s "$TMPHUB/reports/daily-research-notebooklm-brief-$DATE6.md" ]] && ok "T11: packet kept" || fail "T11: packet missing"
+grep -q "telegram not configured" "$TMPHUB/logs/daily-research.log" && ok "T11: logged" || fail "T11: no log line"
+echo 1 > "$TMPHUB/channel-rc"
+set +e
+KB_PROCESS_BACKGROUND=1 "$REAL_BIN" --date "2026-06-03" --text-only >/dev/null 2>&1
+R=$?
+set -e
+[[ $R -ne 0 ]] && ok "T11: a real send failure still returns rc!=0" || fail "T11: real failure returned rc=0"
+
+echo "=== T12 the arXiv lane reads the snapshot kb-learning-arxiv writes ==="
+DATE7="2026-06-04"
+mkdir -p "$TMPHUB/sources"
+cat > "$TMPHUB/sources/arxiv-learning-snapshot-$DATE7.md" <<'EOF'
+---
+type: source
+kind: arxiv-learning-snapshot
+selected: 2
+---
+
+# arXiv learning snapshot — 2026-06-04
+
+## Selected
+
+- **Agentic Planning with Tool Use for LLM Agents** — Alice Researcher, Bob Scholar
+  https://arxiv.org/abs/2606.10001 · cs.AI · 2026-06-03
+  scores: {"final": 41}
+  reason: topics=agents,tools
+  We study long-horizon planning for autonomous agents with MCP tool calls.
+
+- **Memory-Augmented Retrieval for Knowledge-Base Agents** — Carol Author
+  https://arxiv.org/abs/2606.10002 · cs.AI · 2026-06-03
+  scores: {"final": 37}
+  reason: topics=memory,agents
+  We investigate persistent memory and retrieval for agent knowledge bases.
+
+## Runner-ups
+
+- 2606.10004 **Agentic Planning: An Extended Study** — near-duplicate (final=30)
+EOF
+ARXIV_OUT=$(python3 - "$REAL_BIN" "$DATE7" <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("dr", sys.argv[1])
+spec = importlib.util.spec_from_loader("dr", loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+for c in mod.collect_arxiv_candidates(sys.argv[2]):
+    print(c["title"], c["url"], c["source_type"])
+PYEOF
+)
+EXPECTED_ARXIV=$'Agentic Planning with Tool Use for LLM Agents https://arxiv.org/abs/2606.10001 paper\nMemory-Augmented Retrieval for Knowledge-Base Agents https://arxiv.org/abs/2606.10002 paper'
+[[ "$ARXIV_OUT" == "$EXPECTED_ARXIV" ]] \
+  && ok "T12: the selected papers of the learning snapshot feed the paper lane (runner-ups skipped)" \
+  || fail "T12: arXiv lane output: $(tr '\n' '|' <<<"$ARXIV_OUT")"
 
 echo
 echo "=== daily-research tests: $PASS passed, $FAIL failed ==="

@@ -12,6 +12,11 @@ Usage:
   kb-task "task text" --by hub|user|self                        # who set the task (default: self)
   kb-task "task text" --context "<1-line context>"              # optional context suffix
   kb-task "task text" --due "..." --calendar                    # proposes a follow-up reminder (owner approves)
+  kb-task "task text" --json                                    # prints kb-board's JSON result instead of the ✓ line
+
+On success it prints one line, `✓ Added to <target> board (id: <plan_item_id>)`.
+With --json, stdout carries only kb-board's JSON result; --calendar messages go
+to stderr in that mode.
 
 `--calendar` does NOT write Google Calendar directly. It records a pending
 follow-up proposal (via the shared calendar approval gate) and prints the
@@ -33,9 +38,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 HUB = pathlib.Path(os.environ.get("KB_HUB", os.path.expanduser("~/knowledge")))
 KB_BOARD = HUB / "bin" / "kb-board"
+if not KB_BOARD.exists():
+    # A hub without bin/ (the demo, a test hub): use the kb-board that ships next to this script.
+    KB_BOARD = pathlib.Path(os.path.dirname(os.path.realpath(__file__))) / "kb-board"
 
 
-def propose_calendar_followup(task: str, when: str, context: str | None) -> None:
+def propose_calendar_followup(task: str, when: str, context: str | None, out=None) -> None:
     """Create a pending follow-up proposal instead of writing the calendar.
 
     `--calendar` no longer creates a Google Calendar event directly. All
@@ -74,8 +82,9 @@ def propose_calendar_followup(task: str, when: str, context: str | None) -> None
         "approval": None,
         "calendar": None,
     })
-    print(f"📌 Follow-up proposed (no calendar write yet): {fid} @ {parsed['start']}")
-    print(f"   approve: kb-followup approve {fid} --approval-source \"chat:<your ok>\"")
+    out = out or sys.stdout
+    print(f"📌 Follow-up proposed (no calendar write yet): {fid} @ {parsed['start']}", file=out)
+    print(f"   approve: kb-followup approve {fid} --approval-source \"chat:<your ok>\"", file=out)
 
 
 def main() -> None:
@@ -88,6 +97,8 @@ def main() -> None:
     p.add_argument("--context", help="Optional one-line context")
     p.add_argument("--calendar", action="store_true",
                    help="Propose an owner-approval-gated follow-up reminder (requires --due)")
+    p.add_argument("--json", action="store_true", dest="json_out",
+                   help="Print kb-board's JSON result instead of the summary line")
     args = p.parse_args()
 
     slug = args.project if args.project else "hub"
@@ -110,6 +121,8 @@ def main() -> None:
         cmd += ["--field", f"due={args.due}"]
     if args.context:
         cmd += ["--body", args.context]
+    if args.json_out:
+        cmd.append("--json")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -117,15 +130,19 @@ def main() -> None:
         print(result.stderr, end="", file=sys.stderr)
         sys.exit(result.returncode)
 
-    target = f"project '{args.project}'" if args.project else "hub"
-    print(f"✓ Added to {target} board (via kb-board append)")
-    print(result.stdout.rstrip())
+    if args.json_out:
+        # Machine-readable mode: stdout is kb-board's JSON result and nothing else.
+        print(result.stdout.rstrip())
+    else:
+        target = f"project '{args.project}'" if args.project else "hub"
+        print(f"✓ Added to {target} board (id: {plan_item_id})")
 
     if args.calendar:
         if not args.due:
             print("⚠ --calendar requires --due; skipped.", file=sys.stderr)
         else:
-            propose_calendar_followup(args.text, args.due, args.context)
+            propose_calendar_followup(args.text, args.due, args.context,
+                                      out=sys.stderr if args.json_out else sys.stdout)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # Vepol — Mind Map
 
+> **Generated from earlier docs.** NotebookLM drew this map from earlier versions of the Vepol docs, so it shows the product vision. A few labels are out of date: page content follows the language in your profile (English by default), Node.js and Bun are optional, and "Privacy-aware sync (Seed as IaC)" is a maintainer tool that does not ship with Vepol. "User Overlay" means your own files in `~/knowledge/`. The [main README](../../README.md) and [docs/features.md](../features.md) describe what ships today.
+
 Visual map of the system, generated from Vepol's public docs (README, LICENSE-FUTURE, COMMERCIAL, methodology, hub schema).
 
 GitHub renders the diagram below natively. For an editable JSON tree (use with mind-map tools), see `vepol-mindmap.json` in this folder.

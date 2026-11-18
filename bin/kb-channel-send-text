@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Send exactly one frozen private text part with typed Telegram outcomes."""
+"""Send exactly one frozen private text part with typed Telegram outcomes.
+
+Usage: kb-channel-send-text <message_type> <0600 part file>
+
+Credentials (per variable: the environment wins, $KB_HUB/personal/.secrets,
+read as data, fills gaps): TELEGRAM_BOT_TOKEN (or legacy TELEGRAM_TOKEN) and
+TELEGRAM_CHAT_ID. The token never appears in any argv.
+
+Prints one JSON object on stdout. Exit codes:
+   0  success (with message_id)
+   3  telegram not configured: the token or chat id is empty or missing in
+      the environment and in .secrets; one stderr line, no network call
+  20  known rejection (definitely not delivered)
+  21  ambiguous (transmission may have begun)
+"""
 
 from __future__ import annotations
 
@@ -15,7 +29,33 @@ from urllib.parse import urlencode, urlsplit
 
 
 MAX_UTF16 = 3500
-MESSAGE_TYPES = {"brief", "brief_error", "agent_review"}
+# The retro is one unsplit message and used to go straight to Telegram, so it
+# keeps Telegram's own limit (4096 UTF-16 units) instead of the brief's parts.
+MAX_UTF16_BY_TYPE = {"retro": 4096, "retro_error": 4096}
+MESSAGE_TYPES = {"brief", "brief_error", "agent_review", "retro", "retro_error"}
+EXIT_NOT_CONFIGURED = 3
+
+
+def read_secret(key: str) -> str:
+    """Last `KEY=value` line of .secrets (optional `export `, quotes
+    stripped). The file is data, never executed."""
+    hub = os.environ.get("KB_HUB") or os.path.join(os.path.expanduser("~"), "knowledge")
+    try:
+        lines = Path(hub, "personal", ".secrets").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    value = ""
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, rest = line.split("=", 1)
+        if re.sub(r"^export[ \t]+", "", name.strip()) == key:
+            value = rest.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
 
 
 def emit(outcome: str, message_id=None, reason: str | None = None) -> None:
@@ -46,12 +86,17 @@ def main() -> int:
         text = raw.decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
         return reject("invalid_private_part")
-    if not text or len(text.encode("utf-16-le")) // 2 > MAX_UTF16:
+    if not text or len(text.encode("utf-16-le")) // 2 > MAX_UTF16_BY_TYPE.get(sys.argv[1], MAX_UTF16):
         return reject("invalid_private_part")
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id or not re.fullmatch(r"[^\s/]+", token):
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
+             or read_secret("TELEGRAM_BOT_TOKEN") or read_secret("TELEGRAM_TOKEN"))
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or read_secret("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("telegram not configured", file=sys.stderr)
+        emit("not_configured", reason="telegram_not_configured")
+        return EXIT_NOT_CONFIGURED
+    if not re.fullmatch(r"[^\s/]+", token):
         return reject("missing_credentials")
     try:
         timeout = float(os.environ.get("KB_TG_TEXT_TIMEOUT", "20"))

@@ -77,6 +77,7 @@ def make_hub(with_b_state=True):
     hub = Path(tempfile.mkdtemp(prefix="child-rollup-test-"))
     TEMPS.append(hub)
     (hub / "personal").mkdir()
+    # Language ru on purpose: the checks below assert the Russian labels a ru owner sees.
     (hub / "personal" / "profile.yaml").write_text("language: ru\n", encoding="utf-8")
     for slug in ("p", "a", "b"):
         (hub / slug / "knowledge").mkdir(parents=True)
