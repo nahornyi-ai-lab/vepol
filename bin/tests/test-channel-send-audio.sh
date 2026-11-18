@@ -50,6 +50,7 @@ SRV="$TMP/server"
 mkdir -p "$SRV"
 cat >"$SRV/fake_tg.py" <<'PY'
 import json, os, sys, time
+import socketserver
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -113,14 +114,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+class Server(HTTPServer):
+    def server_bind(self):  # skip HTTPServer's reverse-DNS lookup (it can take seconds on CI runners)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+Server(("127.0.0.1", port), Handler).serve_forever()
 PY
 
 PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
 printf 'success' >"$SRV/mode"
 python3 "$SRV/fake_tg.py" "$SRV" "$PORT" &
 SERVER_PID=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 200); do
   python3 - "$PORT" <<'PY' 2>/dev/null && break
 import socket, sys
 with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=.2):

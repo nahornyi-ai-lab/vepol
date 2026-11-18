@@ -33,7 +33,7 @@ fi
 # Fake Telegram: records every sendMessage text (one JSON line per request);
 # mode file: ok | reject | reject-second.
 cat > "$TMP/server.py" <<'PY'
-import http.server, json, os, sys
+import http.server, json, os, socketserver, sys
 from urllib.parse import parse_qs
 root = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
@@ -53,13 +53,17 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(400 if bad else 200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
-s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+class Server(http.server.ThreadingHTTPServer):
+    def server_bind(self):  # skip HTTPServer's reverse-DNS lookup (it can take seconds on CI runners)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+s = Server(("127.0.0.1", 0), H)
 open(os.path.join(root, "port"), "w").write(str(s.server_port))
 s.serve_forever()
 PY
 echo ok > "$TMP/mode"
 python3 "$TMP/server.py" "$TMP" & SERVER_PID=$!
-for _ in $(seq 1 50); do [[ -s "$TMP/port" ]] && break; sleep 0.05; done
+for _ in $(seq 1 200); do [[ -s "$TMP/port" ]] && break; sleep 0.05; done
 API="http://127.0.0.1:$(cat "$TMP/port")"
 
 # curl wrapper first on PATH: records every curl argv, so a token on the

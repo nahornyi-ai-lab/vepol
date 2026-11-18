@@ -218,7 +218,7 @@ echo "=== R2: kb-retro delivers with the installer's TELEGRAM_BOT_TOKEN only ===
 # install.sh writes TELEGRAM_BOT_TOKEN (not the legacy TELEGRAM_TOKEN). The
 # send goes to a local fake Telegram API: no network, no real bot.
 cat > "$TMP/fake_tg.py" <<'PY'
-import http.server, json, os, sys
+import http.server, json, os, socketserver, sys
 from urllib.parse import parse_qs
 root = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
@@ -231,19 +231,29 @@ class H(http.server.BaseHTTPRequestHandler):
         body = json.dumps({"ok": True, "result": {"message_id": 77}}).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
-s = http.server.HTTPServer(("127.0.0.1", 0), H)
+class Server(http.server.HTTPServer):
+    def server_bind(self):  # skip HTTPServer's reverse-DNS lookup (it can take seconds on CI runners)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+s = Server(("127.0.0.1", 0), H)
 open(os.path.join(root, "tg-port"), "w").write(str(s.server_port))
 s.serve_forever()
 PY
 $PY "$TMP/fake_tg.py" "$TMP" & FAKE_TG_PID=$!
-for _ in $(seq 1 50); do [[ -s "$TMP/tg-port" ]] && break; sleep 0.05; done
+for _ in $(seq 1 200); do [[ -s "$TMP/tg-port" ]] && break; sleep 0.05; done
+[[ -s "$TMP/tg-port" ]] || echo "  (fake Telegram API did not start within 10s)"
 HUB=$(new_hub retro-bot-token en)
 printf 'TELEGRAM_BOT_TOKEN=bot-token-only\nTELEGRAM_CHAT_ID=42\n' > "$HUB/personal/.secrets"
 write_orch "$HUB" 0
 OUT=$(env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID KB_HUB="$HUB" \
-  KB_TG_API_BASE="http://127.0.0.1:$(cat "$TMP/tg-port" 2>/dev/null)" zsh "$SRC_BIN/kb-retro" 2>/dev/null)
+  KB_TG_API_BASE="http://127.0.0.1:$(cat "$TMP/tg-port" 2>/dev/null)" zsh "$SRC_BIN/kb-retro" 2>"$TMP/r2-stderr")
 RC=$?
-[[ "$RC" == "0" ]] && ok "R2: retro exits 0 with only TELEGRAM_BOT_TOKEN" || fail "R2: rc=$RC"
+if [[ "$RC" == "0" ]]; then
+  ok "R2: retro exits 0 with only TELEGRAM_BOT_TOKEN"
+else
+  fail "R2: rc=$RC"
+  tail -n 5 "$TMP/r2-stderr" "$HUB/logs/retro.log" 2>/dev/null | sed 's/^/      /'
+fi
 grep -q "^/botbot-token-only/sendMessage.*stub retro body" "$TMP/tg-requests.log" 2>/dev/null \
   && ok "R2: retro sent with TELEGRAM_BOT_TOKEN" || fail "R2: no send ($(cat "$TMP/tg-requests.log" 2>/dev/null))"
 grep -q "^retro_delivery: telegram_ok$" "$HUB/briefs/$(date +%Y-%m-%d).md" 2>/dev/null \

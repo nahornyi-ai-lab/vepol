@@ -43,6 +43,7 @@ fail() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 # ---------------------------------------------------------------------------
 cat > "$SRV/fake_tg.py" <<'PYEOF'
 import json, os, re, sys
+import socketserver
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SRV = os.path.dirname(os.path.abspath(__file__))
@@ -105,13 +106,18 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1])
-    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    class Server(HTTPServer):
+        def server_bind(self):  # skip HTTPServer's reverse-DNS lookup (it can take seconds on CI runners)
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    Server(("127.0.0.1", port), H).serve_forever()
 PYEOF
 
 PORT=$($PY -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
 $PY "$SRV/fake_tg.py" "$PORT" &
 SRV_PID=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
   $PY -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$PORT/botX/getUpdates', data=b'{}', timeout=1)" 2>/dev/null && break
   sleep 0.1
 done
