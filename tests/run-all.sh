@@ -176,7 +176,16 @@ for suite in bin/tests/test-brief-reliability.sh bin/tests/test-morning-brief-fi
              bin/tests/test-mail-brief-envelope.sh tests/test-daily-research.sh \
              tests/test-money-radar.sh tests/test-user-language.sh \
              bin/tests/test-claude-hooks.sh bin/tests/test-channel-send-plain.sh; do
-  HOME="$COMPAT_HOME" bash "$REPO_ROOT/$suite" > /dev/null 2>&1 && pass "$suite" || { fail "$suite"; exit 1; }
+  suite_log="$(mktemp)"
+  if HOME="$COMPAT_HOME" bash "$REPO_ROOT/$suite" > "$suite_log" 2>&1; then
+    pass "$suite"
+  else
+    fail "$suite"
+    tail -n 40 "$suite_log"   # show the failing assertions, not just the red dot
+    rm -f "$suite_log"
+    exit 1
+  fi
+  rm -f "$suite_log"
 done
 
 echo

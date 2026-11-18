@@ -125,7 +125,9 @@ ID1=$(echo "$OUT" | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["id"])'
 echo "== AC4: deterministic RU/EN date parsing =="
 # -----------------------------------------------------------------------------
 parse_start() {  # parse_start <hub> <fake> <when>
-  KB_HUB="$1" KB_CALENDAR_FAKE_DIR="$2" "$FUP" propose \
+  # Pin the zone: the default is the machine's own (UTC on CI runners), and the
+  # expected starts below are 09:00 in a +02:00 summer zone.
+  KB_TZ=Europe/Berlin KB_HUB="$1" KB_CALENDAR_FAKE_DIR="$2" "$FUP" propose \
     --summary "x" --when "$3" --now "2026-06-25T08:00:00+02:00" \
     --source "chat:test" --json 2>/dev/null \
     | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["start"])' 2>/dev/null
