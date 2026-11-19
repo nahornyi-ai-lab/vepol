@@ -175,6 +175,8 @@ check "LaunchAgent descriptions match what the agents do" \
   bash -c "grep -q 'tick (every 15 min)' '$A.out' && grep -q 'planner (daily at 00:05)' '$A.out' && grep -q 'orchestrator-cycle (07:30 and 20:45, experimental)' '$A.out' && ! grep -q 'sunrise/sunset' '$A.out' && ! grep -q 'brief + retro' '$A.out'"
 # (non-interactive answers "no" to the new-install audio question → NotebookLM)
 check "receipt records the audio route" grep -q '^- audio_backend: notebooklm$' "$H"/install/receipts/*.md
+check "receipt: session_hooks=on when settings.json came from the template" \
+  grep -q '^- opt_ins: .* session_hooks=on$' "$H"/install/receipts/*.md
 
 # Re-run: existing hub files are never touched.
 sums_before="$(cd "$H" && md5 -q index.md log.md state.md backlog.md escalations.md incidents.md strategies.md registry.md 2>/dev/null || true)"
@@ -208,6 +210,11 @@ check "missing Python package → detect-only hint: pip --user, then --break-sys
     && grep -q 'python3 -m pip install --break-system-packages -r ' '$A2.out' && ! grep -q 'pip3 install' '$A2.out'"
 check "fresh --apply receipt records the NotebookLM route it created" \
   grep -q '^- audio_backend: notebooklm$' "$A2"/knowledge/install/receipts/*.md
+check "fresh --apply: Step 6 names the NotebookLM default, not an 'existing … preserved' route" \
+  bash -c "grep -q 'digest audio backend: NotebookLM (the default for a new install)' '$A2.out' \
+    && ! grep -q 'existing digest audio backend preserved' '$A2.out'"
+check "--apply without VEPOL_ENABLE_MEMORY_COMPILER says session capture was skipped" \
+  grep -q 'Skipped session capture (re-run install.sh anytime to enable)' "$A2.out"
 
 # ── B. Russian profile → Russian registry headings ───────────────────────
 B="$WORK/b"
@@ -291,11 +298,21 @@ run_install "$F1" -- --apply; rc=$?
 check "--apply without VEPOL_MERGE_HOOKS: settings.json untouched, command printed" \
   bash -c "[ $rc -eq 0 ] && cmp -s '$F1/.claude/settings.json' '$WORK/f1.before' && grep -q 'kb-claude-hooks --apply' '$F1.out'"
 check "... and hooks still missing" bash -c "! HOME='$F1' PATH='$TPATH' '$F1/knowledge/bin/kb-claude-hooks' --check --settings '$F1/.claude/settings.json' >/dev/null 2>&1"
+check "kb-doctor report is shown from its summary line and '## P0' heading, with all three hook findings" \
+  bash -c "grep -qE '^kb-doctor [0-9-]+: P0=[0-9]+ P1=[0-9]+ ' '$F1.out' && grep -qx '## P0' '$F1.out' \
+    && [ \$(grep -c 'settings.json hook .* does not invoke' '$F1.out') -eq 3 ]"
+newest_receipt() { ls "$1"/knowledge/install/receipts/*.md | tail -1; }
+check "receipt: session_hooks=off while the hooks are missing" \
+  grep -q '^- opt_ins: .* session_hooks=off$' "$(newest_receipt "$F1")"
 run_install "$F1" VEPOL_MERGE_HOOKS=1 -- --apply; rc=$?
 check "--apply with VEPOL_MERGE_HOOKS=1 → hooks present, other keys kept, backup written" \
   bash -c "[ $rc -eq 0 ] && HOME='$F1' PATH='$TPATH' '$F1/knowledge/bin/kb-claude-hooks' --check --settings '$F1/.claude/settings.json' >/dev/null 2>&1 \
     && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))[\"theme\"] == \"dark\"' '$F1/.claude/settings.json' \
     && [ \$(ls -A '$F1/.claude' | grep -c '^settings\.json.') -ge 1 ]"
+check "receipt: session_hooks=on after the merge" \
+  grep -q '^- opt_ins: .* session_hooks=on$' "$(newest_receipt "$F1")"
+check "re-run --apply: the existing audio route is reported as preserved" \
+  grep -q 'existing digest audio backend preserved' "$F1.out"
 F2="$WORK/f2"; mkdir -p "$F2/.claude"; printf '{"theme": "dark"}\n' > "$F2/.claude/settings.json"
 # Interactive answers: add hooks y, scheduled n, Telegram plugin n, local Qwen n, memory compiler n.
 printf 'y\nn\nn\nn\nn\n' | env -u VEPOL_NONINTERACTIVE -u VEPOL_HUB -u KB_HUB -u KB_LANG \
@@ -354,6 +371,28 @@ env -u VEPOL_HUB -u KB_HUB -u KB_LANG HOME="$I" PATH="$GT:$TPATH" LANG=en_US.UTF
   VEPOL_ENABLE_MEMORY_COMPILER=1 "$INSTALL" --apply > "$I.out" 2>&1; rc=$?
 check "memory-compiler clone is checked out at the tested commit 54eddd7" \
   bash -c "[ $rc -eq 0 ] && grep -q 'checkout --quiet 54eddd709e83d3be244e9c56c9fc3a6cf375d534' '$I/git.calls'"
+check "session capture accepted → no 'Skipped session capture' line" \
+  bash -c "! grep -q 'Skipped session capture' '$I.out'"
+
+# ── J. A long kb-doctor report is cut at the bottom, never at the top ────
+# A stand-in kb-doctor that prints its summary line and 60 more lines.
+J="$WORK/j"
+mv "$SEED/bin/kb-doctor" "$WORK/kb-doctor.real"
+cat > "$SEED/bin/kb-doctor" <<'SH'
+#!/bin/sh
+echo "kb-doctor 2026-01-01: P0=20 P1=0 P2=0 info=0"
+i=1; while [ "$i" -le 60 ]; do echo "report line $i"; i=$((i + 1)); done
+exit 2
+SH
+chmod +x "$SEED/bin/kb-doctor"
+run_install "$J" -- --apply; rc=$?
+cp "$SEED/install.log" "$WORK/j.log"
+mv "$WORK/kb-doctor.real" "$SEED/bin/kb-doctor"
+check "long kb-doctor report: summary line and first 40 lines shown, the rest counted with the command to see it" \
+  bash -c "[ $rc -eq 0 ] && grep -qx 'kb-doctor 2026-01-01: P0=20 P1=0 P2=0 info=0' '$J.out' \
+    && grep -qx 'report line 39' '$J.out' && ! grep -qx 'report line 40' '$J.out' \
+    && grep -q '21 more line(s) not shown — see all of it: $J/knowledge/bin/kb-doctor install-health' '$J.out'"
+check "... and install.log keeps the whole report" grep -qx 'report line 60' "$WORK/j.log"
 
 echo "  ---"
 echo "  PASS=$PASS FAIL=$FAIL"

@@ -187,6 +187,40 @@ KNOWLEDGE_HUB="$HUB" "$REPO_ROOT/bin/new-wiki" "$LINKED" linked-agents >"$OUT"
 [[ "$(cat "$ROOT/shared-rules.md")" == "# Shared rules" ]] || fail "linked AGENTS.md: the link target was changed"
 grep -Fq "not changed" "$OUT" && grep -Fq "$STARTUP" "$OUT" || fail "linked AGENTS.md: output does not give the line to add"
 
+# ── .gitignore ──────────────────────────────────────────────────────────
+# Outside git the exact lines are what counts: added once, never twice.
+gi_count() { grep -c -Fx -- "$2" "$1/.gitignore" || true; }
+[[ "$(gi_count "$OWN" "knowledge/")" == 1 && "$(gi_count "$OWN" ".kb-ignore")" == 1 ]] \
+  || fail ".gitignore outside git: want one knowledge/ and one .kb-ignore line after two runs"
+# In a git repo, git's own rules decide. Only the repo's rules are read here:
+# no global or system excludes from the machine that runs the test.
+nw_git() {
+  env -u XDG_CONFIG_HOME HOME="$ROOT/git-home" GIT_CONFIG_NOSYSTEM=1 KNOWLEDGE_HUB="$HUB" \
+    "$REPO_ROOT/bin/new-wiki" "$@" >"$OUT"
+}
+mkdir -p "$ROOT/git-home"
+# A repo that ignores the wiki another way (as the Vepol repo does) keeps its
+# tracked .gitignore byte for byte.
+GIT_OWN="$ROOT/git-own-rules"
+mkdir -p "$GIT_OWN"
+git -C "$GIT_OWN" init --quiet 2>/dev/null
+printf 'knowledge/*\n!knowledge/AGENTS.md\n.kb-ignore\n' > "$GIT_OWN/.gitignore"
+cp "$GIT_OWN/.gitignore" "$ROOT/gitignore.before"
+nw_git "$GIT_OWN" git-own-rules
+cmp -s "$GIT_OWN/.gitignore" "$ROOT/gitignore.before" \
+  || fail ".gitignore: a repo that already ignores knowledge/ another way got a redundant line ($(tr '\n' ' ' < "$GIT_OWN/.gitignore"))"
+! grep -Fq ".gitignore +=" "$OUT" || fail ".gitignore: output reports a line that was not needed"
+# A repo that does not ignore the wiki gets both lines, once.
+GIT_PLAIN="$ROOT/git-plain"
+mkdir -p "$GIT_PLAIN"
+git -C "$GIT_PLAIN" init --quiet 2>/dev/null
+printf 'node_modules/\n' > "$GIT_PLAIN/.gitignore"
+nw_git "$GIT_PLAIN" git-plain
+nw_git "$GIT_PLAIN" git-plain
+[[ "$(gi_count "$GIT_PLAIN" "knowledge/")" == 1 && "$(gi_count "$GIT_PLAIN" ".kb-ignore")" == 1 ]] \
+  || fail ".gitignore in a git repo without the rules: want one knowledge/ and one .kb-ignore line"
+[[ "$(head -1 "$GIT_PLAIN/.gitignore")" == "node_modules/" ]] || fail ".gitignore: the repo's own lines changed"
+
 # ── Registry flow: new-wiki → bootstrap → apply → check ─────────────────
 # The English headings install.sh writes; a project added without a
 # description (the template README has `description: ""`, and Desktop

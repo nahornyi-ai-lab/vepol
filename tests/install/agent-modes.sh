@@ -79,7 +79,7 @@ json_ok <"$probe_out" && [[ "$rc" -eq 0 || "$rc" -eq 10 || "$rc" -eq 11 ]] && [[
 # full --apply (no opt-ins) → exit 0, hub + receipt, opt-ins normalized to off
 "$INSTALL" --apply >/dev/null 2>&1; rc=$?
 rcpt="$(ls "$HOME/knowledge/install/receipts/"*.md 2>/dev/null | head -1)"
-[[ "$rc" -eq 0 && -L "$HOME/knowledge/bin/kb-doctor" && -n "$rcpt" ]] && grep -q "opt_ins: launchd=off telegram=off memory_compiler=off" "$rcpt" \
+[[ "$rc" -eq 0 && -L "$HOME/knowledge/bin/kb-doctor" && -n "$rcpt" ]] && grep -qx -- "- opt_ins: launchd=off telegram=off memory_compiler=off session_hooks=on" "$rcpt" \
   && p "--apply → installs, receipt with normalized off opt-ins" || f "--apply (rc=$rc)"
 
 # --verify after apply → 0

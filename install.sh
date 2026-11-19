@@ -862,7 +862,9 @@ fi
 # Managed digest route. Creating the default config is safe and idempotent;
 # upgrades without an explicit selection preserve the existing outputs exactly.
 PROCESSES_FILE="$HUB/personal/processes.yaml"
+PROCESSES_CREATED=0
 if [[ ! -f "$PROCESSES_FILE" ]]; then
+  PROCESSES_CREATED=1
   python3 - "$HUB/bin" "$PROCESSES_FILE" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -1138,6 +1140,16 @@ if [[ "$SETTINGS_MERGEABLE" -eq 1 ]]; then
     warn "    with $VEPOL_DIR/claude/settings.json.template (SessionStart, SessionEnd, PreCompact)"
   fi
 fi
+# For the receipt: are all three hooks in settings.json after this run? on = yes
+# (written with the template, already there, or merged now), off = at least one
+# is missing, unknown = the file could not be checked.
+OPT_HOOKS=unknown
+if [[ -x "$HOOKS_TOOL" && -f "$HOME_DIR/.claude/settings.json" ]]; then
+  set +e
+  "$HOOKS_TOOL" --check --settings "$HOME_DIR/.claude/settings.json" >/dev/null 2>&1
+  case $? in 0) OPT_HOOKS=on ;; 1) OPT_HOOKS=off ;; esac
+  set -e
+fi
 
 # ─────────────────────────────────────────
 # Step 4. Optional legacy ~/.gemini/GEMINI.md
@@ -1300,6 +1312,8 @@ elif [[ "$AUDIO_BACKEND" == "notebooklm" ]]; then
   "$HUB/bin/kb-digest-migrate" --file "$PROCESSES_FILE" --audio-backend notebooklm
   ok "  digest audio backend: NotebookLM"
   AUDIO_RESULT="notebooklm"
+elif [[ "$PROCESSES_CREATED" -eq 1 ]]; then
+  ok "  digest audio backend: NotebookLM (the default for a new install)"
 else
   ok "  existing digest audio backend preserved"
 fi
@@ -1393,6 +1407,7 @@ elif _unset_in_apply VEPOL_ENABLE_MEMORY_COMPILER && [[ -d "$HOME_DIR/claude-mem
   ok "  Session capture already installed — kept as it is"
 else
   printf 'declined_at=%s\n' "$(date -Iseconds 2>/dev/null || date)" > "$HUB/.orchestrator/memory-compiler.opted-out"
+  ok "  Skipped session capture (re-run install.sh anytime to enable)"
 fi
 
 # ─────────────────────────────────────────
@@ -1419,9 +1434,17 @@ fi
 if [[ -x "$HUB/bin/kb-doctor" ]]; then
   say "Running kb-doctor (system health check)…"
   set +e
-  KB_HUB="$HUB" "$HUB/bin/kb-doctor" install-health --strict 2>&1 | tee -a "$LOG" | tail -15
+  doctor_out="$(KB_HUB="$HUB" "$HUB/bin/kb-doctor" install-health --strict 2>&1)"
   RC=$?
   set -e
+  # The report opens with the summary line and lists findings most severe first,
+  # so a long one is cut at the bottom, never at the top. The log keeps all of it.
+  if [[ -n "$doctor_out" ]]; then
+    printf '%s\n' "$doctor_out" >> "$LOG"
+    printf '%s\n' "$doctor_out" | awk -v max=40 -v cmd="$HUB/bin/kb-doctor install-health" '
+      NR <= max { print }
+      END { if (NR > max) printf "  … %d more line(s) not shown — see all of it: %s\n", NR - max, cmd }'
+  fi
   if [[ "$RC" -eq 0 ]]; then
     ok "kb-doctor passed"
   else
@@ -1444,7 +1467,7 @@ if cat > "$RECEIPT" <<RECEOF 2>/dev/null
 - hub: $HUB
 - kb_doctor_exit: ${RC:-NA}
 - needs_security_migration: ${NEEDS_SECURITY_MIGRATION:-0}
-- opt_ins: launchd=$OPT_LAUNCHD telegram=$OPT_TELEGRAM memory_compiler=$OPT_MEMORY
+- opt_ins: launchd=$OPT_LAUNCHD telegram=$OPT_TELEGRAM memory_compiler=$OPT_MEMORY session_hooks=$OPT_HOOKS
 - audio_backend: $AUDIO_RESULT
 RECEOF
 then
