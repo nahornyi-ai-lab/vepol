@@ -500,8 +500,17 @@ def f_install_health_codex_optional():
     home.mkdir(parents=True)
 
     # Hermetic: the check consults KB_CODEX_BIN as a "configured" signal, so a
-    # host exporting it must not leak into the never-configured scenario.
+    # host exporting it must not leak into the never-configured scenario. Nor
+    # must a Codex installed on this machine: the lookup also searches PATH and
+    # the fixed Homebrew locations, so both point at nothing for this case.
+    kb_codex = sys.modules["_kb_codex"]   # imported by kb-doctor above
     saved_codex_bin = os.environ.pop("KB_CODEX_BIN", None)
+    saved_path = os.environ.get("PATH")
+    saved_candidates = kb_codex.SYSTEM_CANDIDATES
+    empty_bin = sb / "empty-bin"
+    empty_bin.mkdir()
+    os.environ["PATH"] = str(empty_bin)
+    kb_codex.SYSTEM_CANDIDATES = ()
     try:
         findings = mod._ih_check_codex_currency(home=home)
         ids = "\n".join(f.id for f in findings)
@@ -515,6 +524,11 @@ def f_install_health_codex_optional():
         assert_("codex-missing" in ids, "configured-but-missing Codex is still reported")
         assert_(any(f.severity == "P1" for f in findings), "configured-but-missing Codex stays P1")
     finally:
+        kb_codex.SYSTEM_CANDIDATES = saved_candidates
+        if saved_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = saved_path
         if saved_codex_bin is not None:
             os.environ["KB_CODEX_BIN"] = saved_codex_bin
     shutil.rmtree(sb)

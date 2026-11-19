@@ -20,6 +20,15 @@ bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 if [[ ! -f "$RUNNER" ]]; then echo "MISSING $RUNNER"; exit 1; fi
 
+# Python that loads the runner (a script without .py) as module `m`. Spelled out
+# with exec_module: Loader.load_module() no longer exists in Python 3.15.
+LOAD_RUNNER="import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+_spec = importlib.util.spec_from_loader('mr', SourceFileLoader('mr', '$RUNNER'))
+m = importlib.util.module_from_spec(_spec)
+sys.modules['mr'] = m
+_spec.loader.exec_module(m)"
+
 # Hermetic agent CLIs: a failing claude/codex comes first on PATH and is the
 # default KB_CLAUDE_BIN/KB_CODEX_BIN, so nothing here can reach a real agent.
 STUB_BIN=$(mktemp -d)
@@ -355,8 +364,7 @@ run_radar "$D" >/dev/null 2>&1; rc=$?
 
 # T16: all 4 default agents are web-enabled (owner directive 2026-06-21)
 ROSTER=$($PY -c "
-from importlib.machinery import SourceFileLoader
-m=SourceFileLoader('mr','$RUNNER').load_module()
+$LOAD_RUNNER
 r=m.default_roster()
 print(','.join(a['id'] for a in r))
 print('webcount', sum(1 for a in r if a.get('web')))
@@ -370,9 +378,7 @@ grep -q "network_access=true" "$RUNNER" && ok "T16d: codex has network access" |
 # sandbox → 420s empty-output kill, diag 2026-06-21) and runs low reasoning. All three
 # flags must be present or the hang/loop can silently return.
 CODEX_ARGV=$(python3 -c "
-import importlib.util,sys
-from importlib.machinery import SourceFileLoader
-m=SourceFileLoader('mr','$RUNNER').load_module()
+$LOAD_RUNNER
 cx=[a for a in m.default_roster() if a['id']=='codex'][0]
 print(' '.join(cx['argv']))
 ")
@@ -383,8 +389,7 @@ echo "$CODEX_ARGV" | grep -q "model_reasoning_effort=low" && ok "T16e: codex use
 # not English (owner 2026-06-22: "the radar arrived in English"). The agent prompt carries a
 # LANGUAGE directive for non-en owners; the digest labels/band tags localize; en is unchanged.
 python3 -c "
-from importlib.machinery import SourceFileLoader
-m=SourceFileLoader('mr','$RUNNER').load_module()
+$LOAD_RUNNER
 m.owner_lang=lambda: 'ru'
 assert 'Russian' in m._lang_directive(), 'no ru directive'
 lab=m.labels()
@@ -403,8 +408,7 @@ print('ok')
 # user's language, it does not hardcode one"). Every LANG_NAMES code has a complete localized label
 # set; en is the universal fallback; a non-ru/en owner gets localized chrome, not English.
 python3 -c "
-from importlib.machinery import SourceFileLoader
-m=SourceFileLoader('mr','$RUNNER').load_module()
+$LOAD_RUNNER
 # invariant: chrome covers exactly the languages the content directive covers
 assert set(m.L) == set(m.LANG_NAMES), ('chrome/content lang drift', set(m.LANG_NAMES)^set(m.L))
 req=set(m.L['en'])
