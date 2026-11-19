@@ -136,7 +136,7 @@ The user doesn't need to do anything extra. They just work in the project.
 ## Edge cases
 
 - **Nested project** (for example, `parent-project/sub-project/`) — **fine**, nesting is allowed. Each project gets its own `knowledge/`; the hooks pick the right one by `cwd`. Don't mix these wikis up; they are independent.
-- **`.gitignore` already exists** — `new-wiki` appends the new lines without overwriting anything. Safe.
+- **`.gitignore` already exists** — `new-wiki` appends the new lines without overwriting anything. Safe. In a git repo whose rules already ignore the wiki another way (for example `knowledge/*` with exceptions), it adds no line.
 - **A hub symlink with the same slug already exists** — `new-wiki` warns and does not overwrite it. If it collides with another project, suggest a different slug to the user.
 - **Project without git** (no `.git/`) — fine, `.gitignore` is still created preemptively.
 - **The user declines at any step** — stop and don't leave partial structures behind. If something was already created, roll it back: delete the created files and the symlink, and remove the hub entry. Never delete or rewrite the user's own `AGENTS.md`: remove only the block from `<!-- BEGIN VEPOL` to `<!-- END VEPOL -->` that `new-wiki` appended. On a hub with a generated registry, the hub entry is the one appended to the migration table: remove it, then run `kb-rebuild-registry apply`.

@@ -493,7 +493,9 @@ On a clean install expect zero P0 (broken) and zero P1 (needs attention)
 findings. Info lines for optional tools that are not installed, or extras the
 user declined, are fine, and so are P2 findings. The receipt records the
 installer's own run as `kb_doctor_exit`: 0 clean, 1 at least one P1, 2 at
-least one P0.
+least one P0. Its `opt_ins` line ends with `session_hooks=on`, `off` or
+`unknown`: whether all three session hooks were in `~/.claude/settings.json`
+when that run finished (`unknown`: the file could not be checked).
 
 Fix P0 and P1 findings before you call the install done. The common ones:
 
@@ -621,7 +623,8 @@ For each project the user confirms:
   `~/knowledge/bin/new-wiki <project-path> [slug] [category] [description]`
   (category: `lab`, `order`, `pet`, `job` or `personal`, the default). It
   creates the project's `AGENTS.md` and `knowledge/` folder, adds `knowledge/`
-  to the project's `.gitignore`, links the folder as
+  to the project's `.gitignore` (unless git already ignores it), links the
+  folder as
   `~/knowledge/projects/<slug>`, adds a `seeded` row to
   `~/knowledge/registry.md` and logs the event in the hub. If the project
   already has its own `AGENTS.md`, it keeps the user's text and appends one

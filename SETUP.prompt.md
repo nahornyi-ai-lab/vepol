@@ -181,7 +181,10 @@ Rules:
 
 11. Read me the newest receipt in ~/knowledge/install/receipts/ and sum it up:
     version, kb_doctor_exit (0 clean, 1 at least one P1, 2 at least one P0),
-    which extras are on (opt_ins, audio_backend), and what is left for me:
+    which extras are on (opt_ins, audio_backend), whether Vepol's session
+    hooks are in my settings.json (session_hooks in opt_ins: on, off or
+    unknown; if off, offer step 8's kb-claude-hooks --apply), and what is
+    left for me:
     Telegram, signing in to Codex and connecting its Gmail plugin for mail,
     connecting Google Calendar in Claude Code.
 

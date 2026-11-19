@@ -134,10 +134,20 @@ render "$TEMPLATE/knowledge/reports/_template.md" "$PROJECT_PATH/knowledge/repor
 render "$TEMPLATE/knowledge/.orchestration.yaml"  "$PROJECT_PATH/knowledge/.orchestration.yaml"
 
 # 2.5. Add knowledge/ and .kb-ignore to .gitignore (the wiki is not tracked by git).
+# A repo may already ignore the wiki another way (`knowledge/*` with exceptions,
+# a parent .gitignore, .git/info/exclude), so in a git repo git is asked about a
+# path the line would cover. Outside git only the exact line counts.
 GITIGNORE="$PROJECT_PATH/.gitignore"
+git_ignores() {  # git_ignores <path under the project>: do git's rules already ignore it?
+  command -v git >/dev/null 2>&1 \
+    && git -C "$PROJECT_PATH" check-ignore -q --no-index -- "$1" 2>/dev/null
+}
 ensure_gitignore_line() {
-  local line="$1"
+  local line="$1" covered_path="$2"
   if [[ -f "$GITIGNORE" ]] && grep -Fxq "$line" "$GITIGNORE"; then
+    return
+  fi
+  if git_ignores "$covered_path"; then
     return
   fi
   if [[ ! -f "$GITIGNORE" ]]; then
@@ -149,8 +159,8 @@ ensure_gitignore_line() {
   echo "$line" >> "$GITIGNORE"
   echo "  ✓ .gitignore += $line"
 }
-ensure_gitignore_line "knowledge/"
-ensure_gitignore_line ".kb-ignore"
+ensure_gitignore_line "knowledge/" "knowledge/log.md"
+ensure_gitignore_line ".kb-ignore" ".kb-ignore"
 
 # 3. Symlink into the hub (target = knowledge/, NOT the project root — so code stays out of Obsidian)
 LINK="$HUB/projects/$SLUG"

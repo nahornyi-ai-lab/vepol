@@ -292,6 +292,24 @@ code or a default; each such change is called out below.
   "exhausted"; `brief.log` keeps the raw error.
 
 ### Fixed
+- **The installer's health report starts at the top.** `install.sh` showed only
+  the last 15 lines of `kb-doctor install-health`, so with a few findings the
+  summary line (`P0=… P1=…`), the `## P0` heading and the first finding were cut
+  off. It now shows the report from its first line; one longer than 40 lines is
+  cut at the bottom, with the number of lines left out and the command that
+  prints all of it. `install.log` keeps the whole report.
+- **Clearer first-run lines, and the receipt records the session hooks.** A new
+  `--apply` install no longer says "existing digest audio backend preserved";
+  it names NotebookLM as the default for a new install. When session capture is
+  not installed, the installer says it was skipped, as it does for scheduled
+  tasks. The receipt's `opt_ins` line gains `session_hooks=on`, `off` or
+  `unknown`: whether all three session hooks were in `~/.claude/settings.json`
+  when the run finished.
+- **`new-wiki` leaves a `.gitignore` that already covers the wiki alone.** In a
+  git repo it now asks git (`git check-ignore`) whether `knowledge/` and
+  `.kb-ignore` are already ignored, so a repo that ignores the wiki another
+  way, for example with `knowledge/*` and exceptions, gets no extra line.
+  Outside git it still looks for the exact lines.
 - **Hub sessions start in the hub folder.** A Desktop session for the hub now
   runs inside `~/knowledge`, so the hub agent gets its own startup context, and
   **Add project…** on the hub folder opens the hub.
