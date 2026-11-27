@@ -56,15 +56,15 @@ python3 -m pip install --user -r requirements.txt
 If pip answers `externally-managed-environment` (Homebrew's Python does), use:
 
 ```bash
-python3 -m pip install --break-system-packages -r requirements.txt
+python3 -m pip install --user --break-system-packages -r requirements.txt
 ```
 
 Install them into the `python3` on your `PATH`: the `kb-*` commands run that Python, so a
 separate virtual environment is not picked up.
 
 Two extra packages serve only the Telegram people collector (`kb-telegram-people`) and the
-experimental multi-bot runtime (`kb-multibot-*`). With Homebrew's Python, use
-`--break-system-packages` in place of `--user`:
+experimental multi-bot runtime (`kb-multibot-*`). With Homebrew's Python, add
+`--break-system-packages` after `--user`:
 
 ```bash
 python3 -m pip install --user 'telethon>=1.36,<2.0' 'python-dotenv>=1.0,<2.0'

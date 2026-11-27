@@ -580,7 +580,7 @@ if [[ -f "$VEPOL_DIR/requirements.txt" ]]; then
     warn "    kb-idea, kb-contact and other tools fail until they are installed. Run:"
     warn "      python3 -m pip install --user -r \"$VEPOL_DIR/requirements.txt\""
     warn "    If pip reports \"externally-managed-environment\" (Homebrew Python), run instead:"
-    warn "      python3 -m pip install --break-system-packages -r \"$VEPOL_DIR/requirements.txt\""
+    warn "      python3 -m pip install --user --break-system-packages -r \"$VEPOL_DIR/requirements.txt\""
     warn "    (kb-* scripts run the python3 on your PATH, so a separate venv is not picked up.)"
   fi
 fi
@@ -897,7 +897,7 @@ ok "  managed copy: $HOME_DIR/.claude/.vepol/CLAUDE.managed.md"
 # The inner line is a real Claude Code import (a line starting with @path).
 # BEGIN/END markers stay HTML comments so upgrade/uninstall can find the block.
 # Blocks written by older installers carry the inert LEGACY_INCLUDE_INNER
-# line instead; they are left as they are (see the hint below).
+# line instead; the step below replaces that one line in place.
 INCLUDE_BEGIN="<!-- BEGIN VEPOL MANAGED — do not edit. Source: ~/.claude/.vepol/CLAUDE.managed.md -->"
 INCLUDE_END="<!-- END VEPOL MANAGED -->"
 INCLUDE_INNER="@~/.claude/.vepol/CLAUDE.managed.md"
@@ -916,11 +916,41 @@ $INCLUDE_END
 MDEOF
   ok "  $HOME_DIR/.claude/CLAUDE.md created with include block"
 elif grep -qF "BEGIN VEPOL MANAGED" "$HOME_DIR/.claude/CLAUDE.md"; then
-  ok "  $HOME_DIR/.claude/CLAUDE.md already has Vepol include block — left alone"
-  if grep -qxF "$LEGACY_INCLUDE_INNER" "$HOME_DIR/.claude/CLAUDE.md"; then
-    warn "  its include line is the old HTML comment, which Claude Code does not load."
-    warn "    To load Vepol's global adapter, replace that line in $HOME_DIR/.claude/CLAUDE.md with:"
-    warn "      $INCLUDE_INNER"
+  CM="$HOME_DIR/.claude/CLAUDE.md"
+  if grep -qxF "$LEGACY_INCLUDE_INNER" "$CM"; then
+    # Vepol's own block from an older installer: replace only its inert include
+    # line with the import line, after a timestamped copy of the file.
+    CM_BACKUP="$CM.bak-$(date +%Y-%m-%d-%H%M%S)"
+    cp -p "$CM" "$CM_BACKUP"
+    cm_rc=0
+    python3 - "$CM" "$LEGACY_INCLUDE_INNER" "$INCLUDE_INNER" <<'PY' || cm_rc=$?
+import sys
+path, old, new = sys.argv[1:4]
+lines = open(path, encoding="utf-8").read().split("\n")
+inside = changed = False
+for i, line in enumerate(lines):
+    if line.startswith("<!-- BEGIN VEPOL MANAGED"):
+        inside = True
+    elif line.strip() == "<!-- END VEPOL MANAGED -->":
+        inside = False
+    elif inside and line == old:
+        lines[i] = new
+        changed = True
+if not changed:
+    sys.exit(3)
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+    if [[ "$cm_rc" -eq 0 ]]; then
+      ok "  $CM: replaced the old include comment in the Vepol block with $INCLUDE_INNER (copy: $CM_BACKUP)"
+    else
+      rm -f "$CM_BACKUP"
+      ok "  $CM already has Vepol include block — left alone"
+      warn "  its include line is the old HTML comment, which Claude Code does not load."
+      warn "    To load Vepol's global adapter, replace that line in $CM with:"
+      warn "      $INCLUDE_INNER"
+    fi
+  else
+    ok "  $CM already has Vepol include block — left alone"
   fi
 else
   TMPFILE="$(mktemp)"
@@ -1395,9 +1425,23 @@ if _want VEPOL_ENABLE_MEMORY_COMPILER "Install claude-memory-compiler for automa
       warn "    patches already applied or out of date — see $VEPOL_DIR/patches/"
     fi
     if command -v uv >/dev/null 2>&1; then
-      (cd "$COMPILER" && uv sync 2>/dev/null) \
-        && ok "    Python deps synced via uv" \
-        || warn "    uv sync failed — run manually later"
+      # The compiler's locked packages (pydantic-core, rpds-py) have wheels for
+      # CPython 3.12-3.14 only; on a newer system python3 uv tries to build them
+      # and fails. Pin 3.12 in the clone's .python-version, which this sync and
+      # the hooks' `uv run --directory` both read (uv downloads it if needed).
+      # A clone whose environment already works is left as it is.
+      if [[ ! -f "$COMPILER/.python-version" ]] \
+         && ! "$COMPILER/.venv/bin/python" -c "import claude_agent_sdk" >/dev/null 2>&1; then
+        printf '3.12\n' > "$COMPILER/.python-version"
+        ok "    pinned Python 3.12 for session capture ($COMPILER/.python-version)"
+      fi
+      if uv_err="$(cd "$COMPILER" && uv sync 2>&1 >/dev/null)"; then
+        ok "    Python deps synced via uv"
+      else
+        warn "    uv sync failed in $COMPILER — session capture will not work until it succeeds. uv said:"
+        while IFS= read -r uv_line; do warn "      $uv_line"; done < <(printf '%s\n' "$uv_err" | tail -n 5)
+        warn "    To retry: cd $COMPILER && uv sync"
+      fi
     else
       warn "    uv not found — session capture needs it: brew install uv, then: cd $COMPILER && uv sync"
     fi

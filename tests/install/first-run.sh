@@ -207,7 +207,7 @@ env -u VEPOL_HUB -u KB_HUB -u KB_LANG HOME="$A2" PATH="$NODEPS:$TPATH" LANG=en_U
 check "missing Python package → detect-only hint: pip --user, then --break-system-packages" \
   bash -c "[ $rc -eq 0 ] && grep -q 'Python deps missing for .*: jellyfish' '$A2.out' \
     && grep -q 'python3 -m pip install --user -r ' '$A2.out' \
-    && grep -q 'python3 -m pip install --break-system-packages -r ' '$A2.out' && ! grep -q 'pip3 install' '$A2.out'"
+    && grep -q 'python3 -m pip install --user --break-system-packages -r ' '$A2.out' && ! grep -q 'pip3 install' '$A2.out'"
 check "fresh --apply receipt records the NotebookLM route it created" \
   grep -q '^- audio_backend: notebooklm$' "$A2"/knowledge/install/receipts/*.md
 check "fresh --apply: Step 6 names the NotebookLM default, not an 'existing … preserved' route" \
@@ -393,6 +393,21 @@ check "long kb-doctor report: summary line and first 40 lines shown, the rest co
     && grep -qx 'report line 39' '$J.out' && ! grep -qx 'report line 40' '$J.out' \
     && grep -q '21 more line(s) not shown — see all of it: $J/knowledge/bin/kb-doctor install-health' '$J.out'"
 check "... and install.log keeps the whole report" grep -qx 'report line 60' "$WORK/j.log"
+
+# ── K. A 1.1.1 block's inert include comment becomes the real import ─────
+K="$WORK/k"; mkdir -p "$K/.claude"
+printf '%s\n' "<!-- BEGIN VEPOL MANAGED — do not edit. Source: ~/.claude/.vepol/CLAUDE.managed.md -->" \
+  "<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->" "<!-- END VEPOL MANAGED -->" "" \
+  "## My personal additions" "my own rule" > "$K/.claude/CLAUDE.md"
+cp "$K/.claude/CLAUDE.md" "$WORK/k.before"
+sed 's|^<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->$|@~/.claude/.vepol/CLAUDE.managed.md|' "$WORK/k.before" > "$WORK/k.expected"
+run_install "$K" -- --apply; rc=$?
+cp "$K/.claude/CLAUDE.md" "$WORK/k.after1"
+run_install "$K" -- --apply; rc2=$?
+check "1.1.1 block: only the include line becomes the @import, one timestamped copy, a re-run changes nothing" \
+  bash -c "[ $rc -eq 0 ] && [ $rc2 -eq 0 ] && cmp -s '$WORK/k.after1' '$WORK/k.expected' \
+    && cmp -s '$K/.claude/CLAUDE.md' '$WORK/k.expected' \
+    && [ \$(ls '$K/.claude' | grep -c '^CLAUDE\.md\.bak-') -eq 1 ] && cmp -s '$K/.claude/'CLAUDE.md.bak-* '$WORK/k.before'"
 
 echo "  ---"
 echo "  PASS=$PASS FAIL=$FAIL"

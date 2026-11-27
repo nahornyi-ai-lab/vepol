@@ -238,9 +238,12 @@ hooks and a status line.
 
 **Check `~/.claude/CLAUDE.md`.** If it has real content, confirm with the user
 that Vepol may add its managed block at the top; everything else in the file
-stays. A block written by an older installer carries an HTML-comment line that
-Claude Code does not load. The installer leaves it and prints the replacement
-line, `@~/.claude/.vepol/CLAUDE.managed.md`. Offer to make that one-line edit.
+stays. A block written by an older installer carries an HTML-comment line,
+`<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->`, that Claude Code does
+not load. The installer replaces that one line inside Vepol's block with
+`@~/.claude/.vepol/CLAUDE.managed.md`, after saving a copy of the file as
+`~/.claude/CLAUDE.md.bak-<date>-<time>`, and prints what it changed. Nothing
+else in the file changes.
 
 ### 1.2 Check prerequisites
 
@@ -302,7 +305,7 @@ If something is missing:
   # Python packages (kb-* scripts use the python3 on PATH; a separate venv is not picked up):
   python3 -m pip install --user -r ~/vepol/requirements.txt
   # if pip reports "externally-managed-environment":
-  python3 -m pip install --break-system-packages -r ~/vepol/requirements.txt
+  python3 -m pip install --user --break-system-packages -r ~/vepol/requirements.txt
 
   # Codex CLI (optional): any one of
   npm i -g @openai/codex
@@ -479,10 +482,18 @@ The installer says what failed. Common cases:
   digests then make no audio: they record a NotebookLM failure and keep only
   the written report. Install and sign in
   (`pipx install notebooklm-py && notebooklm login`), or switch to local Qwen.
-- **The claude-memory-compiler clone fails.** It is optional: warn, do not
-  block. Re-run `--apply` with `VEPOL_ENABLE_MEMORY_COMPILER=1` later; it
-  clones only when the folder is missing. If `uv` was missing:
-  `brew install uv`, then `cd ~/claude-memory-compiler && uv sync`.
+- **The claude-memory-compiler clone or its `uv sync` fails.** It is optional:
+  warn, do not block. Re-run `--apply` with `VEPOL_ENABLE_MEMORY_COMPILER=1`
+  later; it clones only when the folder is missing. If `uv` was missing:
+  `brew install uv`, then `cd ~/claude-memory-compiler && uv sync`. When the
+  clone has no working environment, the installer pins Python 3.12 in
+  `~/claude-memory-compiler/.python-version` (uv downloads it if needed), so
+  the sync and the session hooks do not use a system Python whose packages
+  cannot be built. If the sync still fails, the installer prints uv's last
+  error lines and the retry command, `cd ~/claude-memory-compiler && uv sync`;
+  read the error, fix the cause, run that command and check that
+  `uv run --directory ~/claude-memory-compiler python -c "import claude_agent_sdk"`
+  exits 0.
 - **Python packages are missing.** The install continues and prints the pip
   command from § 1.2.
 

@@ -183,7 +183,7 @@ code or a default; each such change is called out below.
   open Claude Code in a project and type `/init-kb`, and the Gemini CLI step
   and the empty `~/.gemini` folder are gone. When Python packages are
   missing, the hint names the Python in use and gives the
-  `--break-system-packages` form that Homebrew Python needs.
+  `--user --break-system-packages` form that Homebrew Python needs.
 - **A failed local voice install no longer stops the install.** The local Qwen
   question now comes after the Telegram question, so scripts that pipe
   answers by position need updating. If `kb-tts-install` fails, install warns
@@ -194,8 +194,10 @@ code or a default; each such change is called out below.
 - **Claude Code loads Vepol's global instructions.** New installs write the
   Vepol block in `~/.claude/CLAUDE.md` as a real import,
   `@~/.claude/.vepol/CLAUDE.managed.md`. The old line was an HTML comment that
-  Claude Code ignored. An existing block is left as it is, and install prints
-  the line to put in its place.
+  Claude Code ignored. On an upgrade, install replaces that one line inside
+  Vepol's block, keeps a timestamped copy of the file next to it
+  (`CLAUDE.md.bak-<date>-<time>`) and says so. The rest of the file is not
+  changed.
 - **Re-running install keeps your setup current.** It adds agents missing
   from `~/knowledge/.orchestrator/cli-tools.tsv` and never edits your rows; a
   commented-out row keeps that agent off. LaunchAgents installed from now on
@@ -314,6 +316,22 @@ code or a default; each such change is called out below.
   "exhausted"; `brief.log` keeps the raw error.
 
 ### Fixed
+- **Session capture works whatever your system Python is.** On a Mac whose
+  `python3` is newer than 3.14, `uv sync` could not build the compiler's locked
+  packages, so no session was ever captured. When `~/claude-memory-compiler`
+  has no working environment and no `.python-version` of its own, install now
+  pins Python 3.12 in its `.python-version`, which uv downloads if needed. The
+  SessionEnd and PreCompact hooks run `uv run --directory` on that folder, so
+  they use the same pin. An environment that already works is left as it is.
+  If `uv sync` still fails, install prints uv's own error, the folder and the
+  command to retry.
+- **Vepol's own commands are allowed in current Claude Code.** The settings
+  file install writes held `Bash(~/knowledge/bin/*:*)` and its full-path
+  twin. Current Claude Code reads a `*` followed by `:*` as a literal `*`, so
+  the rules matched no command and it printed a warning on every `claude -p`
+  run. They are now `Bash(~/knowledge/bin/*)` and
+  `Bash(<home>/knowledge/bin/*)`. An existing `settings.json` is not changed
+  (see the [release notes](docs/releases/v1.2.0.md#if-you-already-use-vepol)).
 - **No Codex warning for a desktop app alone.** `kb-doctor install-health`
   raised the P1 `codex-missing` on a Mac where `~/.codex` existed but no
   Codex CLI was installed. The ChatGPT and Codex desktop apps create that

@@ -23,7 +23,7 @@ cd face
 .venv/bin/pip install -r requirements.txt pytest httpx
 ```
 
-If pip answers `externally-managed-environment` (Homebrew's Python does), use `--break-system-packages` in place of `--user`. Name the Desktop venv's Python as above, because a plain `python3` may be Apple's 3.9; any Python 3.11 or later works.
+If pip answers `externally-managed-environment` (Homebrew's Python does), add `--break-system-packages` after `--user`. Name the Desktop venv's Python as above, because a plain `python3` may be Apple's 3.9; any Python 3.11 or later works.
 
 ## Run the tests
 
@@ -35,7 +35,7 @@ HOME="$(mktemp -d)" bash tests/run-all.sh
 
 It ends with `ALL Phase 1b tests passed`. The suites put stand-ins for the agent CLIs first on `PATH`, so they never reach your logged-in Claude Code or Codex. Some suites run with `python3 -m pytest`, so `pytest` must be installed for the `python3` on your `PATH` (see the setup above).
 
-One check runs a command the way launchd would, with launchd's `PATH`, where `python3` is Homebrew's. Install the Python packages for that interpreter too (`/opt/homebrew/bin/python3 -m pip install --break-system-packages -r requirements.txt`), or that check fails while everything else passes.
+One check runs a command the way launchd would, with launchd's `PATH`, where `python3` is Homebrew's. Install the Python packages for that interpreter too (`/opt/homebrew/bin/python3 -m pip install --user --break-system-packages -r requirements.txt`), or that check fails while everything else passes.
 
 Vepol Desktop has its own suite. It needs `pytest` and `httpx` in the app's `.venv`, which the setup above installs:
 

@@ -768,7 +768,7 @@ def f_install_health_settings_hook_fix_hint():
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _PIP_USER = "python3 -m pip install --user -r "
-_PIP_BREW = "python3 -m pip install --break-system-packages -r "
+_PIP_BREW = "python3 -m pip install --user --break-system-packages -r "
 
 
 def _load_doctor(name):

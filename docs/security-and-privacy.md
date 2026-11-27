@@ -89,7 +89,8 @@ none):
 
 Your own text below it is never touched. A block written by an older installer has the line
 `<!-- @include ~/.claude/.vepol/CLAUDE.managed.md -->` instead, which Claude Code does not
-load. The installer leaves that line as it is and prints the replacement.
+load. The installer replaces that one line inside the block with the import above. Before it
+does, it saves a copy of the file as `~/.claude/CLAUDE.md.bak-<date>-<time>`.
 
 **`settings.json`, only when you have none.** The installer then creates
 `~/.claude/settings.json` from a minimal template. It contains:
@@ -162,7 +163,9 @@ Each one is off until you say yes. The agent install turns them on with
 - **Claude Code Telegram plugin scaffold:** `~/.claude/channels/telegram/.env` (mode 600) for
   the plugin's own bot.
 - **Session capture:** clones `claude-memory-compiler` into `~/claude-memory-compiler`, pinned
-  to the commit Vepol's patch was tested against, applies the patch and runs `uv sync`.
+  to the commit Vepol's patch was tested against, and applies the patch. When the clone has
+  no working environment, it writes `.python-version` (Python 3.12) there. Then it runs
+  `uv sync`, which may download that Python into `~/.local/share/uv/python`.
 - **Local Qwen voice:** a Python environment and the model in `~/.local/share/vepol-qwen-tts`.
   It runs only while it renders; no service stays running.
 

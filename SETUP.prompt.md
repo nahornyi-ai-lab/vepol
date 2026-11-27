@@ -77,7 +77,7 @@ Rules:
                       running claude once.
    - Python packages: python3 -m pip install --user -r ~/vepol/requirements.txt
      If pip says "externally-managed-environment", instead:
-                      python3 -m pip install --break-system-packages -r ~/vepol/requirements.txt
+                      python3 -m pip install --user --break-system-packages -r ~/vepol/requirements.txt
    - Codex CLI (optional; second opinions, mail reading, and the first choice
      for the morning brief and evening retro, which fall back to Claude Code):
                       npm i -g @openai/codex   or   brew install --cask codex

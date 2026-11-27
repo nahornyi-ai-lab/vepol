@@ -146,11 +146,11 @@ cd ~/vepol
 ./install.sh
 ```
 
-The installer creates the hub at `~/knowledge`, links the `kb-*` commands into `~/knowledge/bin`, installs three Claude Code skills (`/init-kb` among them) and adds a short managed block to `~/.claude/CLAUDE.md`, keeping your own text. It creates `~/.claude/settings.json` only if you have none. Every optional part is a question that defaults to no. Say yes to **Install scheduled tasks?** for the daily routine.
+The installer creates the hub at `~/knowledge`, links the `kb-*` commands into `~/knowledge/bin`, installs three Claude Code skills (`/init-kb` among them) and adds a short managed block to `~/.claude/CLAUDE.md`, keeping your own text. It creates `~/.claude/settings.json` only if you have none. Every optional part is a question that defaults to no. Say yes to **Install scheduled tasks?** for the daily routine. If the session capture step says `uv sync failed`, it prints uv's error and the command to retry: `cd ~/claude-memory-compiler && uv sync`.
 
 ### After install
 
-The installer does not change your `PATH`. Add Vepol's commands, install the Python packages, then check the install and try it:
+The installer does not change your `PATH`. Add Vepol's commands, install the Python packages, then check the install and try it. `kb-demo brief` asks a model, so sign in to an agent before it if you have not yet: `claude auth login`, or `codex login` for Codex.
 
 ```bash
 export PATH="$HOME/knowledge/bin:$PATH"                     # this terminal
@@ -163,7 +163,7 @@ kb-search "first task"     # finds it again
 kb-demo brief              # a sample brief from an invented hub; calls a model, sends nothing
 ```
 
-If pip answers `externally-managed-environment` (Homebrew's Python does), run `python3 -m pip install --break-system-packages -r ~/vepol/requirements.txt` instead. The `kb-*` commands use the `python3` on your `PATH`, so packages in a separate virtual environment are not seen.
+If pip answers `externally-managed-environment` (Homebrew's Python does), run `python3 -m pip install --user --break-system-packages -r ~/vepol/requirements.txt` instead. The `kb-*` commands use the `python3` on your `PATH`, so packages in a separate virtual environment are not seen.
 
 For the default NotebookLM audio, install its command with `pipx install notebooklm-py && notebooklm login` (`pipx` comes from `brew install pipx`; run `pipx ensurepath` once and open a new terminal). pipx puts `notebooklm` in `~/.local/bin`, where scheduled routines look for it; a `pip --user` install can put it in a folder they never search.
 
@@ -176,6 +176,8 @@ claude          # then type /init-kb at the prompt
 
 Claude looks at the project, proposes a name, a category and a description, and asks before writing anything. Then it creates `knowledge/` and links it into `~/knowledge`. In Vepol Desktop, **Add project…** in the New session dialog does the same in one step, without the questions.
 
+From the terminal, or with Codex, run `new-wiki path/to/your-project`. It does the same without the questions and takes the name from the folder; [Getting started](docs/getting-started.md#give-a-project-its-memory) lists its options.
+
 **Had a `~/.claude/settings.json` before?** Claude Code loads the memory only once Vepol's session hooks are in it. The installer offers to add them, and you can check and add them any time:
 
 ```bash
@@ -183,7 +185,7 @@ kb-claude-hooks --check    # exit 0: all three hooks are there; 1: names the mis
 kb-claude-hooks --apply    # backs up settings.json, then adds only the missing hooks
 ```
 
-To remove Vepol, run `./uninstall.sh` in `~/vepol` (`--dry-run` lists what it would remove first). It keeps your `~/knowledge`.
+To remove Vepol, run `./uninstall.sh` in `~/vepol` (`--dry-run` lists what it would remove first). It keeps your `~/knowledge`. It also leaves the `PATH` line you added to `~/.zshrc` and the Python packages; remove them yourself if you no longer want them.
 
 ### Get the brief in Telegram
 

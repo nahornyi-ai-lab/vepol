@@ -2915,7 +2915,7 @@ def _ih_check_python_packages(env_path: str | None = None) -> list[Finding]:
         "install-health:python-packages-missing", "hub", "python3", python3, "P1",
         f"Python packages missing for {python3}: {', '.join(missing)} — kb-idea, kb-contact"
         f" and the people tools cannot start. Run: python3 -m pip install --user -r {req}"
-        f" (Homebrew Python: python3 -m pip install --break-system-packages -r {req})",
+        f" (Homebrew Python: python3 -m pip install --user --break-system-packages -r {req})",
         evidence=f"python3={python3} missing={','.join(missing)}",
     )]
 
