@@ -484,8 +484,9 @@ def f_install_health_optional_feature_opt_out():
 
 
 def f_install_health_codex_optional():
-    """Codex is optional at install time; only a configured-then-lost Codex is P1."""
-    print("install-health codex optional: never-configured → info; configured-but-missing → P1")
+    """Codex is optional at install time; only a configured-then-lost Codex CLI is P1."""
+    print("install-health codex optional: never-configured or desktop-app-only → info; "
+          "recorded CLI run then missing → P1")
 
     doctor_path = pathlib.Path(__file__).resolve().parents[2] / "bin" / "kb-doctor"
     loader = importlib.machinery.SourceFileLoader("kb_doctor_under_test_codex", str(doctor_path))
@@ -511,6 +512,9 @@ def f_install_health_codex_optional():
     empty_bin.mkdir()
     os.environ["PATH"] = str(empty_bin)
     kb_codex.SYSTEM_CANDIDATES = ()
+    # Desktop-app launchers under /Applications must not add findings either.
+    saved_alt_paths = os.environ.get("KB_DOCTOR_CODEX_ALT_PATHS")
+    os.environ["KB_DOCTOR_CODEX_ALT_PATHS"] = str(sb / "no-alt-codex")
     try:
         findings = mod._ih_check_codex_currency(home=home)
         ids = "\n".join(f.id for f in findings)
@@ -518,13 +522,32 @@ def f_install_health_codex_optional():
         assert_(not any(f.severity in {"P0", "P1"} for f in findings),
                 "never-configured Codex produces no P0/P1")
 
+        # A ChatGPT or Codex desktop app creates ~/.codex without installing
+        # the CLI; that alone is not a configured Codex.
         (home / ".codex").mkdir()
+        findings = mod._ih_check_codex_currency(home=home)
+        ids = "\n".join(f.id for f in findings)
+        assert_("codex-optional-absent" in ids, "desktop-app-only ~/.codex is reported as optional-absent")
+        assert_("codex-missing" not in ids and not any(f.severity in {"P0", "P1"} for f in findings),
+                "desktop-app-only ~/.codex produces no P1 codex-missing")
+
+        # The broker recorded a successful Codex CLI run on this hub: the CLI
+        # was set up, so its loss stays P1.
+        orch = home / "knowledge" / ".orchestrator"
+        orch.mkdir(parents=True)
+        (orch / "state.json").write_text(json.dumps(
+            {"providers": {"codex": {"last_success_at": "2026-11-01T08:00:00Z"}}, "sessions": {}}),
+            encoding="utf-8")
         findings = mod._ih_check_codex_currency(home=home)
         ids = "\n".join(f.id for f in findings)
         assert_("codex-missing" in ids, "configured-but-missing Codex is still reported")
         assert_(any(f.severity == "P1" for f in findings), "configured-but-missing Codex stays P1")
     finally:
         kb_codex.SYSTEM_CANDIDATES = saved_candidates
+        if saved_alt_paths is None:
+            os.environ.pop("KB_DOCTOR_CODEX_ALT_PATHS", None)
+        else:
+            os.environ["KB_DOCTOR_CODEX_ALT_PATHS"] = saved_alt_paths
         if saved_path is None:
             os.environ.pop("PATH", None)
         else:
@@ -745,7 +768,7 @@ def f_install_health_settings_hook_fix_hint():
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _PIP_USER = "python3 -m pip install --user -r "
-_PIP_BREW = "python3 -m pip install --break-system-packages -r "
+_PIP_BREW = "python3 -m pip install --user --break-system-packages -r "
 
 
 def _load_doctor(name):

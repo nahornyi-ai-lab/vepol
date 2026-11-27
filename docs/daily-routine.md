@@ -611,7 +611,7 @@ person stays in the review queue until you tap. Sources you can switch on:
 |---|---|---|
 | `people-extract` | proposals from your project logs, from new mail senders once mail works, and from what `telegram-people` collected | run `kb-extract-people --hub ~/knowledge --init-watermarks` once |
 | `calendar` | proposals from meeting attendees; a known email only gets a dated "seen" note | connect Google Calendar in Claude Code |
-| `telegram-people` | who wrote to you in private Telegram chats: names, usernames and message counts (plus a phone number when Telegram shows one), never message text. It only collects; `people-extract` turns this into proposals, so switch both on. | install Telethon (`python3 -m pip install --user 'telethon>=1.36,<2.0'`; with Homebrew's Python, `--break-system-packages` in place of `--user`), put `TG_API_ID` and `TG_API_HASH` (from my.telegram.org) in `~/.orchestrator/multibot.env`, then run `kb-telegram-people --hub ~/knowledge --login` once |
+| `telegram-people` | who wrote to you in private Telegram chats: names, usernames and message counts (plus a phone number when Telegram shows one), never message text. It only collects; `people-extract` turns this into proposals, so switch both on. | install Telethon (`python3 -m pip install --user 'telethon>=1.36,<2.0'`; with Homebrew's Python, add `--break-system-packages` after `--user`), put `TG_API_ID` and `TG_API_HASH` (from my.telegram.org) in `~/.orchestrator/multibot.env`, then run `kb-telegram-people --hub ~/knowledge --login` once |
 
 ## Time zone and location
 

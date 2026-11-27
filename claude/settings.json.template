@@ -2,8 +2,8 @@
   "permissions": {
     "allow": [
       "Read(~/knowledge/**)",
-      "Bash(~/knowledge/bin/*:*)",
-      "Bash(__HOME__/knowledge/bin/*:*)"
+      "Bash(~/knowledge/bin/*)",
+      "Bash(__HOME__/knowledge/bin/*)"
     ],
     "defaultMode": "default"
   },

@@ -141,7 +141,7 @@ If pip stops with `externally-managed-environment` (Homebrew's Python does this)
 instead:
 
 ```bash
-python3 -m pip install --break-system-packages -r requirements.txt
+python3 -m pip install --user --break-system-packages -r requirements.txt
 ```
 
 Vepol's commands run the first `python3` on your `PATH`, and scheduled tasks look in

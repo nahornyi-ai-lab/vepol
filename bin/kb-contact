@@ -42,7 +42,7 @@ def _exit_if_package_missing(exc: ImportError) -> None:
     req_s = shlex.quote(str(req)) if req.is_file() else "~/vepol/requirements.txt"
     sys.exit(f"kb-contact: Python package {_PY_PACKAGES[exc.name]} is missing for {sys.executable}."
              f" Run: python3 -m pip install --user -r {req_s}"
-             f" (Homebrew Python: python3 -m pip install --break-system-packages -r {req_s})")
+             f" (Homebrew Python: python3 -m pip install --user --break-system-packages -r {req_s})")
 
 
 try:

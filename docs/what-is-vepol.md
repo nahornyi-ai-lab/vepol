@@ -373,8 +373,7 @@ More in [Security and privacy](security-and-privacy.md).
   brief's one suggestion, lifting daily notes into their own pages, and Pro
   modules.
 
-A few of these are newer than the latest tagged release; the
-[changelog](../CHANGELOG.md) lists them under Unreleased. For setup, see
+The [changelog](../CHANGELOG.md) lists what each release added. For setup, see
 [Getting started](getting-started.md) and [Features](features.md).
 
 ## Who this is for

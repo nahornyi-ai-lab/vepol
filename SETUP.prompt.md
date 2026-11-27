@@ -77,7 +77,7 @@ Rules:
                       running claude once.
    - Python packages: python3 -m pip install --user -r ~/vepol/requirements.txt
      If pip says "externally-managed-environment", instead:
-                      python3 -m pip install --break-system-packages -r ~/vepol/requirements.txt
+                      python3 -m pip install --user --break-system-packages -r ~/vepol/requirements.txt
    - Codex CLI (optional; second opinions, mail reading, and the first choice
      for the morning brief and evening retro, which fall back to Claude Code):
                       npm i -g @openai/codex   or   brew install --cask codex
@@ -117,8 +117,13 @@ Rules:
    Exit 0: done. Exit 11: everything is installed except the local Qwen voice;
    read me the warning and the retry command. Any other non-zero code: the
    install stopped; read me the last lines of its output.
-   On a re-run, pass the same extras again: one you leave out is recorded as
-   declined (nothing is removed).
+   On a re-run you need not pass the extras again: scheduled tasks and
+   session capture that are already installed are kept, and session hooks
+   already in settings.json stay. An extra that is not installed and is left
+   out is recorded as declined (nothing is removed). The Telegram scaffold's
+   files stay, but the receipt shows it off unless you pass its variable again.
+   VEPOL_ENABLE_LAUNCHD=0 or VEPOL_ENABLE_MEMORY_COMPILER=0 records that extra
+   as declined even when it is installed.
 
 6. If the probe said "needs_security_migration": true, explain it:
    ~/.claude/settings.json holds bypass-permission keys, so an injected prompt

@@ -3,7 +3,7 @@
 # Installed once per user into the python3 on your PATH, with the pip line
 # under "After install" in README.md:
 #   python3 -m pip install --user -r requirements.txt
-# (Homebrew's Python: --break-system-packages in place of --user.) The kb-*
+# (Homebrew's Python: add --break-system-packages after --user.) The kb-*
 # commands run that python3, so a separate venv is not seen. Used by Vepol
 # modules that need Python beyond the standard library.
 #

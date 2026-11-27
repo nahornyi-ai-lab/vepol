@@ -18,8 +18,7 @@ is the reference.
 Commands assume `~/knowledge/bin` is on your `PATH`
 (`export PATH="$HOME/knowledge/bin:$PATH"`) and that you installed the Python
 packages from `requirements.txt` ([Getting started](getting-started.md)). This
-page describes the `main` branch, which a fresh clone gives you. Features marked
-*new on `main`* are not in a tagged release yet (the latest is 1.1.1).
+page describes the `main` branch, which a fresh clone gives you.
 
 ## Contents
 
@@ -111,7 +110,7 @@ told it can set one up with `/init-kb`, but only when you ask.
 - **Turn on:** the installer adds the Claude Code hooks when it creates
   `~/.claude/settings.json`. If you already had that file, the installer offers
   to add them (for `./install.sh --apply`, set `VEPOL_MERGE_HOOKS=1`). You can
-  also run `~/knowledge/bin/kb-claude-hooks --apply` (*new on `main`*): it
+  also run `~/knowledge/bin/kb-claude-hooks --apply`: it
   keeps a dated backup, adds only the missing hooks and keeps every other
   setting. `~/knowledge/bin/kb-claude-hooks --check` tells you whether they
   are there.
@@ -124,7 +123,7 @@ After each Claude Code session in a project, a model writes the session's
 decisions, lessons and action items to `knowledge/daily/YYYY-MM-DD.md` and adds
 one dated line to `log.md`. Token-shaped secrets are redacted. A summary that
 fails is kept and retried at a later session end, and the next session start
-tells you how many are waiting (*new on `main`*).
+tells you how many are waiting.
 
 - **Status:** turn on at install. Answer yes to *Install claude-memory-compiler
   for automatic session capture?*, or run
@@ -309,7 +308,7 @@ or go to bed earlier), and the suggestion also lands in the day plan. Late or
 missing data gets one honest line instead. Old numbers are never passed off as
 today's. Garmin is the worked example: its numbers map field by field.
 
-- **Status:** needs your account or source. *New on `main`.*
+- **Status:** needs your account or source.
 - **Turn on:** add `KB_HEALTH_METRICS=<folder>` to
   `~/knowledge/personal/.secrets`. The folder holds
   `morning/<YYYY-MM-DD>.json` in the `health-morning/v1` format. Two more
@@ -578,7 +577,7 @@ one window and runs your agents inside it.
   is next, the last decision, the last activity and whether `state.md` is up to
   date or needs review.
 - **Today.** The Today card shows your saved day plan, and **Plan my day**
-  starts the planning dialog ([details](#daily-plan)). *New on `main`.*
+  starts the planning dialog ([details](#daily-plan)).
 - **Project screen.** One click on a project shows its state, its sessions, its
   task board, decisions, history, lessons and files.
 - **Your agents in real terminals.** Claude Code, Codex, Antigravity (`agy`),
@@ -594,7 +593,7 @@ one window and runs your agents inside it.
   Research, Working, Review, Done), with drag and drop, search and a project
   filter. Cards show the agent's own session title and last message.
 - **Tasks.** Every project's tasks in one table with search. Start an agent on a
-  task, or close a task you no longer need, with Undo (*new on `main`*). Every
+  task, or close a task you no longer need, with Undo. Every
   change goes through `kb-board`.
 - **Automations.** Every routine in `processes.yaml` with today's state and the
   reason, the last and next run, 14 days of history and the end of its output.
@@ -867,7 +866,7 @@ under `~/knowledge/.orchestrator/consolidate/`. At 07:00 `kb-child-rollup`
 copies each sub-project's snapshot and latest log headlines into its parent's
 `state.md`, with no model involved.
 
-- **Status:** turn on at install. *New on `main`.*
+- **Status:** turn on at install.
 - **Turn on:** the refresh covers the projects listed in
   `~/knowledge/hierarchy.yaml`, which a fresh hub does not have yet. Create it
   once:
@@ -886,6 +885,9 @@ copies each sub-project's snapshot and latest log headlines into its parent's
   `bootstrap --force` rebuilds it (keeping a `.bak-<date>-<time>` copy) but
   cannot read back a generated `registry.md`, so check every category, status
   and description afterwards.
+  A `processes.yaml` written before 1.2.0 has no `consolidate` and
+  `child-rollup` blocks, and upgrades never rewrite that file; add the two
+  blocks from the [1.2.0 release notes](releases/v1.2.0.md#if-you-already-use-vepol).
 - **Needs:** a signed-in Claude Code.
 
 ## Experimental

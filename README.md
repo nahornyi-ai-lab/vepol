@@ -12,9 +12,7 @@ It remembers every project, plans your day and runs your daily routine through t
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg" alt="License: FSL-1.1-MIT"></a>
   <a href="https://github.com/nahornyi-ai-lab/vepol/releases/latest"><img src="https://img.shields.io/github/v/release/nahornyi-ai-lab/vepol" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-lightgrey.svg" alt="macOS 13+">
-  <!-- Tests badge: uncomment once .github/workflows/tests.yml has run on main.
   <a href="https://github.com/nahornyi-ai-lab/vepol/actions/workflows/tests.yml"><img src="https://github.com/nahornyi-ai-lab/vepol/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"></a>
-  -->
 </p>
 
 You already work with Claude Code or Codex. Each new session starts without knowing where your project stands, last week's decisions sit in old chats, and nothing happens until you type a prompt. Vepol fixes all three.
@@ -44,8 +42,8 @@ Each item ends with what it takes. *Turn on at install* means answering yes to *
 Once scheduled tasks are on and your Telegram bot is set up ([how](#get-the-brief-in-telegram)), the brief, the retro and the digests arrive on their own, in your language.
 
 - **A morning brief.** A one-minute read on your phone: the focus of the day, a timed plan around today's meetings, one to three actions with a clear "done when", every new email in one line with whether it needs a reply (up to 25 threads a check), ready ideas, what changed, risks and the decisions only you can make. Vepol only reads your mail; it never drafts, sends, labels or deletes anything. *Turn on at install. Meetings need Google Calendar in Claude Code; mail needs Codex with its Gmail plugin.*
-- **How you slept.** If your own sync writes a small JSON file each morning (a Garmin sync works this way), the brief opens with last night's sleep, HRV against your baseline, resting pulse and energy at wake, and one suggestion: train, rest or go to bed earlier. Vepol reads the file, not the watch. *Needs your own source ([how](docs/health-in-the-brief.md)). New on `main`.*
-- **Plan my day.** In Vepol Desktop, **Plan my day** opens the agent you pick on today's brief, your goals and your calendar. You shape the plan in plain words, and each change is saved as a new version. Only when you ask does it write the agreed blocks to Google Calendar; a clash stops the write, and it reads the calendar back to report what is there. *In Vepol Desktop; the calendar step needs Google Calendar in Claude Code. New on `main`.*
+- **How you slept.** If your own sync writes a small JSON file each morning (a Garmin sync works this way), the brief opens with last night's sleep, HRV against your baseline, resting pulse and energy at wake, and one suggestion: train, rest or go to bed earlier. Vepol reads the file, not the watch. *Needs your own source ([how](docs/health-in-the-brief.md)).*
+- **Plan my day.** In Vepol Desktop, **Plan my day** opens the agent you pick on today's brief, your goals and your calendar. You shape the plan in plain words, and each change is saved as a new version. Only when you ask does it write the agreed blocks to Google Calendar; a clash stops the write, and it reads the calendar back to report what is there. *In Vepol Desktop; the calendar step needs Google Calendar in Claude Code.*
 - **An evening retro.** What actually closed today (from your logs, not the plan), what is waiting, which emails still need a reply, how the day matched the morning plan, and one question before sleep. The brief and the retro share one file per day in `~/knowledge/briefs/`. *Turn on at install.*
 - **Audio digests.** Each morning Vepol joins the brief, the arXiv review and Money Radar (when it is on) into one text without rewriting it; each evening, the retro. NotebookLM turns it into an Audio Overview in your account, or a local Qwen voice reads it on your Mac and sends the MP3 to Telegram. *Turn on at install. Needs `notebooklm login`, or the local voice (Apple Silicon, `uv`, `ffmpeg`, about 10 GiB free).*
 
@@ -148,11 +146,11 @@ cd ~/vepol
 ./install.sh
 ```
 
-The installer creates the hub at `~/knowledge`, links the `kb-*` commands into `~/knowledge/bin`, installs three Claude Code skills (`/init-kb` among them) and adds a short managed block to `~/.claude/CLAUDE.md`, keeping your own text. It creates `~/.claude/settings.json` only if you have none. Every optional part is a question that defaults to no. Say yes to **Install scheduled tasks?** for the daily routine.
+The installer creates the hub at `~/knowledge`, links the `kb-*` commands into `~/knowledge/bin`, installs three Claude Code skills (`/init-kb` among them) and adds a short managed block to `~/.claude/CLAUDE.md`, keeping your own text. It creates `~/.claude/settings.json` only if you have none. Every optional part is a question that defaults to no. Say yes to **Install scheduled tasks?** for the daily routine. If the session capture step says `uv sync failed`, it prints uv's error and the command to retry: `cd ~/claude-memory-compiler && uv sync`.
 
 ### After install
 
-The installer does not change your `PATH`. Add Vepol's commands, install the Python packages, then check the install and try it:
+The installer does not change your `PATH`. Add Vepol's commands, install the Python packages, then check the install and try it. `kb-demo brief` asks a model, so sign in to an agent before it if you have not yet: `claude auth login`, or `codex login` for Codex.
 
 ```bash
 export PATH="$HOME/knowledge/bin:$PATH"                     # this terminal
@@ -165,7 +163,7 @@ kb-search "first task"     # finds it again
 kb-demo brief              # a sample brief from an invented hub; calls a model, sends nothing
 ```
 
-If pip answers `externally-managed-environment` (Homebrew's Python does), run `python3 -m pip install --break-system-packages -r ~/vepol/requirements.txt` instead. The `kb-*` commands use the `python3` on your `PATH`, so packages in a separate virtual environment are not seen.
+If pip answers `externally-managed-environment` (Homebrew's Python does), run `python3 -m pip install --user --break-system-packages -r ~/vepol/requirements.txt` instead. The `kb-*` commands use the `python3` on your `PATH`, so packages in a separate virtual environment are not seen.
 
 For the default NotebookLM audio, install its command with `pipx install notebooklm-py && notebooklm login` (`pipx` comes from `brew install pipx`; run `pipx ensurepath` once and open a new terminal). pipx puts `notebooklm` in `~/.local/bin`, where scheduled routines look for it; a `pip --user` install can put it in a folder they never search.
 
@@ -178,6 +176,8 @@ claude          # then type /init-kb at the prompt
 
 Claude looks at the project, proposes a name, a category and a description, and asks before writing anything. Then it creates `knowledge/` and links it into `~/knowledge`. In Vepol Desktop, **Add project…** in the New session dialog does the same in one step, without the questions.
 
+From the terminal, or with Codex, run `new-wiki path/to/your-project`. It does the same without the questions and takes the name from the folder; [Getting started](docs/getting-started.md#give-a-project-its-memory) lists its options.
+
 **Had a `~/.claude/settings.json` before?** Claude Code loads the memory only once Vepol's session hooks are in it. The installer offers to add them, and you can check and add them any time:
 
 ```bash
@@ -185,7 +185,7 @@ kb-claude-hooks --check    # exit 0: all three hooks are there; 1: names the mis
 kb-claude-hooks --apply    # backs up settings.json, then adds only the missing hooks
 ```
 
-To remove Vepol, run `./uninstall.sh` in `~/vepol` (`--dry-run` lists what it would remove first). It keeps your `~/knowledge`.
+To remove Vepol, run `./uninstall.sh` in `~/vepol` (`--dry-run` lists what it would remove first). It keeps your `~/knowledge`. It also leaves the `PATH` line you added to `~/.zshrc` and the Python packages; remove them yourself if you no longer want them.
 
 ### Get the brief in Telegram
 
@@ -225,7 +225,7 @@ To look around first, run `./demo.sh` from `face/` after the build. It opens the
 
 ## Status
 
-**Vepol 1.1.1** is the latest release. A fresh clone gives you `main`, which is ahead of it: Plan my day, sleep and health in the brief, the nightly `state.md` refresh and closing tasks in Vepol Desktop arrive with the next release. See "Unreleased" in the [changelog](CHANGELOG.md).
+**Vepol 1.2.0** (2026-11-27) is the latest release. A fresh clone gives you `main`, the branch new work lands on. Right after a release, `main` holds the same code as that release; it moves ahead only when new work lands, and the [changelog](CHANGELOG.md) notes every change. What 1.2.0 brings and what changes for an existing install: [release notes](docs/releases/v1.2.0.md).
 
 - **Updating.** `./upgrade.sh` follows release tags: it moves you to the newest release and re-runs the installer, keeping the extras you already have. If you track `main` instead, update with `git pull` and re-run `./install.sh`.
 - **Stable core.** The knowledge folder layout, the `kb-board` task board (its file format and commands) and install and upgrade change incompatibly only in a new major version. Other `kb-*` commands and the `processes.yaml` settings may change within 1.x, and the changelog notes every such change.

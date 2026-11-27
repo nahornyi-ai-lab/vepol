@@ -91,7 +91,7 @@ curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_
 Python packages are checked, not installed. If the install warns about them, show
 `python3 -m pip install --user -r requirements.txt`; if pip answers
 `externally-managed-environment` (Homebrew's Python), show
-`python3 -m pip install --break-system-packages -r requirements.txt` instead.
+`python3 -m pip install --user --break-system-packages -r requirements.txt` instead.
 
 ### 4. Preview, then install
 
