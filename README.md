@@ -12,9 +12,7 @@ It remembers every project, plans your day and runs your daily routine through t
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-FSL--1.1--MIT-blue.svg" alt="License: FSL-1.1-MIT"></a>
   <a href="https://github.com/nahornyi-ai-lab/vepol/releases/latest"><img src="https://img.shields.io/github/v/release/nahornyi-ai-lab/vepol" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-lightgrey.svg" alt="macOS 13+">
-  <!-- Tests badge: uncomment once .github/workflows/tests.yml has run on main.
   <a href="https://github.com/nahornyi-ai-lab/vepol/actions/workflows/tests.yml"><img src="https://github.com/nahornyi-ai-lab/vepol/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"></a>
-  -->
 </p>
 
 You already work with Claude Code or Codex. Each new session starts without knowing where your project stands, last week's decisions sit in old chats, and nothing happens until you type a prompt. Vepol fixes all three.
@@ -44,8 +42,8 @@ Each item ends with what it takes. *Turn on at install* means answering yes to *
 Once scheduled tasks are on and your Telegram bot is set up ([how](#get-the-brief-in-telegram)), the brief, the retro and the digests arrive on their own, in your language.
 
 - **A morning brief.** A one-minute read on your phone: the focus of the day, a timed plan around today's meetings, one to three actions with a clear "done when", every new email in one line with whether it needs a reply (up to 25 threads a check), ready ideas, what changed, risks and the decisions only you can make. Vepol only reads your mail; it never drafts, sends, labels or deletes anything. *Turn on at install. Meetings need Google Calendar in Claude Code; mail needs Codex with its Gmail plugin.*
-- **How you slept.** If your own sync writes a small JSON file each morning (a Garmin sync works this way), the brief opens with last night's sleep, HRV against your baseline, resting pulse and energy at wake, and one suggestion: train, rest or go to bed earlier. Vepol reads the file, not the watch. *Needs your own source ([how](docs/health-in-the-brief.md)). New on `main`.*
-- **Plan my day.** In Vepol Desktop, **Plan my day** opens the agent you pick on today's brief, your goals and your calendar. You shape the plan in plain words, and each change is saved as a new version. Only when you ask does it write the agreed blocks to Google Calendar; a clash stops the write, and it reads the calendar back to report what is there. *In Vepol Desktop; the calendar step needs Google Calendar in Claude Code. New on `main`.*
+- **How you slept.** If your own sync writes a small JSON file each morning (a Garmin sync works this way), the brief opens with last night's sleep, HRV against your baseline, resting pulse and energy at wake, and one suggestion: train, rest or go to bed earlier. Vepol reads the file, not the watch. *Needs your own source ([how](docs/health-in-the-brief.md)).*
+- **Plan my day.** In Vepol Desktop, **Plan my day** opens the agent you pick on today's brief, your goals and your calendar. You shape the plan in plain words, and each change is saved as a new version. Only when you ask does it write the agreed blocks to Google Calendar; a clash stops the write, and it reads the calendar back to report what is there. *In Vepol Desktop; the calendar step needs Google Calendar in Claude Code.*
 - **An evening retro.** What actually closed today (from your logs, not the plan), what is waiting, which emails still need a reply, how the day matched the morning plan, and one question before sleep. The brief and the retro share one file per day in `~/knowledge/briefs/`. *Turn on at install.*
 - **Audio digests.** Each morning Vepol joins the brief, the arXiv review and Money Radar (when it is on) into one text without rewriting it; each evening, the retro. NotebookLM turns it into an Audio Overview in your account, or a local Qwen voice reads it on your Mac and sends the MP3 to Telegram. *Turn on at install. Needs `notebooklm login`, or the local voice (Apple Silicon, `uv`, `ffmpeg`, about 10 GiB free).*
 
@@ -225,7 +223,7 @@ To look around first, run `./demo.sh` from `face/` after the build. It opens the
 
 ## Status
 
-**Vepol 1.1.1** is the latest release. A fresh clone gives you `main`, which is ahead of it: Plan my day, sleep and health in the brief, the nightly `state.md` refresh and closing tasks in Vepol Desktop arrive with the next release. See "Unreleased" in the [changelog](CHANGELOG.md).
+**Vepol 1.2.0** (2026-11-27) is the latest release. A fresh clone gives you `main`, the branch new work lands on. Right after a release, `main` holds the same code as that release; it moves ahead only when new work lands, and the [changelog](CHANGELOG.md) notes every change. What 1.2.0 brings and what changes for an existing install: [release notes](docs/releases/v1.2.0.md).
 
 - **Updating.** `./upgrade.sh` follows release tags: it moves you to the newest release and re-runs the installer, keeping the extras you already have. If you track `main` instead, update with `git pull` and re-run `./install.sh`.
 - **Stable core.** The knowledge folder layout, the `kb-board` task board (its file format and commands) and install and upgrade change incompatibly only in a new major version. Other `kb-*` commands and the `processes.yaml` settings may change within 1.x, and the changelog notes every such change.

@@ -413,14 +413,34 @@ answers No to all of them. As an agent, prefer `--apply` with the variables
 the user approved.
 
 The installer is safe to re-run. It keeps every file the user owns and never
-removes a LaunchAgent. When you re-run `--apply`, pass the same extras again:
-one you leave out is recorded as declined in the receipt.
+removes a LaunchAgent. When you re-run `--apply` and leave an extra's variable
+unset or empty, what is already installed decides:
+
+- Scheduled tasks: kept, and recorded as on in the receipt, when any
+  `com.knowledge.*.plist` is in `~/Library/LaunchAgents`.
+- Session capture: kept, and recorded as on, when `~/claude-memory-compiler`
+  exists.
+- Session hooks: once they are in `settings.json` they stay there; the
+  installer finds them and changes nothing.
+- Security migration: it runs once. After it the bypass keys are gone and there
+  is nothing left to apply; a deferred migration stays pending until you pass
+  `VEPOL_APPLY_C01=1`.
+- Claude Code Telegram plugin scaffold: its files stay, but the receipt records
+  `telegram=off` unless you pass `VEPOL_ENABLE_TELEGRAM=1` again.
+
+An extra that is not installed and is left out is recorded as declined. Setting
+`VEPOL_ENABLE_LAUNCHD=0` or `VEPOL_ENABLE_MEMORY_COMPILER=0` records that extra
+as declined even when it is installed; it unloads and deletes nothing. The
+interactive `./install.sh` asks its questions again on every run, and a No to
+scheduled tasks or session capture is recorded as declined.
 
 To move to a newer release later: `./upgrade.sh` checks out the newest release
 tag (not the tip of `main`, which can be ahead of it), re-runs
-`install.sh --apply` and `--verify`, and passes `VEPOL_ENABLE_*`,
-`VEPOL_APPLY_C01` and `VEPOL_MERGE_HOOKS` through, so give it the same extras
-as the install. `./upgrade.sh --check` only reports.
+`install.sh --apply` and `--verify`. It runs `--apply` without extras of its
+own, so the rules above apply: the user's installed extras stay. The
+`VEPOL_ENABLE_*`, `VEPOL_APPLY_C01` and `VEPOL_MERGE_HOOKS` variables you set
+reach the installer, so set one only to turn on something new, for example
+`VEPOL_ENABLE_LAUNCHD=1 ./upgrade.sh`. `./upgrade.sh --check` only reports.
 
 To undo an install: `./uninstall.sh --dry-run` lists what it would remove, and
 `./uninstall.sh --yes` removes it without a prompt (run it only with the
@@ -509,12 +529,15 @@ Fix P0 and P1 findings before you call the install done. The common ones:
   command.
 - **`memory-compiler-missing` (P1).** Session capture was accepted but the
   clone failed. Retry as § 1.5 says. If the user no longer wants it, re-run
-  `--apply` without `VEPOL_ENABLE_MEMORY_COMPILER`, which records it as
+  `--apply` with `VEPOL_ENABLE_MEMORY_COMPILER=0`, which records it as
   declined.
 - **`launchagent-not-loaded` (P1).** Load it as § 1.5 says.
-- **`codex-missing` (P1).** Codex was set up once (`~/.codex` exists or
-  `KB_CODEX_BIN` is set) but the binary is gone. Reinstall it, or clear the
-  stale setting with the user.
+- **`codex-missing` (P1).** The Codex CLI was set up on this hub but is now
+  gone: `KB_CODEX_BIN` is set, or `kb-orchestrator-run` once ran Codex
+  successfully here (recorded in `~/knowledge/.orchestrator/state.json`).
+  Reinstall it, or clear the stale setting with the user. A `~/.codex` folder
+  alone does not count, since the ChatGPT and Codex desktop apps create it;
+  without the CLI that is the info line `codex-optional-absent`.
 
 ### 1.7 Run the first-five-minutes proof
 

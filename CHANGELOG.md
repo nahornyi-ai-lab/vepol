@@ -26,10 +26,13 @@ this one.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-27
+
 Vepol now talks to you in your language, and its repository is English-first.
 A fresh install runs its daily routine without hand fixes, and a new install
 grants Claude Code only what Vepol needs. Some `kb-*` commands change an exit
 code or a default; each such change is called out below.
+([v1.2.0](docs/releases/v1.2.0.md))
 
 ### Added
 - **Plan my day, in Vepol Desktop.** The Memory view opens with a Today card:
@@ -52,6 +55,25 @@ code or a default; each such change is called out below.
   has nothing to do: run `kb-rebuild-registry bootstrap`, then
   `kb-rebuild-registry apply`, once. `kb-child-rollup` ships with it (a daily
   child-to-parent summary at 07:00, idle until `hierarchy.yaml` names parents).
+  Both are in the default `processes.yaml` only. Install writes that file only
+  when it is missing and upgrades never rewrite it, so after an upgrade
+  neither runs until you add both blocks to
+  `~/knowledge/personal/processes.yaml`, for example above the `mail-morning`
+  block:
+
+  ```yaml
+  - id: consolidate
+    enabled: true
+    when: "06:30"
+    run: kb-consolidate
+    outputs: [file]
+
+  - id: child-rollup
+    enabled: true
+    when: "07:00"
+    run: kb-child-rollup
+    outputs: [file]
+  ```
 - **Close a task from Vepol Desktop.** Every Backlog, Ready or Blocked task in
   the Tasks view has a Close button with an optional reason and an Undo.
   `kb-board` gains `cancel` and `reopen`, and `list --json` rows carry each
@@ -292,6 +314,14 @@ code or a default; each such change is called out below.
   "exhausted"; `brief.log` keeps the raw error.
 
 ### Fixed
+- **No Codex warning for a desktop app alone.** `kb-doctor install-health`
+  raised the P1 `codex-missing` on a Mac where `~/.codex` existed but no
+  Codex CLI was installed. The ChatGPT and Codex desktop apps create that
+  folder, so a fresh install ended with "kb-doctor reported issues". Now the
+  P1 needs `KB_CODEX_BIN` to be set, or a successful Codex run recorded by
+  `kb-orchestrator-run` on this hub (`providers.codex.last_success_at` in
+  `~/knowledge/.orchestrator/state.json`). Otherwise a missing Codex CLI is
+  the info line `codex-optional-absent`.
 - **The installer's health report starts at the top.** `install.sh` showed only
   the last 15 lines of `kb-doctor install-health`, so with a few findings the
   summary line (`P0=… P1=…`), the `## P0` heading and the first finding were cut
@@ -532,9 +562,11 @@ code or a default; each such change is called out below.
   in the job's folders, and Bash may run any command, in any folder. In 1.1.1
   these runs passed no permission flags and used only your own Claude Code
   settings. The Codex lane is unchanged and runs with approvals and the
-  sandbox off for every job. Vepol Desktop does not pass the flag yet, so in a
-  one-shot session (one from an earlier version, or the legacy `./run.sh`
-  page) Claude cannot edit files or run commands through Vepol's runner.
+  sandbox off for every job. Vepol Desktop passes the flag on every one-shot
+  run (a session from an earlier version, or the legacy `./run.sh` page), so
+  Claude there can still edit files and run commands. When the runner fails
+  without an answer and Desktop retries Claude directly, that retry passes no
+  permission flags and follows your own Claude Code settings.
 
 ## [1.1.1] — 2026-10-05
 
@@ -1240,7 +1272,8 @@ v0.3.0 converts on **2028-06-20**, v0.3.1 converts on
 **2028-06-22**, and v0.4.0 converts on **2028-07-02**. See `LICENSE` and
 `COMMERCIAL.md` for the authoritative wording and common scenarios.
 
-[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nahornyi-ai-lab/vepol/compare/v0.8.1...v1.0.0
